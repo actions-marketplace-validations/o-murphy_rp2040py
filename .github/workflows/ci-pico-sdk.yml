@@ -35,7 +35,7 @@ jobs:
           - cpython-3.10
           - cpython-3.14
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7.0.1
 
       - name: Cache Pico SDK
         id: cache-pico-sdk

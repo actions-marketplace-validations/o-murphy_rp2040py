@@ -60,12 +60,12 @@ jobs:
       SETUPTOOLS_SCM_OVERRIDES: ${{ (github.event_name == 'push' || inputs.testpypi) && '{local_scheme = "no-local-version"}' || '' }}
 
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7.0.1
         with:
           fetch-depth: 0 # required for setuptools-scm to see tags
 
       - name: Install uv
-        uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
         with:
           python-version: "3.10"
           github-token: ${{ github.token }}
@@ -143,7 +143,7 @@ jobs:
     runs-on: ${{ matrix.os }}
 
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7.0.1
         with:
           fetch-depth: 0 # required for setuptools-scm to see tags
 
@@ -154,7 +154,7 @@ jobs:
           platforms: all
 
       - name: Install uv
-        uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
         with:
           github-token: ${{ github.token }}
 
@@ -201,7 +201,7 @@ jobs:
       id-token: write
 
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7.0.1
         with:
           # github.ref_name is the bare tag name on a push (correct), but on pull_request it's
           # the short "<PR>/merge" form (not a fetchable ref on its own - actions/checkout would

@@ -23,6 +23,7 @@ from test_cyw43_bus import (
     _send_wlan_frame,
     _wire_up_with_bus,
 )
+from utils.emscripten import needs_sockets
 
 from rp2040py.external.cyw43 import net
 from rp2040py.external.cyw43.bus import (
@@ -294,6 +295,7 @@ async def _echo_server(reader: "asyncio.StreamReader", writer: "asyncio.StreamWr
         writer.close()
 
 
+@needs_sockets
 def test_tcp_reflector_full_round_trip_against_a_hermetic_echo_server(rp2040_factory):
     async def _body() -> None:
         simulator = Simulator(rp2040=rp2040_factory())
@@ -413,6 +415,7 @@ def test_tcp_reflector_full_round_trip_against_a_hermetic_echo_server(rp2040_fac
     _run(_body())
 
 
+@needs_sockets
 def test_tcp_reflector_sends_rst_on_a_refused_connection(rp2040_factory):
     async def _body() -> None:
         simulator = Simulator(rp2040=rp2040_factory())
@@ -452,6 +455,7 @@ def test_tcp_reflector_sends_rst_on_a_refused_connection(rp2040_factory):
     _run(_body())
 
 
+@needs_sockets
 def test_tcp_reflector_evicts_the_flow_on_guest_rst(rp2040_factory):
     async def _body() -> None:
         simulator = Simulator(rp2040=rp2040_factory())
@@ -503,6 +507,7 @@ def test_tcp_reflector_evicts_the_flow_on_guest_rst(rp2040_factory):
     _run(_body())
 
 
+@needs_sockets
 def test_reset_clears_flows_so_a_reused_port_can_connect_again(rp2040_factory):
     """The stale-flow collision `TcpReflector.reset()` exists for (0054).
 
@@ -605,6 +610,7 @@ async def _connect_with_immediate_reset(host: str, port: int) -> "tuple[_Immedia
     return _ImmediatelyResetReader(), _NoOpWriter()
 
 
+@needs_sockets
 def test_tcp_reflector_propagates_a_real_reset_as_rst_not_a_clean_fin(rp2040_factory):
     async def _body() -> None:
         simulator = Simulator(rp2040=rp2040_factory())
@@ -657,6 +663,7 @@ async def _never_connects(host: str, port: int) -> "tuple[asyncio.StreamReader, 
     raise AssertionError("unreachable")
 
 
+@needs_sockets
 def test_tcp_reflector_times_out_a_connect_that_never_resolves(rp2040_factory):
     async def _body() -> None:
         simulator = Simulator(rp2040=rp2040_factory())
@@ -727,6 +734,7 @@ def _reserve_a_free_udp_port() -> int:
     return port
 
 
+@needs_sockets
 def test_udp_relay_forwards_a_dns_query_and_relays_the_response_back(rp2040_factory):
     async def _body() -> None:
         simulator = Simulator(rp2040=rp2040_factory())
@@ -776,6 +784,7 @@ def test_udp_relay_forwards_a_dns_query_and_relays_the_response_back(rp2040_fact
     _run(_body())
 
 
+@needs_sockets
 def test_udp_relay_forwards_general_udp_directly_to_its_own_real_destination(rp2040_factory):
     """4e's own generalization: a UDP packet NOT addressed to the gateway's DNS port (e.g. NTP,
     port 123, the way `ntptime` uses it) is relayed straight to whatever real destination the
@@ -827,6 +836,7 @@ def test_udp_relay_forwards_general_udp_directly_to_its_own_real_destination(rp2
     _run(_body())
 
 
+@needs_sockets
 def test_udp_relay_stays_silent_on_no_response(rp2040_factory):
     async def _body() -> None:
         simulator = Simulator(rp2040=rp2040_factory())
@@ -856,6 +866,7 @@ def test_udp_relay_stays_silent_on_no_response(rp2040_factory):
     _run(_body())
 
 
+@needs_sockets
 def test_dhcp_still_takes_priority_over_the_general_udp_relay(rp2040_factory):
     """DHCP (port 67) must be handled by `DhcpServer`, not fall through to `UdpRelay` - a DHCP
     packet is broadcast to 255.255.255.255, which isn't the gateway's own IP, so without this
@@ -882,3 +893,114 @@ def test_dhcp_still_takes_priority_over_the_general_udp_relay(rp2040_factory):
     assert reply_dhcp is not None
     assert reply_dhcp.options[53] == bytes([net.DHCP_MSG_OFFER])  # DhcpServer answered, not UdpRelay
     assert bus.nat_bridge._udp is not None  # sanity: the relay exists and simply wasn't the one used
+
+
+# -- real-world waits tell the Simulator not to outrun the wall clock (record 0096, the CYW43 pacing fix) ------------------------
+
+
+class _DelayedUdpServer(asyncio.DatagramProtocol):
+    """Answers every datagram after `delay` seconds (or never, if `delay` is None) - a real resolver's round trip, on loopback."""
+
+    def __init__(self, delay: "float | None") -> None:
+        self._delay = delay
+        self._transport: asyncio.DatagramTransport | None = None
+
+    def connection_made(self, transport: "asyncio.DatagramTransport") -> None:  # type: ignore[override]
+        self._transport = transport
+
+    def datagram_received(self, data: bytes, addr: "tuple[str, int]") -> None:
+        if self._delay is not None:
+            asyncio.get_running_loop().call_later(self._delay, self._transport.sendto, data, addr)  # type: ignore[union-attr]
+
+
+def _dns_query_frame() -> bytes:
+    udp_query = net.pack_udp(GUEST_IP, GATEWAY_IP, 33334, 53, b"opaque query")
+    ip_query = net.pack_ipv4(GUEST_IP, GATEWAY_IP, net.IP_PROTO_UDP, udp_query)
+    return net.pack_ethernet(GATEWAY_MAC, _GUEST_MAC, net.ETHERTYPE_IPV4, ip_query)
+
+
+@needs_sockets
+def test_a_relayed_udp_query_holds_the_real_io_flag_until_its_reply_arrives(rp2040_factory):
+    async def _body() -> None:
+        simulator = Simulator(rp2040=rp2040_factory())
+        simulator.bind_loop()
+        rp2040 = simulator.rp2040
+        bus = GSPIBus()
+        bus.attach_gpio(rp2040)
+        bus.nat_bridge = NatBridge(rp2040, bus.queue_rx_ethernet_frame)
+        master = _FakeGSPIMaster(rp2040)
+        transport, _ = await asyncio.get_running_loop().create_datagram_endpoint(
+            lambda: _DelayedUdpServer(0.15), local_addr=("127.0.0.1", 0)
+        )
+        bus.nat_bridge._udp = UdpRelay(
+            rp2040, bus.queue_rx_ethernet_frame, dns_upstream=("127.0.0.1", transport.get_extra_info("sockname")[1])
+        )
+
+        assert simulator._real_io_flag[0] == 0
+        _send_wlan_frame(master, _build_data_header_frame(_dns_query_frame()))
+        assert simulator._real_io_flag[0] == 1  # from the moment the guest's datagram is seen...
+        _read_f2_response(master)  # flow-control ack
+        await _wait_for_pending_packet(master)
+        assert simulator._real_io_flag[0] == 0  # ...until the reply has been queued for the guest
+        transport.close()
+
+    _run(_body())
+
+
+@needs_sockets
+def test_an_unanswered_udp_query_releases_the_real_io_flag_when_the_relay_gives_up(rp2040_factory):
+    async def _body() -> None:
+        simulator = Simulator(rp2040=rp2040_factory())
+        simulator.bind_loop()
+        rp2040 = simulator.rp2040
+        bus = GSPIBus()
+        bus.attach_gpio(rp2040)
+        bus.nat_bridge = NatBridge(rp2040, bus.queue_rx_ethernet_frame)
+        master = _FakeGSPIMaster(rp2040)
+        transport, _ = await asyncio.get_running_loop().create_datagram_endpoint(
+            lambda: _DelayedUdpServer(None), local_addr=("127.0.0.1", 0)
+        )
+        bus.nat_bridge._udp = UdpRelay(
+            rp2040,
+            bus.queue_rx_ethernet_frame,
+            dns_upstream=("127.0.0.1", transport.get_extra_info("sockname")[1]),
+            timeout=0.2,
+        )
+
+        _send_wlan_frame(master, _build_data_header_frame(_dns_query_frame()))
+        assert simulator._real_io_flag[0] == 1
+        for _ in range(100):  # the relay's own 0.2 s timeout
+            await asyncio.sleep(0.02)
+            if not simulator._real_io_flag[0]:
+                break
+        assert simulator._real_io_flag[0] == 0 and simulator._real_io_pending == 0
+        transport.close()
+
+    _run(_body())
+
+
+@needs_sockets
+def test_a_tcp_connect_in_flight_holds_the_real_io_flag_until_it_resolves(rp2040_factory):
+    async def _body() -> None:
+        simulator = Simulator(rp2040=rp2040_factory())
+        simulator.bind_loop()
+        rp2040 = simulator.rp2040
+        bus = GSPIBus()
+        bus.attach_gpio(rp2040)
+        bus.nat_bridge = NatBridge(rp2040, bus.queue_rx_ethernet_frame)
+        bus.nat_bridge._tcp = TcpReflector(
+            rp2040, bus.queue_rx_ethernet_frame, connect_timeout=0.3, connect_fn=_never_connects
+        )
+        master = _FakeGSPIMaster(rp2040)
+        dest_ip = bytes([203, 0, 113, 1])  # TEST-NET-3 (RFC 5737), never dialed - see connect_fn
+        syn = net.pack_tcp(GUEST_IP, dest_ip, 54326, 80, seq=7000, ack=0, flags=net.TCP_SYN, window=8192, mss=1460)
+        syn_ip = net.pack_ipv4(GUEST_IP, dest_ip, net.IP_PROTO_TCP, syn)
+        _send_wlan_frame(
+            master, _build_data_header_frame(net.pack_ethernet(GATEWAY_MAC, _GUEST_MAC, net.ETHERTYPE_IPV4, syn_ip))
+        )
+        assert simulator._real_io_flag[0] == 1  # the connect is in flight
+        _read_f2_response(master)
+        await _wait_for_pending_packet(master, timeout=5.0)  # the connect gave up (0.3 s) and the guest got its RST
+        assert simulator._real_io_flag[0] == 0 and simulator._real_io_pending == 0
+
+    _run(_body())

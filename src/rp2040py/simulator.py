@@ -1,6 +1,7 @@
 import asyncio
 import concurrent.futures
 import logging
+import os
 import sys
 import threading
 import time
@@ -22,7 +23,33 @@ _logger = logging.getLogger(__name__)
 # _execute_batch.py's own per-batch wall-clock budget: a held RESET button is a human-scale event,
 # so nothing needs finer resolution than one batch's worth of latency, and anything shorter just
 # spends CPU noticing that the chip is still held.
+# Pacing while a device waits on the real world (see `Simulator.execute()`): sleep only once the guest is at least this far ahead of the wall clock, and let it
+# run at most this far *behind* before the origin is moved up (the credit a slow stretch could otherwise bank and spend in one burst).
+_PACE_MIN_SLEEP_SECONDS = 0.002
+_PACE_MAX_CREDIT_SECONDS = 0.05
 _HELD_IN_RESET_POLL_SECONDS = 0.005
+
+# The GIL's switch interval while the engine-room thread runs. CPython's default (5 ms) makes a thread that wants the GIL wait that long for a holder that never blocks, and the
+# engine thread is exactly that: a host thread doing ordinary Python work next to it (a GUI, an image decoder, a test driver - each of whose file reads, sleeps and locks
+# releases the GIL and must win it back) pays up to one interval per release. A demo whose host thread decoded and saved five e-paper frames spent ~40 s of a 1 s emulation
+# waiting for the GIL at 5 ms and ~1 s at 1 ms (measured on the 2.9" e-paper demo, docs/records/0096). Process-wide by nature, set once when the engine-room thread is created,
+# and only when the interpreter is still at its default: an embedder's own choice, or RP2040PY_SWITCH_INTERVAL (seconds, 0 to leave it alone), wins.
+_ENGINE_SWITCH_INTERVAL_SECONDS = 0.001
+_DEFAULT_SWITCH_INTERVAL_SECONDS = 0.005
+
+
+def _tune_gil_switch_interval() -> None:
+    override = os.environ.get("RP2040PY_SWITCH_INTERVAL")
+    if override is not None:
+        try:
+            seconds = float(override)
+        except ValueError:
+            return
+        if seconds > 0:
+            sys.setswitchinterval(seconds)
+        return
+    if sys.getswitchinterval() == _DEFAULT_SWITCH_INTERVAL_SECONDS:
+        sys.setswitchinterval(_ENGINE_SWITCH_INTERVAL_SECONDS)
 
 
 class ShutdownRequest:
@@ -46,8 +73,58 @@ class ShutdownRequest:
             self.event.set()
 
 
+async def _wait_for_future(fut: "concurrent.futures.Future[Any]", timeout: "float | None") -> None:
+    await asyncio.wait({asyncio.wrap_future(fut)}, timeout=timeout)
+
+
+class _PumpedFuture(concurrent.futures.Future[_T]):
+    """A `concurrent.futures.Future` for a coroutine that runs on a loop *nobody is running*: `result()`/`exception()` pump that loop on the calling thread until the coroutine is
+    done (or `timeout` of wall time has passed), instead of blocking for a thread that does not exist. What lets the blocking half of the device API
+    (`start_async().result()`, `exec_async().result()`) work without an engine-room thread (see `Simulator.pump()`). Several threads may wait on such futures at once: the
+    Simulator lets one of them at a time run the loop (`Simulator._pump_until`), the others wait for it."""
+
+    def __init__(self, simulator: "Simulator", inner: "concurrent.futures.Future[_T]") -> None:
+        super().__init__()
+        self._simulator = simulator
+        self._inner = inner
+        inner.add_done_callback(self._copy_outcome)
+
+    def _copy_outcome(self, inner: "concurrent.futures.Future[_T]") -> None:
+        if inner.cancelled():
+            super().cancel()
+            self.set_running_or_notify_cancel()
+        elif inner.exception() is not None:
+            self.set_exception(inner.exception())
+        else:
+            self.set_result(inner.result())
+
+    def result(self, timeout: "float | None" = None) -> _T:
+        self._simulator._pump_until(self._inner, timeout)
+        return super().result(0 if self.done() else timeout)
+
+    def exception(self, timeout: "float | None" = None) -> "BaseException | None":
+        self._simulator._pump_until(self._inner, timeout)
+        return super().exception(0 if self.done() else timeout)
+
+    def cancel(self) -> bool:
+        self._inner.cancel()
+        return super().cancel()
+
+
+def _threadless_by_default() -> bool:
+    """Thread-free unless RP2040PY_THREADLESS=0 asks for the engine-room thread."""
+    return os.environ.get("RP2040PY_THREADLESS", "") != "0"
+
+
 class Simulator:
-    def __init__(self, clock: SimulationClock | None = None, rp2040: RP2040 | None = None):
+    def __init__(
+        self, clock: SimulationClock | None = None, rp2040: RP2040 | None = None, *, threadless: "bool | None" = None
+    ):
+        # `threadless`: when no loop was registered with `bind_loop()`, create a plain loop for the engine *without* a thread behind it, to be driven by the caller (`pump()`, or a
+        # blocking `.result()`/`call()`, which pump) - instead of the engine-room thread `_ensure_loop()` starts otherwise. None (the default): thread-free, unless RP2040PY_THREADLESS=0 in the environment; `threadless=False` is the opt-in to the thread (a caller that starts the engine and then merely waits, relying on it making progress in the background).
+        self._threadless = _threadless_by_default() if threadless is None else threadless
+        # Held by the one thread that is currently running the (thread-free) loop for a blocking call or pump(); see _pump_until().
+        self._pump_lock = threading.Lock()
         # `rp2040`, if given, is normally built via `boards.build_rp2040()` (or a bare `RP2040()`
         # for a caller with no board-registry needs) - its own clock is authoritative in that
         # case, since peripherals were already constructed against it before this Simulator ever
@@ -59,7 +136,20 @@ class Simulator:
         # `rp2040.schedule_threadsafe()` without needing a separate reference threaded through
         # `attach()` - see docs/CYW43_WIFI_BACKLOG.md's "Concurrency model" section.
         self.rp2040.simulator = self
+        # One byte, not a plain attribute: the native batch loop (native/_simulator.pyx) reads it directly on every iteration, so a stop()
+        # from another thread - or from an `on_break` callback in the middle of an instruction - is seen without a Python call. `stopped`
+        # below is the property over it; the pure-Python loop uses the property.
+        self._stop_flag = bytearray(1)
         self.stopped = True
+        # One byte too, for the same reason: nonzero while some device waits on the *real* world (a relayed DNS/NTP reply, a TCP connect in flight). The batch loops
+        # then cap an idle jump (`_execute_batch._PACED_IDLE_NANOS`) and end the batch, and `execute()` sleeps for the simulated time it covered - so simulated time
+        # cannot outrun the wall clock while a real reply is on its way (the guest's own timeouts run in simulated time; the reply arrives in wall time).
+        self._real_io_flag = bytearray(1)
+        self._pace_origin: tuple[float, float] | None = (
+            None  # (simulated nanos, monotonic seconds) when the current real-world wait began
+        )
+        self._real_io_pending = 0
+        self._real_io_lock = threading.Lock()
         # Owned here (rather than a separately-constructed, separately-passed-around object) so
         # anyone with a reference to this Simulator can request a shutdown - a REPL, a
         # --expect-text watcher, a SIGTERM handler - without also needing a reference to whatever
@@ -86,11 +176,34 @@ class Simulator:
         # genuinely stuck forever (0% CPU, not merely slow) instead of failing loudly.
         self.engine_room_error: BaseException | None = None
 
+    def real_io_begin(self) -> None:
+        """A device starts waiting for the real world (see `_real_io_flag`). Paired with `real_io_end()`; counted, so overlapping waits compose. Any thread."""
+        with self._real_io_lock:
+            self._real_io_pending += 1
+            self._real_io_flag[0] = 1
+
+    def real_io_end(self) -> None:
+        with self._real_io_lock:
+            self._real_io_pending = max(0, self._real_io_pending - 1)
+            self._real_io_flag[0] = 1 if self._real_io_pending else 0
+
+    @property
+    def stopped(self) -> bool:
+        return self._stop_flag[0] != 0
+
+    @stopped.setter
+    def stopped(self, value: bool) -> None:
+        self._stop_flag[0] = 1 if value else 0
+
     def _ensure_loop(self) -> asyncio.AbstractEventLoop:
         if self._loop is None:
             with self._loop_init_lock:
                 if self._loop is None:
-                    self._loop, self._loop_thread = start_loop_thread()
+                    if self._threadless:
+                        self._loop = asyncio.new_event_loop()  # nobody runs it until pump(), .result() or call() does
+                    else:
+                        _tune_gil_switch_interval()
+                        self._loop, self._loop_thread = start_loop_thread()
         return self._loop
 
     def bind_loop(self, loop: "asyncio.AbstractEventLoop | None" = None) -> None:
@@ -106,6 +219,32 @@ class Simulator:
         coroutine/loop context that will drive `execute()`, before anything else might try to
         bridge in from another thread."""
         self._loop = loop if loop is not None else asyncio.get_running_loop()
+
+    def pump(self, seconds: float = 0.0) -> None:
+        """Drives the engine on the *calling* thread, for a synchronous caller with no loop of its own (a Tk window, a script, a test): runs the loop registered by `bind_loop()`
+        - which nobody else is running - for `seconds` of wall time, and returns. The simulation advances only while this runs; between calls it is paused, exactly as an
+        `await`-ing host's engine pauses while the host does its own work. No thread, so no GIL hand-offs (see `_tune_gil_switch_interval`). Typical use:
+
+            loop = asyncio.new_event_loop()
+            loop.run_until_complete(device.astart())                  # binds `loop` and starts the engine as a task on it
+            task = loop.create_task(device.aexec_file(script))
+            while not task.done():
+                device.simulator.pump(0.02)
+                ...                                                    # draw, poll a GUI, drain queues
+
+        Not for use from inside a running loop (`await` there instead) or from another thread (`schedule_threadsafe()`/`call()` are the bridges)."""
+        loop = self._loop
+        if loop is None:
+            raise RuntimeError(
+                "pump() needs a loop registered with bind_loop() (device.astart() inside loop.run_until_complete() does it)"
+            )
+        if loop.is_running():
+            raise RuntimeError(
+                "pump() drives a loop that is not running: await instead, or call it from outside the loop"
+            )
+        with self._pump_lock:
+            if not loop.is_running():
+                loop.run_until_complete(asyncio.sleep(seconds))
 
     def start_execution(self) -> None:
         """Schedules execute() to start running on this Simulator's own engine-room thread and
@@ -130,6 +269,39 @@ class Simulator:
 
         loop.call_soon_threadsafe(_start)
 
+    def _driven_by_caller(self) -> "asyncio.AbstractEventLoop | None":
+        """The registered loop if it is one this Simulator has no thread for and the caller is not inside - the thread-free case, where a blocking call has to pump it itself.
+        None for the threaded engine-room loop and for a caller already running inside the loop (which must `await`)."""
+        loop = self._loop
+        if loop is None or self._loop_thread is not None:
+            return None
+        try:
+            if asyncio.get_running_loop() is loop:
+                return None
+        except RuntimeError:
+            pass
+        return loop
+
+    def _pump_until(self, fut: "concurrent.futures.Future[Any]", timeout: "float | None") -> None:
+        """Runs the thread-free loop on this thread until `fut` is done or `timeout` of wall time has passed. One thread at a time runs it (`run_until_complete` is not re-entrant, and
+        two threads doing it at once crash the Windows proactor loop outright): the others poll `fut` and take over when the runner is done, so a future never stalls because the thread
+        that happened to be pumping returned first."""
+        loop = self._loop
+        assert loop is not None
+        deadline = None if timeout is None else time.monotonic() + timeout
+        while not fut.done():
+            remaining = None if deadline is None else deadline - time.monotonic()
+            if remaining is not None and remaining <= 0:
+                return
+            if self._pump_lock.acquire(blocking=False):
+                try:
+                    if not fut.done() and not loop.is_running():
+                        loop.run_until_complete(_wait_for_future(fut, remaining))
+                        continue
+                finally:
+                    self._pump_lock.release()
+            concurrent.futures.wait([fut], timeout=0.001 if remaining is None else min(remaining, 0.001))
+
     def call(self, coro: "Coroutine[Any, Any, _T]", timeout: "float | None" = None) -> _T:
         """Runs `coro` on the engine-room thread and blocks the calling thread until it completes -
         the bridge a caller on a genuinely different, non-engine-room thread (e.g. a test
@@ -138,6 +310,16 @@ class Simulator:
         execute()/RPPIO/USBCDC state. Not needed by a caller that already shares this Simulator's
         own loop (per docs/MAIN_THREAD_ASYNCIO_BACKLOG.md's "Target shape") - that caller just
         `await`s directly instead, no bridge required."""
+        if self._threadless and self._loop is None:
+            self._ensure_loop()
+        loop = self._driven_by_caller()
+        if loop is not None:
+            fut = asyncio.run_coroutine_threadsafe(coro, loop)
+            self._pump_until(fut, timeout)
+            if not fut.done():
+                fut.cancel()
+                raise concurrent.futures.TimeoutError()
+            return fut.result()
         future = asyncio.run_coroutine_threadsafe(coro, self._ensure_loop())
         return future.result(timeout)
 
@@ -145,7 +327,12 @@ class Simulator:
         """Runs `coro` on the engine-room thread, returning immediately with a Future rather than
         blocking - call()'s non-blocking counterpart, for a caller that wants to hand back a
         concurrent.futures.Future itself (device/mp_device.py's own *_async() API) rather than
-        block the calling thread right away."""
+        block the calling thread right away. Thread-free (see `pump()`): the coroutine becomes a task on the registered loop and the Future's `result()` pumps it."""
+        if self._threadless and self._loop is None:
+            self._ensure_loop()
+        loop = self._driven_by_caller()
+        if loop is not None:
+            return _PumpedFuture(self, asyncio.run_coroutine_threadsafe(coro, loop))
         return asyncio.run_coroutine_threadsafe(coro, self._ensure_loop())
 
     def schedule_threadsafe(self, fn_or_coro: "Callable[[], None] | Coroutine[Any, Any, Any]") -> None:
@@ -227,6 +414,21 @@ class Simulator:
                     # on this same loop, and yielding for this long is what lets one run.
                     await asyncio.sleep(_HELD_IN_RESET_POLL_SECONDS)
                     continue
+                if self._real_io_flag[0]:
+                    # A device waits on the real world: simulated time may not run ahead of the wall clock measured from when the wait began. Accounted against
+                    # that origin rather than per batch, so the coarse timers of some platforms (a sleep(0.001) is ~15 ms on Windows) neither slow the guest to
+                    # a crawl - a sleep that overshoots is paid back by the next batches running without one - nor let it bank an unbounded credit.
+                    if self._pace_origin is None:
+                        self._pace_origin = (self.clock.nanos, time.monotonic())
+                    self._execute_batch()
+                    sim0, wall0 = self._pace_origin
+                    ahead = (self.clock.nanos - sim0) / 1e9 - (time.monotonic() - wall0)
+                    if ahead < -_PACE_MAX_CREDIT_SECONDS:
+                        self._pace_origin = (sim0 + (ahead + _PACE_MAX_CREDIT_SECONDS) * 1e9, wall0)
+                        ahead = -_PACE_MAX_CREDIT_SECONDS
+                    await asyncio.sleep(ahead if ahead > _PACE_MIN_SLEEP_SECONDS else 0)
+                    continue
+                self._pace_origin = None  # no real wait outstanding: the next one starts a fresh origin
                 self._execute_batch()
                 # Upstream rp2040js uses `setTimeout(() => this.execute(), 0)` to yield back to
                 # the single-threaded JS event loop every batch so external stop() calls can get
@@ -284,7 +486,10 @@ class Simulator:
             while self.executing:
                 if self.shutdown_request.event.is_set():
                     break
-                time.sleep(0.1)
+                if self._driven_by_caller() is not None:
+                    self.pump(0.1)  # nobody else runs the engine: this wait is what does
+                else:
+                    time.sleep(0.1)
         except KeyboardInterrupt:
             if cleanup is not None:
                 cleanup()

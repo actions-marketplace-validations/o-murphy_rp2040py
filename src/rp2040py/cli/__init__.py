@@ -52,7 +52,7 @@ import signal
 import struct
 import sys
 import time
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from importlib.metadata import version
 from os import PathLike
 from pathlib import Path
@@ -65,7 +65,6 @@ from rp2040py.boards import (
     BoardSpec,
     FlashLayout,
     UnknownFirmwareFamilyError,
-    build_rp2040,
     build_rp2040_from_spec,
     resolve_firmware,
     resolve_layout,
@@ -284,7 +283,7 @@ async def _run_async(args: argparse.Namespace) -> int:
 def _cmd_run(args: argparse.Namespace) -> None:
     _maybe_exit_after_fetch(args, bootrom_source=args.bootrom)
     try:
-        exit_code = asyncio.run(_run_async(args))
+        exit_code = asyncio.run(_exit_as_result(_run_async(args)))
     except KeyboardInterrupt:
         sys.exit(130)
     if exit_code:
@@ -407,6 +406,20 @@ async def _start_console_repl(
     stdio_repl = StdioInteractiveRepl(cdc, simulator, on_data=on_data, on_quit=simulator.shutdown_request.request)
     await stdio_repl.start()
     return stdio_repl
+
+
+async def _exit_as_result(command: "Awaitable[int | None]") -> "int | str | None":
+    """Runs a command's coroutine and turns a `sys.exit()` raised inside it into its return value, which the caller then passes to `sys.exit()` itself.
+
+    On CPython `asyncio.run()` re-raises a `SystemExit` out of the task, but an event loop that is not a plain `run_until_complete` host does not: Pyodide's
+    `WebLoop` hands it to the JavaScript runtime as an unhandled error, which ends the whole process (a pytest run included) instead of reaching the caller. The
+    commands below validate their arguments and exit with `sys.exit(1)` from inside their coroutine, so the exit is made an ordinary result here.
+    """
+    try:
+        return await command
+    except SystemExit as exit_request:
+        code = exit_request.code
+        return 0 if code is None else code
 
 
 def _validate_console_mode(args: argparse.Namespace) -> None:
@@ -677,7 +690,7 @@ async def _micropython_async(args: argparse.Namespace) -> "int | None":
 
 def _cmd_micropython(args: argparse.Namespace) -> None:
     try:
-        exit_code = asyncio.run(_micropython_async(args))
+        exit_code = asyncio.run(_exit_as_result(_micropython_async(args)))
     except KeyboardInterrupt:
         sys.exit(130)
     if exit_code is not None:
@@ -747,7 +760,7 @@ async def _kaluma_async(args: argparse.Namespace) -> "int | None":
 
 def _cmd_kaluma(args: argparse.Namespace) -> None:
     try:
-        exit_code = asyncio.run(_kaluma_async(args))
+        exit_code = asyncio.run(_exit_as_result(_kaluma_async(args)))
     except KeyboardInterrupt:
         sys.exit(130)
     if exit_code is not None:
@@ -762,8 +775,8 @@ def _interpreter_label() -> str:
     return f"{impl} {'.'.join(str(part) for part in sys.version_info[:3])}"
 
 
-def _bench_synthetic(instruction_count: int, block_size: int, board: str, log_level: LogLevel) -> None:
-    rp2040 = build_rp2040(board)
+def _bench_synthetic(instruction_count: int, block_size: int, board: BoardSpec, log_level: LogLevel) -> None:
+    rp2040 = build_rp2040_from_spec(board)
 
     from rp2040py.device.bootrom import BOOTROM_B1
 
@@ -792,6 +805,11 @@ def _bench_synthetic(instruction_count: int, block_size: int, board: str, log_le
     print(f"Executed {executed:,} instructions in {elapsed:.2f}s -> {executed / elapsed:,.0f} instructions/sec")
 
 
+_BENCH_DONE = "bench-done"
+# One REPL line: the string concatenation keeps the echoed command itself from containing the marker the run waits for.
+_BENCH_WORKLOAD = "exec('for i in range(30000): pass'); print('bench-' + 'done')"
+
+
 def _bench_firmware(
     image: PathLike,
     littlefs: PathLike | None,
@@ -799,14 +817,15 @@ def _bench_firmware(
     expect_regex: bool,
     timeout: float,
     bootrom: str | None,
-    board: str,
+    board: BoardSpec,
     log_level: LogLevel,
+    stepwise: bool = False,
 ) -> None:
     # Uses Simulator (not a bare RP2040) so the clock actually advances: real firmware relies on
     # timer-based busy-waits during boot (e.g. hardware_timer's timer_busy_wait_until()), and those
     # spin forever if TIMERAWL/TIMERAWH never move - core.execute_instruction() alone does not tick
     # the clock, only Simulator.execute() (and this hand-rolled equivalent below) does.
-    simulator = Simulator(rp2040=build_rp2040(board))
+    simulator = Simulator(rp2040=build_rp2040_from_spec(board))
     rp2040 = simulator.rp2040
     clock = simulator.clock
 
@@ -817,8 +836,10 @@ def _bench_firmware(
 
     if littlefs:
         try:
-            micropython_layout = resolve_layout(BOARDS[board], "micropython")
-            assert micropython_layout is not None  # every built-in board declares one
+            micropython_layout = resolve_layout(board, "micropython")
+            if micropython_layout is None:
+                _logger.error("this board declares no MicroPython flash layout, so --littlefs cannot be placed")
+                sys.exit(1)
             load_micropython_flash_image(littlefs, rp2040, micropython_layout)
         except ValueError as exc:
             _logger.error("%s", exc)
@@ -829,7 +850,11 @@ def _bench_firmware(
 
     cdc = USBCDC(rp2040.usb_ctrl)
 
+    connected_at: list[float] = []  # simulated nanos of the host-side connect (engine mode's workload waits for it)
+    workload_done: list[bool] = []
+
     def _on_device_connected() -> None:
+        connected_at.append(clock.nanos)
         # nudge MicroPython to print its prompt, same as the micropython subcommand
         cdc.send_serial_byte(ord("\r"))
         cdc.send_serial_byte(ord("\n"))
@@ -842,6 +867,8 @@ def _bench_firmware(
             char = chr(byte)
             if char == "\n":
                 tracker.feed_line(current_line)
+                if current_line.strip() == _BENCH_DONE:
+                    workload_done.append(True)
                 current_line = ""
             else:
                 current_line += char
@@ -852,23 +879,106 @@ def _bench_firmware(
     print(f"Firmware benchmark: {image}" + (f" (expecting {expect_text!r})" if expect_text else ""))
 
     rp2040.core.pc = 0x10000000
+    if not stepwise:
+        # The real engine: the same batch loop `Simulator.execute()` runs (C++ in the native build), driven synchronously on this thread. Idle jumps are part of it - a firmware
+        # sitting in `sleep_ms()` costs next to nothing, which is what a user sees - so the figure is the *real-time factor* (simulated seconds per wall second), not instructions
+        # per second: the batch does not count instructions, and an idle jump is not one. A firmware that has finished booting and waits for the host (a MicroPython REPL
+        # in WFE with no timer armed) has nothing left to run: simulated time stops and no batch can advance it, so the run ends there instead of spinning to the timeout.
+        simulator.stopped = False
+        sim_start = clock.nanos
+        start = time.perf_counter()
+        idle = False
+        # Boot alone is ~10 ms of wall time - too short for a real-time factor to mean anything - so unless the caller is waiting for specific text, the firmware's REPL is then
+        # given a fixed MicroPython loop and the factor is measured over that (the number a user's program sees: the core awake, the interpreter running).
+        want_workload = not expect_text
+        workload: tuple[float, float] | None = (
+            None  # (simulated nanos, perf_counter) at the moment the loop was typed in
+        )
+        boot: tuple[float, float] | None = None
+        while not tracker.found and not workload_done and (time.perf_counter() - start) < timeout:
+            simulator._execute_batch()
+            idle = rp2040.core.waiting and not clock.has_scheduled_alarm
+            if want_workload and workload is None and connected_at and (idle or clock.nanos - connected_at[0] > 3e8):
+                boot = ((clock.nanos - sim_start) / 1e9, time.perf_counter() - start)
+                for byte in _BENCH_WORKLOAD.encode() + b"\r\n":
+                    cdc.send_serial_byte(byte)
+                workload = (clock.nanos, time.perf_counter())
+                idle = False
+            elif idle and workload is None:
+                break
+        end = time.perf_counter()
+        simulated = (clock.nanos - sim_start) / 1e9
+        simulator.stop()
+
+        def _factor(sim_seconds: float, wall_seconds: float) -> str:
+            return f"simulated {sim_seconds:.3f}s in {wall_seconds:.2f}s of wall time" + (
+                f" -> {sim_seconds / wall_seconds:.2f}x real time" if wall_seconds > 0 else ""
+            )
+
+        if workload is not None:
+            assert boot is not None
+            print(f"boot: {_factor(*boot)}")
+            work_sim, work_wall = (clock.nanos - workload[0]) / 1e9, end - workload[1]
+            print(
+                f"{'workload (' + _BENCH_WORKLOAD + ')' if workload_done else 'workload did not finish'}: {_factor(work_sim, work_wall)}"
+                " (batch engine; --stepwise for per-instruction calls from Python)"
+            )
+            if not workload_done:
+                sys.exit(1)
+            return
+        status = (
+            "found expected text"
+            if tracker.found
+            else (
+                "firmware idle (waiting, nothing scheduled)"
+                if idle
+                else ("timed out" if expect_text else "time budget reached")
+            )
+        )
+        print(
+            f"{status}: {_factor(simulated, end - start)} (batch engine; --stepwise for per-instruction calls from Python)"
+        )
+        if expect_text and not tracker.found:
+            sys.exit(1)
+        return
+
     cycle_nanos = 1e9 / 125_000_000  # 125 MHz
     start = time.perf_counter()
     step_batch = 1_000_000
     executed = 0
-    while not tracker.found and (time.perf_counter() - start) < timeout:
+    idle_steps = 0
+    idle = False
+    while not tracker.found and not idle and (time.perf_counter() - start) < timeout:
         for _ in range(step_batch):
             if rp2040.core.waiting:
+                if not clock.has_scheduled_alarm:
+                    idle = True  # asleep with nothing scheduled: nothing will ever wake it, so ending here beats spinning to the timeout
+                    break
+                idle_steps += 1  # the core sleeps (WFE/WFI): not an instruction, only a trip round this loop
                 clock.tick(clock.nanos_to_next_alarm)
             else:
                 cycles = rp2040.core.execute_instruction()
                 clock.tick(cycles * cycle_nanos)
-        executed += step_batch
+                executed += 1
     elapsed = time.perf_counter() - start
 
-    status = "found expected text" if tracker.found else ("timed out" if expect_text else "step budget reached")
+    status = (
+        "found expected text"
+        if tracker.found
+        else (
+            "firmware idle (waiting, nothing scheduled)"
+            if idle
+            else ("timed out" if expect_text else "step budget reached")
+        )
+    )
+    note = (
+        f"; {idle_steps:,} further loop iterations were the core asleep with nothing scheduled (a firmware idling in its REPL) and are not counted"
+        if idle_steps
+        else ""
+    )
     print(
-        f"{status}: executed {executed:,} instructions in {elapsed:.2f}s -> {executed / elapsed:,.0f} instructions/sec"
+        f"{status}: executed {executed:,} instructions in {elapsed:.2f}s -> {executed / elapsed:,.0f} instructions/sec "
+        f"(one execute_instruction() call from Python each: measures that call, not the batch engine{note})"
     )
     if expect_text and not tracker.found:
         sys.exit(1)
@@ -880,6 +990,10 @@ def _cmd_bench(args: argparse.Namespace) -> None:
     # so only `--bootrom` (if a version tag) is ever fetched here, in either synthetic or firmware
     # mode.
     _maybe_exit_after_fetch(args, bootrom_source=args.bootrom)
+    source = _board_source(args)  # --board / --board-spec / RP2040PY_BOARD_SPEC, like the other subcommands
+    if source is None:
+        sys.exit(1)
+    board = source[0]
     if args.image:
         _bench_firmware(
             args.image,
@@ -888,11 +1002,12 @@ def _cmd_bench(args: argparse.Namespace) -> None:
             args.expect_regex,
             args.timeout,
             args.bootrom,
-            args.board,
+            board,
             log_level,
+            args.stepwise,
         )
     else:
-        _bench_synthetic(args.instructions, args.block_size, args.board, log_level)
+        _bench_synthetic(args.instructions, args.block_size, board, log_level)
 
 
 def _patch_mpremote_console_waitchar() -> None:
@@ -1338,13 +1453,22 @@ def main(argv: "list[str] | None" = None) -> None:
 
     bench_parser = subparsers.add_parser(
         "bench",
-        parents=[_shared_arg_parser("board", "bootrom", "expect-text", "expect-regex", "littlefs", "fetch-fw-only")],
-        help="benchmark instruction-dispatch throughput",
+        parents=[_shared_arg_parser("bootrom", "expect-text", "expect-regex", "littlefs", "fetch-fw-only")],
+        help="benchmark: synthetic instruction dispatch, or (--image) a firmware through the real engine",
     )
+    # --board's default is applied inside _board_source() (not here), for the same reason as `micropython`'s: --board-spec's mutual exclusion needs to know it was never given.
+    bench_parser.add_argument("--board", choices=tuple(BOARDS), default=None, help=_BOARD_HELP)
+    bench_parser.add_argument("--board-spec", default=None, metavar="target:attr", help=_BOARD_SPEC_HELP)
     bench_parser.add_argument("--instructions", type=int, default=5_000_000, help="synthetic mode: instruction count")
     bench_parser.add_argument("--block-size", type=int, default=1000, help="synthetic mode: instructions per block")
     bench_parser.add_argument("--image", help=f"firmware mode: {_IMAGE_PATH_HELP}")
     bench_parser.add_argument("--timeout", type=float, default=60.0, help="firmware mode: seconds before giving up")
+    bench_parser.add_argument(
+        "--stepwise",
+        action="store_true",
+        help="firmware mode: step one instruction at a time from Python (the old behaviour: it measures that call, "
+        "not the batch engine, and reports instructions/sec); the default runs the real batch engine and reports the real-time factor",
+    )
     bench_parser.set_defaults(func=_cmd_bench)
 
     # add_help=False + a bare REMAINDER positional: every argument (including `-h`/`--help`) is

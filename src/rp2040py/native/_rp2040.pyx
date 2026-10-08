@@ -19,7 +19,19 @@ statically-typed local and call tick()/nanos_to_next_alarm/has_scheduled_alarm a
 dispatch - see native/_simulation_clock.pyx's own module docstring for the full rationale.
 """
 
+from libc.stdint cimport int64_t, uint8_t, uint32_t
+from libc.string cimport memset
+
 from rp2040py.native._cortex_m0_core cimport CortexM0Core
+from rp2040py.native._memory_map cimport (
+    Region,
+    kNotifyOnWrite,
+    kSubWord,
+    kWordIndexed,
+)
+from rp2040py.native._pending cimport park_error, raise_if_pending
+from rp2040py.native._bus cimport BusHost, kBusWarnInvalidRead, kBusWarnUnalignedRead
+from rp2040py.native._window_map cimport Read32Fn, Write32Fn, WindowHandler, kNoWindow
 from rp2040py.native._simulation_clock cimport SimulationClock
 
 from rp2040py.clock.clock import IClock
@@ -35,7 +47,8 @@ from rp2040py.memory_map import (
 )
 from rp2040py.peripherals.adc import RPADC
 from rp2040py.peripherals.busctrl import RPBUSCTRL
-from rp2040py.peripherals.clocks import RPClocks
+from rp2040py.peripherals.clocks import RPClocks, reset_clock_tree, update_clocks
+from rp2040py.peripherals.pll import RPPLL
 from rp2040py.peripherals.dma import RPDMA, DREQChannel
 from rp2040py.peripherals.i2c import RPI2C
 from rp2040py.peripherals.io import RPIO
@@ -64,6 +77,7 @@ from rp2040py.peripherals.reset import (
     RESET_RTC,
     RESET_SPI0,
     RESET_SPI1,
+    RESET_SYSCFG,
     RESET_TIMER,
     RESET_UART0,
     RESET_UART1,
@@ -83,7 +97,7 @@ from rp2040py.peripherals.usb import RPUSBController
 from rp2040py.peripherals.watchdog import RPWatchdog
 from rp2040py.peripherals.xosc import RPXOSC
 from rp2040py.sio import RPSIO
-from rp2040py.native._bit cimport read_uint16_le, read_uint32_le, u32, write_uint16_le, write_uint32_le
+from rp2040py.native._bit cimport u32, write_uint16_le
 from rp2040py.utils.logging import ConsoleLogger, LogLevel
 
 # Deliberately NOT `from cpython cimport array`: that pulls in CPython-internal array.array
@@ -118,6 +132,121 @@ cdef unsigned int DPRAM_START = <unsigned int> DPRAM_START_ADDRESS
 cdef unsigned int SIO_START = <unsigned int> SIO_START_ADDRESS
 
 
+cdef class _PythonWindow:
+    """The context of one window handler whose peripheral is a Python object: the C++ window map calls
+    the trampolines below with a pointer to this. The peripheral's methods are looked up on every call
+    (never cached as bound methods), so a test or board that replaces `peripheral.read_uint32` on the
+    instance after the window was attached still gets what it asked for."""
+
+    cdef object peripheral
+
+    def __cinit__(self, peripheral):
+        self.peripheral = peripheral
+
+
+cdef uint32_t _python_window_read32(void* ctx, uint32_t offset) noexcept:
+    try:
+        return <unsigned int> (<_PythonWindow> ctx).peripheral.read_uint32(offset)
+    except BaseException as error:
+        park_error(error)
+        return 0
+
+
+cdef void _python_window_write32(void* ctx, uint32_t offset, int64_t raw_value, uint32_t atomic_type) noexcept:
+    try:
+        (<_PythonWindow> ctx).peripheral.write_uint32_atomic(offset, raw_value, atomic_type)
+    except BaseException as error:
+        park_error(error)
+
+
+cdef uint32_t _python_sio_read32(void* ctx, uint32_t offset) noexcept:
+    # int(): SIO's DIV_QUOTIENT can be a fractional JS number (see sio.py) - any real JS consumer (typed-array store,
+    # bitwise op) truncates it immediately via ToUint32, so truncate here rather than letting a float leak into the rest
+    # of the bus/CPU/DMA read path.
+    try:
+        return <unsigned int> (int((<_PythonWindow> ctx).peripheral.read_uint32(offset)) & 0xFFFFFFFFU)
+    except BaseException as error:
+        park_error(error)
+        return 0
+
+
+cdef void _python_direct_write32(void* ctx, uint32_t offset, int64_t raw_value, uint32_t atomic_type) noexcept:
+    # SIO and the PPB have never had an atomic-alias write path: they get `write_uint32` with the caller's own value.
+    try:
+        (<_PythonWindow> ctx).peripheral.write_uint32(offset, raw_value)
+    except BaseException as error:
+        park_error(error)
+
+
+cdef void _bus_warn(void* ctx, uint32_t kind, uint32_t address) noexcept:
+    cdef RP2040 chip = <RP2040> ctx
+    try:
+        if kind == kBusWarnUnalignedRead:
+            chip.logger.warning(LOG_NAME, f"read from address {address:x}, which is not 32 bit aligned")
+        elif kind == kBusWarnInvalidRead:
+            chip.logger.warning(LOG_NAME, f"Read from invalid memory address: {address:x}")
+        else:
+            chip.logger.warning(LOG_NAME, f"Write to undefined address: {address:x}")
+    except BaseException as error:
+        park_error(error)
+
+
+cdef void _bus_dpram_written(void* ctx, uint32_t offset, int64_t value) noexcept:
+    cdef RP2040 chip = <RP2040> ctx
+    try:
+        chip.usb_ctrl.dpram_updated(offset, value)
+    except BaseException as error:
+        park_error(error)
+
+
+class _PeripheralTable(dict):
+    """`RP2040.peripherals`: still an ordinary dict (blocks, boards and tests read, add and replace entries
+    exactly as before) - but every change to it is mirrored into the chip's C++ window registry, which is
+    what the bus actually dispatches through."""
+
+    def __init__(self, chip, items=()):
+        dict.__init__(self)
+        self._chip = chip
+        self.update(items)
+
+    def __setitem__(self, key, value):
+        dict.__setitem__(self, key, value)
+        self._chip._attach_window(key, value)
+
+    def __delitem__(self, key):
+        dict.__delitem__(self, key)
+        self._chip._detach_window(key)
+
+    def update(self, *args, **kwargs):
+        for key, value in dict(*args, **kwargs).items():
+            self[key] = value
+
+    def setdefault(self, key, default=None):
+        if key not in self:
+            self[key] = default
+        return dict.__getitem__(self, key)
+
+    def pop(self, key, *default):
+        present = key in self
+        value = dict.pop(self, key, *default)
+        if present:
+            self._chip._detach_window(key)
+        return value
+
+    def popitem(self):
+        key, value = dict.popitem(self)
+        self._chip._detach_window(key)
+        return key, value
+
+    def clear(self):
+        dict.clear(self)
+        self._chip._clear_windows()
+
+    def __ior__(self, other):
+        self.update(other)
+        return self
+
+
 cdef class RP2040:
     def __cinit__(self):
         # Buffer-backed memoryview fields are allocated here, not __init__: __cinit__ is
@@ -137,9 +266,56 @@ cdef class RP2040:
         self.flash_byte_size = len(self._flash)
         self._usb_dpram = bytearray(4 * KB)
         self.dpram_byte_size = len(self._usb_dpram)
+        self._attach_memory_regions()
+        self._window_owners = {}
         self.core = CortexM0Core(self)
 
+    cdef void _attach_memory_regions(self):
+        """Hands the C++ memory map pointers into the four buffers above (record 0096, Phase 1, D2).
+        Zero-copy: the map holds the buffers' own addresses; they never move because the typed
+        memoryviews pin them (a bytearray/array.array cannot be resized while exported). The
+        per-region flags and mirror masks reproduce the pre-Phase-1 behaviour exactly - see
+        core/memory_map.hpp and tests/test_memory_map_parity.py."""
+        cdef Region region
+        # Boot ROM: word-indexed, no sub-word fast path (composed from 32-bit reads, as before).
+        region.base = 0
+        region.window = self.bootrom_byte_size
+        region.size = self.bootrom_byte_size
+        region.mask = 0xFFFFFFFFU
+        region.data = <uint8_t*> &self._bootrom[0]
+        region.flags = kWordIndexed
+        self._bus.mem.attach(region)
+        # Flash: four 16 MiB aliases for reads (XIP, NOALLOC, NOCACHE, NOCACHE_NOALLOC); writes and
+        # sub-word accesses only below the real flash size.
+        region.base = FLASH_START
+        region.window = FLASH_END - FLASH_START
+        region.size = self.flash_byte_size
+        region.mask = 0x00FFFFFFU
+        region.data = <uint8_t*> &self._flash[0]
+        region.flags = kSubWord
+        self._bus.mem.attach(region)
+        region.base = RAM_START
+        region.window = self.ram_byte_size
+        region.size = self.ram_byte_size
+        region.mask = 0xFFFFFFFFU
+        region.data = <uint8_t*> &self._sram[0]
+        region.flags = kSubWord
+        self._bus.mem.attach(region)
+        # USB DPRAM: a completed 32-bit write must reach `usb_ctrl.dpram_updated()`.
+        region.base = DPRAM_START
+        region.window = self.dpram_byte_size
+        region.size = self.dpram_byte_size
+        region.mask = 0xFFFFFFFFU
+        region.data = <uint8_t*> &self._usb_dpram[0]
+        region.flags = kNotifyOnWrite
+        self._bus.mem.attach(region)
+
     def __init__(self, clock: IClock | None = None):
+        cdef BusHost bus_host
+        bus_host.warn = _bus_warn
+        bus_host.dpram_written = _bus_dpram_written
+        bus_host.ctx = <void*> self
+        self._bus.init(bus_host)
         # NOTE: must be set before constructing any peripheral below - several of them
         # (RPPPB, RPWatchdog, RPADC, RPPWM, RPPIO, RPUSBController, RPDMA) call
         # self.clock.create_alarm(...) from their own __init__.
@@ -148,6 +324,10 @@ cdef class RP2040:
         # Clocks
         self.clk_sys = 125 * MHZ
         self.clk_peri = 125 * MHZ
+        # The oscillators the PLLs and the clock generators start from (rp2040js 1.4.0): a 12 MHz crystal, and the ring oscillator at its typical frequency.
+        self.xosc_freq = 12 * MHZ
+        self.rosc_freq = 6.5 * MHZ
+        self._clock_listeners = set()
 
         self.ppb = RPPPB(self, "PPB")
         self.sio = RPSIO(self)
@@ -206,6 +386,8 @@ cdef class RP2040:
         # Named, not just entries in `peripherals` below - see _rp2040.py's identical block for
         # why reset() needs each of them by name (0089 Phase 5).
         self.clocks = RPClocks(self, "CLOCKS_BASE")
+        self.pll_sys = RPPLL(self, "PLL_SYS_BASE")
+        self.pll_usb = RPPLL(self, "PLL_USB_BASE")
         self.resets = RPReset(self, "RESETS_BASE")
         self.psm = RPPSM(self, "PSM_BASE")
         self.pads_bank0 = RPPADS(self, "PADS_BANK0_BASE", "bank0")
@@ -213,6 +395,7 @@ cdef class RP2040:
         self.timer = RPTimer(self, "TIMER_BASE")
         self.rtc = RP2040RTC(self, "RTC_BASE")
         self.busctrl = RPBUSCTRL(self, "BUSCTRL_BASE")
+        self.syscfg = RP2040SysCfg(self, "SYSCFG")
         self.xip_ctrl = RPXIPCtrl(self, "XIP_CTRL_BASE")
         self.ssi = RPSSI(self, "SSI")
         self.xosc = RPXOSC(self, "XOSC_BASE")
@@ -221,7 +404,7 @@ cdef class RP2040:
             0x14000: self.xip_ctrl,
             0x18000: self.ssi,
             0x40000: RP2040SysInfo(self, "SYSINFO_BASE"),
-            0x40004: RP2040SysCfg(self, "SYSCFG"),
+            0x40004: self.syscfg,
             0x40008: self.clocks,
             0x4000C: self.resets,
             0x40010: self.psm,
@@ -230,8 +413,8 @@ cdef class RP2040:
             0x4001C: self.pads_bank0,
             0x40020: self.pads_qspi,
             0x40024: self.xosc,
-            0x40028: UnimplementedPeripheral(self, "PLL_SYS_BASE"),
-            0x4002C: UnimplementedPeripheral(self, "PLL_USB_BASE"),
+            0x40028: self.pll_sys,
+            0x4002C: self.pll_usb,
             0x40030: self.busctrl,
             0x40034: self.uart[0],
             0x40038: self.uart[1],
@@ -418,10 +601,9 @@ cdef class RP2040:
           instead, so the count does restart; what is not modelled is anything else reading that
           clock noticing.
 
-        `SYSCFG`/`SYSINFO`/`TBMAN` are covered by not needing it - they hold no instance state at
+        `SYSINFO`/`TBMAN` are covered by not needing it - they hold no instance state at
         all, so `BasePeripheral`'s default no-op is their correct implementation.
         """
-        cdef unsigned char[:] filler
         if from_watchdog:
             psm_wdsel = self.psm.wdsel
             resets_wdsel = self.resets.wdsel
@@ -447,6 +629,7 @@ cdef class RP2040:
             self.sio.reset()
         if psm_wdsel & WDSEL_CLOCKS:
             self.clocks.reset()
+            reset_clock_tree(self)
 
         if resets_wdsel & RESET_IO_BANK0:
             for pin in self.gpio:
@@ -498,9 +681,10 @@ cdef class RP2040:
             self.rtc.reset()
         if resets_wdsel & RESET_BUSCTRL:
             self.busctrl.reset()
-        # SYSCFG/SYSINFO/TBMAN have RESETS bits too and are deliberately not called: they hold no
-        # instance state at all (read-only chip identity), so `BasePeripheral`'s default no-op is
-        # the correct implementation rather than a gap. Checked, not assumed.
+        if resets_wdsel & RESET_SYSCFG:
+            self.syscfg.reset()
+        # SYSINFO/TBMAN have RESETS bits too and are deliberately not called: they hold no instance state at
+        # all (read-only chip identity), so `BasePeripheral`'s default no-op is the correct implementation.
         if psm_wdsel & WDSEL_XOSC:
             # Only ever selected on a RUN-pin/power-on reset: `watchdog_reboot()` clears this bit
             # deliberately, because the oscillators clock the reset itself. `rosc` has no
@@ -513,162 +697,161 @@ cdef class RP2040:
             self.ssi.reset()
 
         if not preserve_flash:
-            filler = bytearray(b"\xff" * len(self._flash))
-            self._flash[:] = filler
+            # Erased in place: building a filler first (a 16 MB bytes object, then a 16 MB bytearray copy of it) made every reset a 32 MB allocation, and on a 32-bit build
+            # (CI's ARMv7 wheel test) a run of chips waiting for the garbage collector turned that into a MemoryError.
+            memset(<uint8_t*> &self._flash[0], 0xFF, len(self._flash))
+    def update_clocks(self):
+        """Re-derives `clk_sys`/`clk_peri` from the PLL and CLOCKS registers and retunes what runs from them (see `peripherals.clocks.update_clocks`)."""
+        update_clocks(self)
+
+    def add_clock_listener(self, listener):
+        """Calls `listener(clk_sys, old_clk_sys)` whenever clk_sys changes - for anything that derives a rate from it (a PIO clock divider, say). Returns the
+        function that unsubscribes it."""
+        self._clock_listeners.add(listener)
+
+        def unsubscribe():
+            self._clock_listeners.discard(listener)
+
+        return unsubscribe
+
     cpdef unsigned int read_uint32(self, long long address) except? 0:
-        cdef unsigned int addr = <unsigned int> (address & 0xFFFFFFFFU)
-        cdef unsigned int offset
-        if addr & 0x3:
-            self.logger.warning(LOG_NAME, f"read from address {addr:x}, which is not 32 bit aligned")
+        cdef unsigned int word = self._bus.read32(<unsigned int> (address & 0xFFFFFFFFU))
+        raise_if_pending()
+        return word
 
-        if addr < self.bootrom_byte_size:
-            return self._bootrom[addr // 4]
-        if FLASH_START <= addr < FLASH_END:
-            # Flash is mirrored four times:
-            # - 0x10000000 XIP
-            # - 0x11000000 XIP_NOALLOC
-            # - 0x12000000 XIP_NOCACHE
-            # - 0x13000000 XIP_NOCACHE_NOALLOC
-            offset = addr & 0x00FFFFFF
-            return read_uint32_le(self._flash, offset)
-        if RAM_START <= addr < RAM_START + self.ram_byte_size:
-            return read_uint32_le(self._sram, addr - RAM_START)
-        if DPRAM_START <= addr < DPRAM_START + self.dpram_byte_size:
-            return read_uint32_le(self._usb_dpram, addr - DPRAM_START)
-        if (addr >> 12) == 0xE000E:
-            return <unsigned int> self.ppb.read_uint32(addr & 0xFFF)
-        if SIO_START <= addr < SIO_START + 0x10000000:
-            # int(): SIO's DIV_QUOTIENT can be a fractional JS number (see sio.py) - any real JS
-            # consumer (typed-array store, bitwise op) truncates it immediately via ToUint32, so
-            # truncate here rather than letting a float leak into the rest of the bus/CPU/DMA
-            # read path.
-            return <unsigned int> (int(self.sio.read_uint32(addr - SIO_START)) & 0xFFFFFFFFU)
+    @property
+    def sio(self):
+        return self._sio
 
-        peripheral = self.find_peripheral(addr)
-        if peripheral is not None:
-            return <unsigned int> peripheral.read_uint32(addr & 0x3FFF)
+    @sio.setter
+    def sio(self, value) -> None:
+        self._sio = value
+        self._bus.set_sio(self._direct_handler(value, True))
 
-        self.logger.warning(LOG_NAME, f"Read from invalid memory address: {addr:x}")
-        return 0xFFFFFFFFU
+    @property
+    def ppb(self):
+        return self._ppb
+
+    @ppb.setter
+    def ppb(self, value) -> None:
+        self._ppb = value
+        self._bus.set_ppb(self._direct_handler(value, False))
+
+    def _native_flash_address(self):
+        """The address and size of this chip's flash buffer, for a native block that works on it directly (the SSI): allocated once, only ever
+        refilled in place, so the address is good for the chip's life. Looked up as an attribute of the chip, so a chip without one (the
+        pure-Python chip) simply does not answer."""
+        return (<size_t> &self._flash[0], self.flash_byte_size)
+
+    def _native_bus_address(self):
+        """The address of this chip's C++ bus, for a native block that works on it directly (the DMA). Looked up as an
+        attribute of the chip, so a chip without a C++ bus (the pure-Python one) simply does not answer."""
+        return <size_t> &self._bus
+
+    cdef WindowHandler _direct_handler(self, object block, bint is_sio):
+        """The handler the bus calls for SIO or the PPB. A block with `_native_window` on its TYPE lends its own C++
+        functions (a recorder/profiler that forwards attributes must still see every access, and a Mock must not answer
+        for every name); anything else is reached through a Python trampoline that looks its methods up on every call."""
+        cdef WindowHandler handler
+        cdef _PythonWindow owner
+        native_window = getattr(type(block), "_native_window", None)
+        if native_window is not None:
+            read_ptr, write_ptr, ctx_ptr = native_window(block)
+            handler.read32 = <Read32Fn> <size_t> read_ptr
+            handler.write32 = <Write32Fn> <size_t> write_ptr
+            handler.ctx = <void*> <size_t> ctx_ptr
+            owner_object = block  # keeps the block (and so the context pointer) alive
+        else:
+            owner = _PythonWindow(block)
+            handler.read32 = _python_sio_read32 if is_sio else _python_window_read32
+            handler.write32 = _python_direct_write32
+            handler.ctx = <void*> owner
+            owner_object = owner
+        if is_sio:
+            self._sio_owner = owner_object
+        else:
+            self._ppb_owner = owner_object
+        return handler
+
+    @property
+    def peripherals(self):
+        return self._peripherals
+
+    @peripherals.setter
+    def peripherals(self, value) -> None:
+        # Whatever mapping is assigned becomes the chip's table (and the window registry is rebuilt from
+        # it), so `chip.peripherals = {...}` keeps meaning what it always did.
+        self._clear_windows()
+        self._peripherals = _PeripheralTable(self, value)
+
+    def _attach_window(self, key, peripheral) -> None:
+        """Mirrors `peripherals[key] = peripheral` into the C++ window registry. `key` is the bus's own
+        dictionary key, `(address >> 14) << 2`; one that no address can produce was never reachable and is
+        not registered."""
+        cdef WindowHandler handler
+        cdef _PythonWindow owner
+        cdef unsigned long long k
+        if not isinstance(key, int) or key < 0 or key >= (1 << 20) or (key & 3):
+            return
+        k = key
+        # A native block (a C++ block behind a Cython shell, e.g. the TIMER) offers its own C++ read/write functions
+        # through `_native_window`, and the window is served without any Python on the access path. Looked up on the
+        # TYPE, never the instance: a recorder or profiler that forwards attributes with __getattr__ must not lend its
+        # target's fast path (it would be bypassed), and a Mock must not answer for every name.
+        native_window = getattr(type(peripheral), "_native_window", None)
+        if native_window is not None:
+            read_ptr, write_ptr, ctx_ptr = native_window(peripheral)
+            handler.read32 = <Read32Fn> <size_t> read_ptr
+            handler.write32 = <Write32Fn> <size_t> write_ptr
+            handler.ctx = <void*> <size_t> ctx_ptr
+            self._window_owners[k] = peripheral  # keeps the block (and so the context pointer) alive
+        else:
+            owner = _PythonWindow(peripheral)
+            self._window_owners[k] = owner
+            handler.read32 = _python_window_read32
+            handler.write32 = _python_window_write32
+            handler.ctx = <void*> owner
+        self._bus.windows.attach(<uint32_t> (k << 12), handler)
+
+    def _detach_window(self, key) -> None:
+        if not isinstance(key, int) or key < 0 or key >= (1 << 20) or (key & 3):
+            return
+        self._bus.windows.detach(<uint32_t> (<unsigned long long> key << 12))
+        self._window_owners.pop(key, None)
+
+    def _clear_windows(self) -> None:
+        self._bus.windows.clear()
+        self._window_owners.clear()
 
     def find_peripheral(self, address):
         return self.peripherals.get((u32(address) >> 14) << 2)
 
     cpdef unsigned int read_uint16(self, long long address):
         """We assume the address is 16-bit aligned."""
-        cdef unsigned int addr = <unsigned int> (address & 0xFFFFFFFFU)
-        cdef unsigned int offset
-        cdef unsigned int value
-        if FLASH_START <= addr < FLASH_START + self.flash_byte_size:
-            offset = addr - FLASH_START
-            return read_uint16_le(self._flash, offset)
-        if RAM_START <= addr < RAM_START + self.ram_byte_size:
-            offset = addr - RAM_START
-            return read_uint16_le(self._sram, offset)
-
-        value = self.read_uint32(addr & 0xFFFFFFFCU)
-        return (value & 0xFFFF0000U) >> 16 if (addr & 0x2) else (value & 0xFFFF)
+        cdef unsigned int value = self._bus.read16(<unsigned int> (address & 0xFFFFFFFFU))
+        raise_if_pending()
+        return value
 
     cpdef unsigned int read_uint8(self, long long address):
-        cdef unsigned int addr = <unsigned int> (address & 0xFFFFFFFFU)
-        cdef unsigned int value
-        if FLASH_START <= addr < FLASH_START + self.flash_byte_size:
-            return self._flash[addr - FLASH_START]
-        if RAM_START <= addr < RAM_START + self.ram_byte_size:
-            return self._sram[addr - RAM_START]
-
-        value = self.read_uint16(addr & 0xFFFFFFFEU)
-        return <unsigned int> ((value & 0xFF00) >> 8 if (addr & 0x1) else (value & 0xFF))
+        cdef unsigned int value = self._bus.read8(<unsigned int> (address & 0xFFFFFFFFU))
+        raise_if_pending()
+        return value
 
     cpdef write_uint32(self, long long address, long long value):
-        cdef unsigned int addr = <unsigned int> (address & 0xFFFFFFFFU)
-        cdef unsigned int val = <unsigned int> (value & 0xFFFFFFFFU)
-        cdef unsigned int atomic_type
-        cdef unsigned int offset
-        # Same range order as read_uint32() - RAM/flash/bootrom checked first via cheap integer
-        # comparisons, find_peripheral() (a dict lookup) only as the fallback for what's left.
-        #
-        # sio/ppb/peripheral get the ORIGINAL `value` object, not the masked `val` - matching
-        # _rp2040.py exactly. sio.py's hardware-divider emulation (see update_hardware_divider's
-        # `self.div_dividend > 0` check) relies on receiving the true signed Python int, not its
-        # unsigned 32-bit truncation; s32()/u32() are idempotent either way, but a raw `> 0`
-        # comparison on a pre-masked value is not.
-        if addr < self.bootrom_byte_size:
-            self._bootrom[addr // 4] = val
-        elif FLASH_START <= addr < FLASH_START + self.flash_byte_size:
-            write_uint32_le(self._flash, addr - FLASH_START, val)
-        elif RAM_START <= addr < RAM_START + self.ram_byte_size:
-            write_uint32_le(self._sram, addr - RAM_START, val)
-        elif DPRAM_START <= addr < DPRAM_START + self.dpram_byte_size:
-            offset = addr - DPRAM_START
-            write_uint32_le(self._usb_dpram, offset, val)
-            self.usb_ctrl.dpram_updated(offset, value)
-        elif SIO_START <= addr < SIO_START + 0x10000000:
-            self.sio.write_uint32(addr - SIO_START, value)
-        elif (addr >> 12) == 0xE000E:
-            self.ppb.write_uint32(addr & 0xFFF, value)
-        else:
-            peripheral = self.find_peripheral(addr)
-            if peripheral is not None:
-                atomic_type = (addr & 0x3000) >> 12
-                offset = addr & 0xFFF
-                peripheral.write_uint32_atomic(offset, value, atomic_type)
-            else:
-                self.logger.warning(LOG_NAME, f"Write to undefined address: {addr:x}")
+        # The handlers get the ORIGINAL `value`, not a masked copy: sio.py's divider emulation relies on the true signed
+        # Python int (see core/bus.hpp).
+        self._bus.write32(<unsigned int> (address & 0xFFFFFFFFU), value)
+        raise_if_pending()
 
     cpdef write_uint8(self, long long address, long long value):
-        cdef unsigned int addr = <unsigned int> (address & 0xFFFFFFFFU)
-        cdef unsigned int val = <unsigned int> (value & 0xFF)
-        cdef unsigned int aligned_address
-        cdef unsigned int offset
-        cdef unsigned int atomic_type
-        cdef unsigned int peripheral_offset
-        if RAM_START <= addr < RAM_START + self.ram_byte_size:
-            self._sram[addr - RAM_START] = val
-            return
-
-        aligned_address = addr & 0xFFFFFFFCU
-        offset = addr & 0x3
-        peripheral = self.find_peripheral(addr)
-        if peripheral is not None:
-            atomic_type = (aligned_address & 0x3000) >> 12
-            peripheral_offset = aligned_address & 0xFFF
-            peripheral.write_uint32_atomic(
-                peripheral_offset,
-                val | (val << 8) | (val << 16) | (val << 24),
-                atomic_type,
-            )
-            return
-        original_value = self.read_uint32(aligned_address)
-        patched = bytearray((<unsigned int> original_value).to_bytes(4, "little"))
-        patched[offset] = val
-        self.write_uint32(aligned_address, int.from_bytes(patched, "little"))
+        self._bus.write8(<unsigned int> (address & 0xFFFFFFFFU), <unsigned int> (value & 0xFF))
+        raise_if_pending()
 
     cpdef write_uint16(self, long long address, long long value):
         # we assume that address is 16-bit aligned.
         # Ideally we should generate a fault if not!
-        cdef unsigned int addr = <unsigned int> (address & 0xFFFFFFFFU)
-        cdef unsigned int val = <unsigned int> (value & 0xFFFF)
-        cdef unsigned int aligned_address
-        cdef unsigned int offset
-        cdef unsigned int atomic_type
-        cdef unsigned int peripheral_offset
-        if RAM_START <= addr < RAM_START + self.ram_byte_size:
-            write_uint16_le(self._sram, addr - RAM_START, val)
-            return
-
-        aligned_address = addr & 0xFFFFFFFCU
-        offset = addr & 0x3
-        peripheral = self.find_peripheral(addr)
-        if peripheral is not None:
-            atomic_type = (aligned_address & 0x3000) >> 12
-            peripheral_offset = aligned_address & 0xFFF
-            peripheral.write_uint32_atomic(peripheral_offset, val | (val << 16), atomic_type)
-            return
-        original_value = self.read_uint32(aligned_address)
-        patched = bytearray((<unsigned int> original_value).to_bytes(4, "little"))
-        write_uint16_le(patched, offset, val)
-        self.write_uint32(aligned_address, int.from_bytes(patched, "little"))
+        self._bus.write16(<unsigned int> (address & 0xFFFFFFFFU), <unsigned int> (value & 0xFFFF))
+        raise_if_pending()
 
     @property
     def gpio_values(self) -> int:

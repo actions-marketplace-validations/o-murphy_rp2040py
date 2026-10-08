@@ -262,7 +262,7 @@ class RPPIO(BasePeripheral):
                 # right after this write already sees the result, with no yield in between." That's
                 # true for a program with no other peripheral dependency, but a DMA-fed transfer
                 # (exactly `cyw43_bus_pio_spi.c`'s own gSPI TX, this project's own paced-by-DREQ
-                # `RPDMAChannel`/`peripherals/dma.py`) needs `SimulationClock` alarms to fire
+                # `RPDMAChannel`/`peripherals/_dma.py`) needs `SimulationClock` alarms to fire
                 # between FIFO drains to keep refilling it - and those alarms only fire from
                 # `clock.tick()`, called once per CPU instruction by
                 # `_execute_batch.py`/`native/_simulator.pyx`'s own outer loop, *never* from inside
@@ -338,17 +338,22 @@ class RPPIO(BasePeripheral):
         else:
             super().write_uint32(offset, value)
 
+    @staticmethod
+    def _pin_write(old: int, value: int, first_pin: int, count: int) -> int:
+        """The result of a write of `count` bits at `first_pin`: "the least-significant bit of OUT data is mapped to PINCTRL_OUT_BASE, and this mapping continues for PINCTRL_OUT_COUNT
+        bits, wrapping after GPIO31" (datasheet 3.5.6), so the data and the mask are rotated left by `first_pin` within 32 bits, not shifted."""
+        value &= 0xFFFFFFFF
+        mask = 0xFFFFFFFF if count > 31 else (1 << count) - 1
+        if first_pin:
+            value = ((value << first_pin) | (value >> (32 - first_pin))) & 0xFFFFFFFF
+            mask = ((mask << first_pin) | (mask >> (32 - first_pin))) & 0xFFFFFFFF
+        return ((old & ~mask) | (value & mask)) & 0x3FFFFFFF
+
     def pin_values_changed(self, value: int, first_pin: int, count: int) -> None:
-        # TODO: wrapping after pin 31
-        mask = 0xFFFFFFFF if count > 31 else ((1 << count) - 1) << first_pin
-        new_value = ((self.pin_values & ~mask) | ((value << first_pin) & mask)) & 0x3FFFFFFF
-        self.pin_values = new_value
+        self.pin_values = self._pin_write(self.pin_values, value, first_pin, count)
 
     def pin_directions_changed(self, value: int, first_pin: int, count: int) -> None:
-        # TODO: wrapping after pin 31
-        mask = 0xFFFFFFFF if count > 31 else ((1 << count) - 1) << first_pin
-        new_value = ((self.pin_directions & ~mask) | ((value << first_pin) & mask)) & 0x3FFFFFFF
-        self.pin_directions = new_value
+        self.pin_directions = self._pin_write(self.pin_directions, value, first_pin, count)
 
     def reset(self) -> None:
         """The whole block back to power-on (0089 Phase 5): instruction memory, the four state

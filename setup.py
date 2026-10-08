@@ -71,14 +71,26 @@ IS_IOS = "ios" in _SYSCONFIG_PLATFORM
 _ABI3_FLOOR = (3, 11)
 _ABI3_HEX = "0x030B0000"
 _GIL_DISABLED = bool(sysconfig.get_config_var("Py_GIL_DISABLED"))
+# PyPy's cpyext does not implement Py_LIMITED_API: verified directly on PyPy 3.11 (where this
+# would otherwise engage, the abi3 floor below) - it fails to compile Cython's generated code
+# with "'PyInterpreterState_Get' was not declared" / "'PyCFunction_GetSelf' was not declared",
+# symbols that exist in PyPy's full C-API headers but aren't exposed under the Py_LIMITED_API
+# gate. PyPy always gets the normal, version-specific build.
 USE_LIMITED_API = (
-    sys.version_info >= _ABI3_FLOOR and not _GIL_DISABLED and not IS_EMSCRIPTEN and not IS_ANDROID and not IS_IOS
+    sys.version_info >= _ABI3_FLOOR
+    and not _GIL_DISABLED
+    and not IS_EMSCRIPTEN
+    and not IS_ANDROID
+    and not IS_IOS
+    and sys.implementation.name != "pypy"
 )
 
 # Relative to setup.py's own directory, not Path(__file__).parent (absolute) - setuptools
 # rejects absolute paths in Extension sources ("setup() arguments must *always* be /-separated
 # paths relative to the setup.py directory").
 _NATIVE_DIR = Path("src/rp2040py/native")
+# The C++17 MCU core (docs/records/0096-cpp-mcu-core.md): header-only today, statically compiled into the Cython modules.
+_CORE_DIR = _NATIVE_DIR / "core"
 
 # Explicit optimization flags rather than relying on the ambient interpreter's own sysconfig
 # CFLAGS: those happen to already include -O3 on a normal CPython build, but that's an implicit
@@ -91,6 +103,17 @@ _NATIVE_DIR = Path("src/rp2040py/native")
 # stripped is the default since none of the three compiled modules are meant to be debugged in
 # the shipped wheel, only symbols the (much larger, unstripped) sdist->local rebuild path needs.
 _DISABLE_STRIP = environ.get("RP2040PY_DISABLE_STRIP") == "1"
+
+# All C++ in this project is built without exceptions and without RTTI (docs/records/0096-cpp-mcu-core.md, D4): the
+# MCU core never throws and must build unchanged into a bare wasm32 module, which has neither - so the Cython-generated
+# translation units are held to the same rule as the core's own headers (a stray `try`/`throw`/`dynamic_cast`, in our
+# code or in what Cython emits, is then a compile error here rather than a surprise on the wasm build). Cython only
+# emits C++ exception handling for calls declared `except +`; nothing here does.
+# -ffp-contract=off: the blocks' double arithmetic must round exactly as the pure-Python reference does, operation by operation. Clang on arm64 (and GCC with -ffp-contract=fast, its
+# default for GNU C++) fuses `a - b * c` into one fused multiply-add, which rounds once instead of twice - a different double once the operands are large (the TIMER parity test saw it
+# on macOS arm64 the first time a 64-bit time could be written). x86-64 has no FMA in the baseline ISA, which is why only an arm64 runner showed it.
+_NO_EXCEPTIONS_GNU = ["-fno-exceptions", "-fno-rtti", "-ffp-contract=off"]
+_NO_EXCEPTIONS_MSVC = ["/EHs-c-", "/GR-"]
 
 # Platform-specific compiler flags
 is_msvc = platform.system() == "Windows"
@@ -105,10 +128,10 @@ is_macos = platform.system() == "Darwin"
 # optimization pass available, and this is a small, self-contained extension where -O3's usual
 # risks (code bloat, aggressive inlining hurting icache on a large codebase) don't apply.
 if is_msvc:
-    _EXTRA_COMPILE_ARGS = ["/O2", "/W3"]
+    _EXTRA_COMPILE_ARGS = ["/O2", "/W3", "/std:c++17", *_NO_EXCEPTIONS_MSVC]
     _EXTRA_LINK_ARGS: list[str] = []
 elif is_macos:
-    _EXTRA_COMPILE_ARGS = ["-O3", "-std=c99"]
+    _EXTRA_COMPILE_ARGS = ["-O3", "-std=c++17", *_NO_EXCEPTIONS_GNU]
     # No -Wl,-strip-all here: that's GNU ld syntax (see the Linux branch below) - Apple's linker
     # rejects it outright ("ld: unknown options: -strip-all"), which broke every macOS wheel build
     # the one time this was tried unconditionally on "not Windows" instead of "Linux specifically"
@@ -125,10 +148,16 @@ elif IS_EMSCRIPTEN:
     # duplicate what the cross-build environment already applies.
     # "-Wl,-strip-all" is dropped: em++'s linker wrapper does not reliably
     # support arbitrary native-ld passthrough flags for stripping.
-    _EXTRA_COMPILE_ARGS = ["-std=c99"]
+    _EXTRA_COMPILE_ARGS = ["-std=c++17", *_NO_EXCEPTIONS_GNU]
     _EXTRA_LINK_ARGS = []
 else:
-    _EXTRA_COMPILE_ARGS = ["-O3", "-std=c99"]
+    _EXTRA_COMPILE_ARGS = ["-O3", "-std=c++17", *_NO_EXCEPTIONS_GNU]
+    if _SYSCONFIG_PLATFORM in ("linux-i686", "linux-i386"):
+        # A 32-bit x86 GCC defaults to the x87 FPU, which keeps intermediate results in 80 bits: the C++ core then rounds a
+        # chain of double arithmetic differently from the pure-Python reference (1 ulp apart, e.g. an alarm due at
+        # 14254079.999999998 instead of 14254080.0 - seen in the PWM/DMA oracles under the i686 wheel build). SSE2 rounds
+        # every operation to double, as Python and every 64-bit target do (MSVC's x86 build already defaults to SSE2).
+        _EXTRA_COMPILE_ARGS += ["-msse2", "-mfpmath=sse"]
     # -Wl,-strip-all: drops debug symbols/relocation info from the built .so at link time (smaller
     # wheel, marginally faster load - doesn't touch the optimizations above, which happen at
     # compile time on the .c GCC/Clang already emitted from Cython's own generated source). GNU ld
@@ -143,7 +172,8 @@ def _build_ext_modules() -> list[Extension]:
     # Cython extensions target CPython's C-API; PyPy's cpyext emulation is a poor fit for it
     # (especially the typed-memoryview-heavy code here) and there's no benefit anyway - PyPy's
     # own JIT already gives the pure-Python fallback most of what Cython buys on CPython.
-    if sys.implementation.name != "cpython":
+    _is_pypy = sys.implementation.name == "pypy"
+    if sys.implementation.name != "cpython" and not (_is_pypy and environ.get("RP2040PY_FORCE_NATIVE_ON_PYPY") == "1"):
         return []
 
     sources = sorted(_NATIVE_DIR.glob("*.pyx"))
@@ -159,8 +189,21 @@ def _build_ext_modules() -> list[Extension]:
         Extension(
             f"rp2040py.native.{path.stem}",
             [str(path)],
+            # C++17 for every module, not just the one that links the core: `_rp2040.pxd` (and so every
+            # module that cimports it) carries C++ members of the MCU core (docs/records/0096, D3), and a
+            # C translation unit cannot compile a struct with a C++ member. The core itself is header-only
+            # for now (core/*.hpp), so there are no extra sources to link - only the include path.
+            language="c++",
+            include_dirs=[str(_CORE_DIR)],
+            depends=[str(p) for p in sorted(_CORE_DIR.glob("*.hpp"))],
             py_limited_api=USE_LIMITED_API,
-            define_macros=[("Py_LIMITED_API", _ABI3_HEX)] if USE_LIMITED_API else [],
+            define_macros=(
+                ([("Py_LIMITED_API", _ABI3_HEX)] if USE_LIMITED_API else [])
+                # Without this, cpyext falls back to a slower untyped path for Cython's
+                # extension types (seen as a "cython.collection_type only works on PyPy
+                # with the C flag CYTHON_USE_TYPE_SPECS=1" RuntimeWarning on every import).
+                + ([("CYTHON_USE_TYPE_SPECS", "1")] if _is_pypy else [])
+            ),
             extra_compile_args=_EXTRA_COMPILE_ARGS,
             extra_link_args=_EXTRA_LINK_ARGS,
             # If the compiler/toolchain is genuinely missing, build_ext skips this extension

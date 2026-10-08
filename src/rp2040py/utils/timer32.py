@@ -20,7 +20,7 @@ def _js_round(value: float) -> int:
 
 
 class Timer32:
-    def __init__(self, clock: IClock, base_freq: int):
+    def __init__(self, clock: IClock, base_freq: float):
         self.clock = clock
         self._base_freq = base_freq
 
@@ -48,8 +48,16 @@ class Timer32:
         decrease the counter if the timer is running in Decrement mode.
 
         :param delta: The value to add to the counter. Can be negative.
+
+        The base value is kept inside the counter's range (retarding past 0 wraps to TOP), and the
+        alarms are told: the counter has moved, so the time it takes to reach each target has too.
         """
         self._base_value += delta
+        if self._top_value != 0xFFFFFFFF:
+            top_modulo = self._top_value * 2 if self._timer_mode == TimerMode.ZIGZAG else self._top_value + 1
+            if top_modulo:
+                self._base_value %= top_modulo
+        self._updated()
 
     @property
     def raw_counter(self) -> int:
@@ -66,6 +74,11 @@ class Timer32:
         zigzag = timer_mode == TimerMode.ZIGZAG
         ticks = ((self.clock.nanos - base_nanos) / 1e9) * (base_freq / prescaler_value)
         top_modulo = self._top_value * 2 if zigzag else self._top_value + 1
+        if top_modulo == 0:
+            # ZIGZAG with TOP == 0: a counter with one state (it counts 0 -> 0), so there is nothing to
+            # take a modulo of. rp2040js's timer32.ts, which this mirrors, computes `x % 0` there - NaN in
+            # JS, which `& 0xFFFFFFFF` turns into 0 - so the counter reads 0. Python raises instead.
+            return 0
         delta = top_modulo - (ticks % top_modulo) if timer_mode == TimerMode.DECREMENT else ticks
         current_value = _js_round(base_value + delta)
         if self._top_value != 0xFFFFFFFF:
@@ -90,11 +103,11 @@ class Timer32:
         self.set(counter if counter <= self._top_value else 0)
 
     @property
-    def frequency(self) -> int:
+    def frequency(self) -> float:
         return self._base_freq
 
     @frequency.setter
-    def frequency(self, value: int) -> None:
+    def frequency(self, value: float) -> None:
         self._base_value = self.counter
         self._base_nanos = self.clock.nanos
         self._base_freq = value

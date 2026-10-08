@@ -12,9 +12,14 @@ Drives `_execute_batch()` directly rather than the `async def execute()` wrapper
 deterministic single-batch behavior without depending on asyncio scheduling order.
 """
 
+import asyncio
 import itertools
+import math
 import time
 
+from utils.emscripten import needs_fine_clock
+
+from rp2040py.rp2040 import RP2040
 from rp2040py.simulator import Simulator
 
 
@@ -122,12 +127,15 @@ def test_batch_yields_within_budget_even_after_switching_from_idle_to_busy():
     busy partway through still took ~0.95s wall time with that version). The budget must be
     tracked from the start of the whole batch instead, regardless of idle/busy transitions.
 
-    core.pc is pointed at zeroed SRAM (matches test_instructions.py's own pattern) so the busy
-    branch's real execute_instruction() call decodes a harmless all-zero opcode
-    (`movs r0, r0`) instead of needing a fake."""
+    core.pc is pointed at SRAM holding `b .` (0xE7FE, a branch to itself) so the busy branch's
+    real execute_instruction() call has a harmless instruction to run for as long as the batch
+    lasts. (Zeroed SRAM, `movs r0, r0`, used to be enough, but a slow batch ran off the end of the
+    SRAM, after which every instruction logged three warnings: on Windows' console that alone took
+    0.1-0.5 s and made this test fail intermittently on CI.)"""
     simulator = Simulator()
     rp2040 = simulator.rp2040
     rp2040.core.pc = 0x20000000
+    rp2040.write_uint16(0x20000000, 0xE7FE)  # b .
     rp2040.core.waiting = True
 
     period_nanos = 1_000_000  # 1ms, matching USBCTRL's SOF period
@@ -155,3 +163,72 @@ def test_batch_yields_within_budget_even_after_switching_from_idle_to_busy():
     simulator.stop()
 
     assert elapsed < 0.1
+
+
+def test_real_io_begin_and_end_count_and_set_the_flag_the_batch_loops_read():
+    simulator = Simulator(rp2040=RP2040())
+    assert simulator._real_io_flag[0] == 0
+    simulator.real_io_begin()
+    simulator.real_io_begin()
+    assert simulator._real_io_flag[0] == 1
+    simulator.real_io_end()
+    assert simulator._real_io_flag[0] == 1  # one wait still outstanding
+    simulator.real_io_end()
+    assert simulator._real_io_flag[0] == 0
+    simulator.real_io_end()  # an unmatched end cannot go negative or latch the flag
+    assert simulator._real_io_flag[0] == 0
+    simulator.real_io_begin()
+    assert simulator._real_io_flag[0] == 1
+
+
+def _advance_an_idle_chip_for(wall_seconds: float, paced: bool, coarse_timer: bool = False) -> float:
+    """Simulated seconds an idle core (nothing but a far-away alarm) gets through in `wall_seconds` of real time, with a real-world wait outstanding or not."""
+
+    real_sleep = asyncio.sleep
+
+    async def _coarse_sleep(delay: float, *args: object) -> None:
+        """A platform whose timer ticks every ~15.6 ms (Windows): every positive sleep is rounded up to a whole tick."""
+        await real_sleep(math.ceil(delay / 0.0156) * 0.0156 if delay > 0 else 0, *args)
+
+    async def _body() -> float:
+        chip = RP2040()
+        simulator = Simulator(rp2040=chip)
+        simulator.bind_loop()
+        chip.core.waiting = True
+        chip.clock.create_alarm(lambda: None).schedule(10e9)  # 10 simulated seconds away
+        if paced:
+            simulator.real_io_begin()
+        task = asyncio.ensure_future(simulator.execute())
+        try:
+            await real_sleep(wall_seconds)
+        finally:
+            simulator.stop()
+            await task
+        return chip.clock.nanos / 1e9
+
+    if coarse_timer:
+        original = asyncio.sleep
+        asyncio.sleep = _coarse_sleep  # type: ignore[assignment]
+        try:
+            return asyncio.run(_body())
+        finally:
+            asyncio.sleep = original  # type: ignore[assignment]
+    return asyncio.run(_body())
+
+
+@needs_fine_clock
+def test_simulated_time_does_not_outrun_the_wall_clock_while_a_real_world_wait_is_outstanding():
+    """The guest's own timeouts run in simulated time and a relayed reply arrives in wall time: while a device waits on the real world, an idle core must advance
+    at no more than about real time. Unpaced, the same core jumps to its alarm 10 simulated seconds away in a few milliseconds."""
+    paced = _advance_an_idle_chip_for(0.4, paced=True)
+    unpaced = _advance_an_idle_chip_for(0.4, paced=False)
+    assert 0.1 < paced < 0.6, paced
+    assert unpaced >= 9.0, unpaced
+
+
+@needs_fine_clock
+def test_pacing_keeps_up_with_real_time_on_a_platform_with_a_coarse_timer():
+    """Windows' sleep(0.001) lasts ~15.6 ms; pacing per batch would then slow the guest to ~1/16 of real time (a CI failure found it). Accounted against the start of the
+    wait, a sleep that overshoots is paid back by the batches after it, so the guest still advances at about real time."""
+    paced = _advance_an_idle_chip_for(0.4, paced=True, coarse_timer=True)
+    assert 0.1 < paced < 0.6, paced

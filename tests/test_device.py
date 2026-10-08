@@ -5,6 +5,7 @@ import threading
 import time
 
 import pytest
+from utils.emscripten import needs_blocking_loop, needs_fine_clock, needs_threads
 
 from rp2040py.boards import BOARDS, BoardSpec
 from rp2040py.device.base_device import ResetCause
@@ -44,6 +45,7 @@ def test_exec_before_start_raises(garbage_image):
         device.exec_async("1")
 
 
+@needs_fine_clock
 def test_start_raises_timeout_error_instead_of_hanging_forever(garbage_image):
     device = MicroPythonDevice(board=_pico_board(garbage_image))
     started = time.monotonic()
@@ -103,6 +105,7 @@ def _reply(device: MicroPythonDevice, *chunks: bytes) -> None:
     device.simulator.call(_send())
 
 
+@needs_threads
 def test_exec_blocks_until_the_device_responds_and_returns_its_output(garbage_image):
     device = MicroPythonDevice(board=_pico_board(garbage_image))
     _pretend_started(device)
@@ -135,7 +138,8 @@ def _serve_queued_execs(device: MicroPythonDevice, replies: "list[bytes]") -> No
     # answering whichever request currently owns the REPL, one at a time.
     last_handler = None
     for reply in replies:
-        while device.cdc.on_serial_data is last_handler:
+        # `is None` too: between two execs the previous runner's stop() clears on_serial_data before the next start() installs its own, and a reply sent into that gap is dropped.
+        while device.cdc.on_serial_data is None or device.cdc.on_serial_data is last_handler:
             time.sleep(0.001)
         # Capture *before* replying, not after: the final on_serial_data call below can
         # cascade all the way into starting the next queued exec on the engine-room loop (its
@@ -146,6 +150,7 @@ def _serve_queued_execs(device: MicroPythonDevice, replies: "list[bytes]") -> No
         last_handler = handler_being_served
 
 
+@needs_threads
 def test_overlapping_exec_async_calls_queue_and_run_in_order(garbage_image):
     device = MicroPythonDevice(board=_pico_board(garbage_image))
     _pretend_started(device)
@@ -160,6 +165,7 @@ def test_overlapping_exec_async_calls_queue_and_run_in_order(garbage_image):
     assert [f.result(timeout=5)[0] for f in futures] == replies
 
 
+@needs_threads
 def test_a_queued_exec_erroring_does_not_stall_the_ones_behind_it(garbage_image):
     device = MicroPythonDevice(board=_pico_board(garbage_image))
     _pretend_started(device)
@@ -169,7 +175,10 @@ def test_a_queued_exec_erroring_does_not_stall_the_ones_behind_it(garbage_image)
 
         def _next_handler():
             nonlocal last_handler
-            while device.cdc.on_serial_data is last_handler:
+            # Wait for the *next runner's* handler, not merely for a change: between two execs the previous runner's stop() sets
+            # `on_serial_data` to None before the next one's start() installs its own, and a reply sent into that gap is dropped
+            # (the exec behind it then waits for ever). A slow runner (the AddressSanitizer job) makes the gap long enough to hit.
+            while device.cdc.on_serial_data is None or device.cdc.on_serial_data is last_handler:
                 time.sleep(0.001)
             last_handler = device.cdc.on_serial_data
 
@@ -277,6 +286,7 @@ def test_ahard_reset_waits_for_re_enumeration_then_redoes_the_handshake(garbage_
     assert bytes(sent) == b"\r\n"  # the console the CLI used to nudge is usable again
 
 
+@needs_blocking_loop
 def test_ahard_reset_defaults_to_the_run_pin_cause(garbage_image, monkeypatch):
     device = MicroPythonDevice(board=_pico_board(garbage_image))
     causes = _fake_reenumerating_reset(device, monkeypatch)
@@ -297,6 +307,7 @@ def test_ahard_reset_raises_timeout_error_instead_of_hanging_forever(garbage_ima
         asyncio.run(device._ahard_reset(0.3, ResetCause.RUN_PIN))
 
 
+@needs_blocking_loop
 def test_a_reset_is_not_a_second_start(garbage_image, monkeypatch):
     """0089 §2.3: `_started` stays True across a reset - `start_async()` must keep raising."""
     device = MicroPythonDevice(board=_pico_board(garbage_image))

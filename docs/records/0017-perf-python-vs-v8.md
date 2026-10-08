@@ -1,6 +1,6 @@
 # 0017. Note — Performance: pure-Python interpretation vs V8
 
-- Status: Note (rationale + measurements)
+- Status: Note (rationale + measurements) - **the figures below are historical; see the 2026-10-05 update at the end**
 - Recorded: 2026-08-05
 - Related: 0011, 0013, 0015, 0016
 
@@ -251,3 +251,81 @@ Two mitigations, worth combining:
   regression this found and fixed, and the two real correctness bugs the build-then-test loop
   caught along the way).
 
+
+## Update 2026-10-05: the tables above no longer describe the project
+
+Everything above was measured with the pure-Python/Cython-per-instruction core, stepping one
+instruction at a time from Python. Since then record [0096](0096-cpp-mcu-core.md) moved the core,
+the bus and the peripherals into C++ behind a batch engine, and `bench` was fixed to measure that
+engine. Re-measured with a littlefs image preloaded (`rp2040py mklittlefs -o lfs.img
+tests/micropython/main.py --main main.py`, then `rp2040py bench --image <uf2> --littlefs lfs.img
+--expect-text "Hello, MicroPython!"`), CPython 3.10, wall time to the first line of the resident
+script:
+
+| Firmware | Pure Python (`RP2040PY_SKIP_CYTHON=1`) | Native (default) |
+| --- | --- | --- |
+| MicroPython 1.28 | 1.89 s | 0.02 s (~95x) |
+| MicroPython 1.21 | 3.36 s | 0.03 s (~110x) |
+
+PyPy 3.10 (7.3.19, pure Python, the native build is skipped there): 1.31 s on 1.28, 1.77 s on 1.21.
+
+What this changes in the text above:
+
+- **The "64.7M steps / 188.98 s for 1.28" and the "1.28 is 45x costlier than 1.21" explanation are
+  withdrawn.** The step count included trips round the stepping loop with the core asleep (WFE, no
+  timer armed). 1.28 needs ~1 million real instructions to its first line, and both versions now
+  reach it in about the same wall time. 1.21 is no longer the recommended version.
+- **The V8 comparison is out of date, and is now re-measured head to head.** rp2040js (branch
+  `feat/littlefs-write-support`, Node 22.22, `npx tsx demo/micropython-run.ts --image <uf2> --littlefs lfs.img
+  --expect-text "Hello, MicroPython!"`, same machine, same firmware and littlefs image, three runs each) versus
+  `rp2040py bench` (native, same image), whole-process wall time including interpreter start-up
+  (`node`+`tsx` alone ~0.72 s, `python -c "import rp2040py.cli"` ~0.14 s):
+
+  | Firmware | rp2040js (total / minus start-up) | rp2040py native (total / minus start-up) |
+  | --- | --- | --- |
+  | MicroPython 1.28 | 3.5-4.2 s / ~2.8-3.5 s | 0.21-0.23 s / ~0.07-0.09 s |
+  | MicroPython 1.21 | 1.01-1.06 s / ~0.3 s | 0.23-0.25 s / ~0.09-0.11 s |
+
+  **Read these numbers as "time to the first line with each emulator's own idle handling", not as raw
+  instruction throughput.** rp2040js's `Simulator.execute()` goes through every idle trip (a core in
+  WFE/WFI with no alarm to wake it) inside its 1,000,000-iteration batch and then yields with
+  `setTimeout(0)`; rp2040py's batch engine skips an idle core outright. That is the same effect that
+  inflated the old "64.7M steps" for 1.28 (it spends most of its time idle by the first line), and it
+  is presumably why 1.28 is ~3x slower than 1.21 in rp2040js while the two are level here. Both facts
+  are real for someone running the emulator, but the 30-40x on 1.28 mostly measures that design
+  difference, not a faster instruction loop. The idle-free comparison is the next table. Also: one machine, Node 22 rather than v26, `tsx` rather
+  than a compiled build, and the "first line" moment is not identical (rp2040py's simulated time at the
+  first line differs between the native and pure builds - an open oddity, record 0096).
+- **Idle-free instruction speed, head to head.** The same three-instruction loop in RAM (`adds r0,#1;
+  subs r0,#1; b .-4`), run for 0.4 simulated seconds (50M cycles at 125 MHz), each emulator driving its
+  own batch loop with no idle time and no I/O (rp2040py: `Simulator._execute_batch()`; rp2040js: the body
+  of `Simulator.execute()` without the `setTimeout`):
+
+  | Emulator | Wall time | Simulated / wall |
+  | --- | --- | --- |
+  | rp2040py native | 0.30 s | **1.36x real time** |
+  | rp2040js (Node 22) | 0.63-0.74 s | 0.55-0.65x |
+  | rp2040py pure Python | 75.5 s | 0.005x |
+
+  So on the raw instruction path the native build is ~2x rp2040js and runs this loop faster than a real
+  125 MHz RP2040 would. A loop of 1-cycle ALU instructions is the favourable case; instruction mixes with
+  more memory and peripheral traffic land lower (the boot-to-first-line figures above are dominated by
+  those), so read 1.36x as "real time or a bit better", not as a floor. (Per-call `core.execute_instruction()`
+  from Python, `rp2040py bench` synthetic mode, is a different thing again: ~28M instructions/s, bounded by
+  the Python-to-C++ call, against ~55M/s for rp2040js's plain JS method call.)
+- **PyPy was re-measured** (above): ~1.3-1.8 s, i.e. only ~1.4-1.9x faster than CPython's pure build (it was ~16x
+  on the old per-instruction engine, whose cost was interpretive overhead PyPy could remove) and ~60x slower than the
+  native build. "Run under PyPy" is no longer the advice; the native build is the fast path.
+- **PyPy + the native build (opt-in, `RP2040PY_FORCE_NATIVE_ON_PYPY=1`, the cpyext path of `setup.py`) - documented, not recommended.** PyPy 3.10.16 (7.3.19), 1.28 + littlefs, same machine; pure = `RP2040PY_SKIP_CYTHON=1`:
+
+  | | PyPy pure | PyPy + native |
+  | --- | --- | --- |
+  | boot to the first line, bench loop (3 runs) | 1.32-1.39 s | 0.02-0.03 s |
+  | the same, whole process | 2.3-2.5 s | 0.54-0.59 s |
+  | batch loop, 0.4 simulated s | 1.69 s (0.24x real time) | 0.55 s (0.72x) |
+  | boot + `for i in range(30000)` workload (no littlefs) | 1.18 s + 2.38 s | 0.03 s + 0.37 s |
+  | `bench` synthetic mode, one `execute_instruction()` call from Python each | 26-61M instr/s (the JIT inlines the Python) | **0.59-0.63M instr/s** (a cpyext round trip per call) |
+
+  The batch engine, which is what a run uses, gains 3-50x; the one-instruction-at-a-time Python-driven path (`--stepwise`, the GDB target, tests that call the core directly) is ~100x slower than PyPy's pure Python. Against CPython + native the same batch loop takes 0.30 s (1.36x real time), so PyPy + native is about half as fast, and its process start-up is longer (0.55 s against 0.21 s). One run per figure (three for the boot), JIT warm-up included. The commit that added this path (`b035126`) quotes 52-96 -> 108-123 Minstr/s on the synthetic loop; that does not reproduce here (0.6M) and was not chased - the code under it has changed since (the C++ core), or it was measured another way. A side effect worth knowing: the PyPy build leaves its `.so` files (`*.pypy310-pp73-*.so`, git-ignored) beside the CPython ones in `src/rp2040py/native/`, and editable installs of both interpreters share that tree, so a pure PyPy run needs `RP2040PY_SKIP_CYTHON=1` once the native build has been made.
+- Preloading littlefs does not change these numbers measurably: the README figures (taken the same
+  way) agree with the table here.

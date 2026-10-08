@@ -28,6 +28,7 @@ TREQ_PERMANENT = 0x3F
 
 SPI0_BASE = 0x4003C000
 SSPCR1 = SPI0_BASE + 0x004
+SSPDMACR = SPI0_BASE + 0x024
 SSPDR = SPI0_BASE + 0x008
 SSE = bit(1)
 
@@ -35,6 +36,7 @@ CH0_READ_ADDR = DMA_BASE + 0x000
 CH0_WRITE_ADDR = DMA_BASE + 0x004
 CH0_TRANS_COUNT = DMA_BASE + 0x008
 CH0_AL1_CTRL = DMA_BASE + 0x010
+CH0_CTRL_TRIG = DMA_BASE + 0x00C
 CH1_READ_ADDR = DMA_BASE + 0x040
 CH1_WRITE_ADDR = DMA_BASE + 0x044
 CH1_TRANS_COUNT = DMA_BASE + 0x048
@@ -147,7 +149,10 @@ def test_spi_dma_paired_tx_rx_transfer_completes_without_listener(rp2040_factory
     for i, value in enumerate(message):
         cpu.write_uint8(src_addr + i, value)
 
-    cpu.write_uint32(SSPCR1, SSE)  # spi_init()-equivalent: enable the SPI peripheral.
+    # spi_init()-equivalent: enable the SPI peripheral and, as pico-sdk's spi_init() does (src/rp2_common/hardware_spi/spi.c: "Always enable DREQ signals"), both DMA enables - the datasheet gates the requests
+    # on SSE and SSPDMACR (docs/records/0098-datasheet-conformance-audit.md).
+    cpu.write_uint32(SSPDMACR, 3)
+    cpu.write_uint32(SSPCR1, SSE)
 
     # Channel 0 = TX: src_addr -> SSPDR, paced by DREQ_SPI0_TX, chained to itself (no chaining).
     cpu.write_uint32(CH0_READ_ADDR, src_addr)
@@ -184,3 +189,58 @@ def test_spi_dma_paired_tx_rx_transfer_completes_without_listener(rp2040_factory
     # this asserts the RX DMA channel actually wrote real per-byte completions, not that it
     # merely stopped being busy.
     assert bytes(cpu.read_uint8(dst_addr + i) for i in range(len(message))) == bytes(len(message))
+
+
+def test_a_channel_triggered_with_a_zero_count_does_nothing(rp2040_factory):
+    """No transfers means no sequence: the channel does not become BUSY, raises no interrupt, and a later trigger with a real count works.
+
+    It used to set BUSY and schedule nothing: the channel then ignored every trigger, and a later CTRL rewrite or DREQ edge ran one transfer that took the count
+    to -1 (docs/records/0096-cpp-mcu-core.md). rp2040-emu does the same as it does now; the pico-sdk does not define it.
+    """
+    clock = MockClock()
+    cpu = rp2040_factory(clock)
+    cpu.write_uint32(0x20001000, 0xCAFEBABE)
+    ctrl = (
+        EN
+        | (2 << DATA_SIZE_SHIFT)
+        | INCR_READ
+        | INCR_WRITE
+        | (0 << CHAIN_TO_SHIFT)
+        | (TREQ_PERMANENT << TREQ_SEL_SHIFT)
+    )
+
+    cpu.write_uint32(CH0_READ_ADDR, 0x20001000)
+    cpu.write_uint32(CH0_WRITE_ADDR, 0x20002000)
+    cpu.write_uint32(CH0_TRANS_COUNT, 0)
+    cpu.write_uint32(CH0_CTRL_TRIG, ctrl)
+    assert not cpu.read_uint32(CH0_CTRL_TRIG) & BUSY
+    assert cpu.read_uint32(INTR) == 0
+
+    cpu.write_uint32(CH0_AL1_CTRL, ctrl)  # a rewrite of CTRL, and a clock that runs: still nothing
+    clock.advance(10)
+    assert not cpu.read_uint32(CH0_CTRL_TRIG) & BUSY
+    assert cpu.read_uint32(CH0_TRANS_COUNT) == 0
+    assert cpu.read_uint32(0x20002000) == 0
+
+    cpu.write_uint32(CH0_TRANS_COUNT, 1)  # the same channel, with a count, runs normally
+    cpu.write_uint32(CH0_CTRL_TRIG, ctrl)
+    clock.advance(10)
+    assert cpu.read_uint32(0x20002000) == 0xCAFEBABE
+    assert cpu.read_uint32(INTR) == 1
+
+
+def test_an_abort_clears_the_transfer_counter_and_the_busy_flag(rp2040_factory):
+    """Datasheet 2.5.5.3: "[CHAN_ABORT] terminates that channel. This clears the transfer counter and forces the channel into an inactive state"."""
+    cpu = rp2040_factory(MockClock())
+    cpu.write_uint32(CH0_READ_ADDR, 0x2001_0000)
+    cpu.write_uint32(CH0_WRITE_ADDR, 0x2002_0000)
+    cpu.write_uint32(CH0_TRANS_COUNT, 100)
+    cpu.write_uint32(
+        CH0_AL1_CTRL, EN | INCR_READ | INCR_WRITE | (DREQChannel.DREQ_SPI0_TX << TREQ_SEL_SHIFT)
+    )  # paced by a DREQ that is never up
+    cpu.write_uint32(MULTI_CHAN_TRIGGER, bit(0))
+    assert cpu.dma.channels[0].active and cpu.read_uint32(CH0_TRANS_COUNT) == 100
+    cpu.write_uint32(DMA_BASE + 0x444, bit(0))  # CHAN_ABORT
+    assert not cpu.dma.channels[0].active
+    assert cpu.read_uint32(CH0_TRANS_COUNT) == 0
+    assert cpu.read_uint32(DMA_BASE + 0x444) == 0

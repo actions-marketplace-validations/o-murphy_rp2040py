@@ -36,7 +36,7 @@ jobs:
       CXXFLAGS: -fsanitize=address -fno-omit-frame-pointer -g -O1
       LDFLAGS: -fsanitize=address
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7.0.1
 
       - name: Install uv
         uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0

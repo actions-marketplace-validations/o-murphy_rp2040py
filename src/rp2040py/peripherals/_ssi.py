@@ -39,6 +39,7 @@ SSI_DMARDLR = 0x00000054
 SSI_IDR = 0x00000058
 SSI_VERSION_ID = 0x0000005C
 SSI_DR0 = 0x00000060
+SSI_DR_LAST = 0x000000EC  # DR0..DR35: 36 word locations that all are the one data register (datasheet 4.10.13: "Data Register 0 (of 36)" and the note under 4.10.12)
 SSI_RX_SAMPLE_DLY = 0x000000F0
 SSI_SPI_CTRL_R0 = 0x000000F4
 SSI_TXD_DRIVE_EDGE = 0x000000F8
@@ -95,6 +96,12 @@ STATUS2_QE_BIT = 0x02  # quad-enable (status register 2) - reported permanently 
 # boot/flash path is known to hard-require a specific real chip's exact ID, just *a* consistent
 # 3-byte response to CMD_READ_JEDEC_ID.
 JEDEC_ID = (0xEF, 0x40, 0x15)
+
+
+def is_data_register(offset: int) -> bool:
+    """Any of the 36 locations DR0..DR35: "Writing to any of these address locations has the same effect as pushing the data ... into the transmit FIFO. Reading from any of these locations has the same effect
+as popping data from the receive FIFO" (4.10.12). The text says sixty-four locations and the register list 36; RX_SAMPLE_DLY sits at 0xF0, so 36 is what fits, and the list is followed."""
+    return SSI_DR0 <= offset <= SSI_DR_LAST and offset & 3 == 0
 
 
 class RPSSI(BasePeripheral):
@@ -199,7 +206,7 @@ class RPSSI(BasePeripheral):
             return self._txddriveedge
         if offset == SSI_SPI_CTRL_R0:
             return self._spictlr0
-        if offset == SSI_DR0:
+        if is_data_register(offset):
             return self._rx_queue.popleft() if self._rx_queue else 0
         return super().read_uint32(offset)
 
@@ -224,7 +231,7 @@ class RPSSI(BasePeripheral):
             self._txddriveedge = value & 0xFF
         elif offset == SSI_SPI_CTRL_R0:
             self._spictlr0 = value & SPI_CTRLR0_MASK
-        elif offset == SSI_DR0:
+        elif is_data_register(offset):
             if self._ssienr:
                 if self._cs_asserted:
                     self._rx_queue.append(self._shift_byte(value & 0xFF))

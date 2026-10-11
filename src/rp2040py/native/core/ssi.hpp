@@ -47,9 +47,11 @@ struct SsiHost {
 
 namespace ssi_regs {
 constexpr uint32_t CTRLR0 = 0x00, CTRLR1 = 0x04, SSIENR = 0x08, BAUDR = 0x14, TXFLR = 0x20, RXFLR = 0x24, SR = 0x28;
-constexpr uint32_t IDR = 0x58, VERSION_ID = 0x5C, DR0 = 0x60, RX_SAMPLE_DLY = 0xF0, SPI_CTRL_R0 = 0xF4, TXD_DRIVE_EDGE = 0xF8;
+constexpr uint32_t IDR = 0x58, VERSION_ID = 0x5C, DR0 = 0x60, DR_LAST = 0xEC, RX_SAMPLE_DLY = 0xF0, SPI_CTRL_R0 = 0xF4, TXD_DRIVE_EDGE = 0xF8;
 constexpr uint32_t MWCR = 0x0C, SER = 0x10, TXFTLR = 0x18, RXFTLR = 0x1C, IMR = 0x2C, ISR = 0x30, RISR = 0x34, TXOICR = 0x38, RXOICR = 0x3C, RXUICR = 0x40, MSTICR = 0x44, ICR = 0x48;
 constexpr uint32_t DMACR = 0x4C, DMATDLR = 0x50, DMARDLR = 0x54;
+// DR0..DR35: 36 word locations that are all the one data register (datasheet 4.10.12/4.10.13)
+inline bool is_data_register(uint32_t offset) noexcept { return offset >= DR0 && offset <= DR_LAST && (offset & 3u) == 0; }
 // Writable bits (datasheet 4.10.13: CTRLR0 24 and 22:0, CTRLR1 15:0, SSIENR 0, BAUDR 15:0, SPI_CTRLR0 31:24, 18:11, 9:8 and 5:0) and the reset value of SPI_CTRLR0 (XIP_CMD = 0x03)
 constexpr uint32_t CTRLR0_MASK = 0x017FFFFFu, CTRLR1_MASK = 0xFFFFu, SSIENR_MASK = 0x1u, BAUDR_MASK = 0xFFFFu, SPI_CTRLR0_MASK = 0xFF07FB3Fu, SPI_CTRLR0_RESET = 0x03000000u;
 // The stored, not-acted-on registers (the SSI is a flash-command model: no FIFOs of its own, no interrupts, no DMA), in the order of `stored_`: offset and writable mask. Every reset value is 0.
@@ -148,6 +150,7 @@ public:
     uint32_t read(uint32_t offset) noexcept {
         using namespace ssi_regs;
         if (const int slot = stored_index(offset); slot >= 0) return stored_[slot];
+        if (is_data_register(offset)) return pop_rx();
         switch (offset) {
             case ISR: case RISR: case TXOICR: case RXOICR: case RXUICR: case MSTICR: case ICR: return 0;  // nothing is ever raised
             case TXFLR: return txflr_;
@@ -162,7 +165,6 @@ public:
             case RX_SAMPLE_DLY: return rxsampdly_;
             case TXD_DRIVE_EDGE: return txddriveedge_;
             case SPI_CTRL_R0: return spictrl0_;
-            case DR0: return pop_rx();
             default: break;
         }
         if (host_.warn != nullptr) {
@@ -180,6 +182,10 @@ public:
             stored_[slot] = word & STORED_MASK[slot];
             return;
         }
+        if (is_data_register(offset)) {
+            if (ssienr_ != 0) push_rx(cs_asserted_ ? shift_byte(static_cast<uint8_t>(word & 0xFFu)) : static_cast<uint8_t>(0xFF));
+            return;
+        }
         switch (offset) {
             case TXFLR: case RXFLR: case ISR: case RISR: case TXOICR: case RXOICR: case RXUICR: case MSTICR: case ICR: return;  // read-only status: a write is a no-op
             case CTRLR0: ctrlr0_ = word & CTRLR0_MASK; return;
@@ -192,9 +198,6 @@ public:
             case RX_SAMPLE_DLY: rxsampdly_ = word & 0xFFu; return;
             case TXD_DRIVE_EDGE: txddriveedge_ = word & 0xFFu; return;
             case SPI_CTRL_R0: spictrl0_ = word & SPI_CTRLR0_MASK; return;
-            case DR0:
-                if (ssienr_ != 0) push_rx(cs_asserted_ ? shift_byte(static_cast<uint8_t>(word & 0xFFu)) : static_cast<uint8_t>(0xFF));
-                return;
             default: break;
         }
         if (host_.warn != nullptr) host_.warn(host_.ctx, kSsiWarnWrite, offset, value);

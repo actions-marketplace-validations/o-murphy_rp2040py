@@ -49,7 +49,8 @@ WRITABLE = (
     S.SSI_CTRLR0, S.SSI_CTRLR1, S.SSI_BAUDR, S.SSI_TXFLR, S.SSI_RXFLR, S.SSI_RX_SAMPLE_DLY, S.SSI_SPI_CTRL_R0, S.SSI_TXD_DRIVE_EDGE, S.SSI_SSIENR, S.SSI_MWCR, S.SSI_SER,
     S.SSI_TXFTLR, S.SSI_RXFTLR, S.SSI_IMR, S.SSI_DMACR, S.SSI_DMATDLR, S.SSI_DMARDLR, S.SSI_ISR, S.SSI_ICR,
 )  # fmt: skip
-UNIMPLEMENTED = (0x64, 0x68, 0xA0, 0xEC, 0x100, 0x200)
+UNIMPLEMENTED = (0xFC, 0x100, 0x200)
+DR_ALIASES = (0x64, 0x68, 0xA0, 0xEC)  # DR1..DR35 are the data register too
 OPCODES = (
     S.CMD_WRITE_ENABLE, S.CMD_WRITE_DISABLE, S.CMD_READ_STATUS_1, S.CMD_READ_STATUS_2, S.CMD_WRITE_STATUS, S.CMD_PAGE_PROGRAM, S.CMD_SECTOR_ERASE, S.CMD_BLOCK_ERASE,
     S.CMD_READ_DATA, S.CMD_READ_JEDEC_ID,
@@ -99,9 +100,9 @@ class Rig:
         elif kind == "read":
             return int(chip.read_uint32(SSI_BASE + op[1]))
         elif kind == "dr0_write":
-            chip.write_uint32(SSI_BASE + S.SSI_DR0, op[1])
+            chip.write_uint32(SSI_BASE + (op[2] if len(op) > 2 else S.SSI_DR0), op[1])
         elif kind == "dr0_read":
-            return int(chip.read_uint32(SSI_BASE + S.SSI_DR0))
+            return int(chip.read_uint32(SSI_BASE + (op[1] if len(op) > 1 else S.SSI_DR0)))
         elif kind == "cs":
             self._cs(op[1])
         elif kind == "command":  # one whole transaction, the way the bootrom does it
@@ -225,7 +226,15 @@ def mutant_rig(name: str) -> Rig:
                 return
             super()._on_cs_pin_changed(value, _last_value)
 
+        def read_uint32(self, offset: int) -> int:
+            if name == "dr_aliases_unimplemented" and S.is_data_register(offset) and offset != S.SSI_DR0:
+                return super(S.RPSSI, self).read_uint32(offset)
+            return super().read_uint32(offset)
+
         def write_uint32(self, offset: int, value: int) -> None:
+            if name == "dr_aliases_unimplemented" and S.is_data_register(offset) and offset != S.SSI_DR0:
+                super(S.RPSSI, self).write_uint32(offset, value)
+                return
             if name == "deasserted_pushes_nothing" and offset == S.SSI_DR0 and self._ssienr and not self._cs_asserted:
                 return
             if name == "ctrlr0_unmasked" and offset == S.SSI_CTRLR0:
@@ -276,7 +285,7 @@ MUTANTS = (
     "status2_zero", "jedec_wrong", "read_data_offset", "unknown_reads_zero", "erase_ignores_wel", "erase_not_aligned", "program_overwrites", "program_keeps_wel",
     "program_page_257", "rx_kept_on_assert", "deasserted_pushes_nothing", "ssienr_ignored", "reset_cs_false", "reset_keeps_wel",
     "ctrlr0_unmasked", "ctrlr1_unmasked", "baudr_unmasked", "spi_ctrlr0_unmasked", "ssienr_unmasked", "txflr_writable", "imr_unmasked", "stored_not_stored", "spi_ctrlr0_reset_zero",
-    "reset_keeps_stored",
+    "reset_keeps_stored", "dr_aliases_unimplemented",
 )  # fmt: skip
 
 
@@ -372,13 +381,13 @@ def generate(seed: int, steps: int) -> list[tuple]:
             for _ in range(
                 r.randrange(1, 6)
             ):  # raw DR0 traffic: with whatever chip-select state and SSIENR the stream left
-                ops.append(("dr0_write", r.getrandbits(8)))
+                ops.append(("dr0_write", r.getrandbits(8), r.choice((S.SSI_DR0, S.SSI_DR0, *DR_ALIASES))))
                 if r.random() < 0.5:
-                    ops.append(("dr0_read",))
+                    ops.append(("dr0_read", r.choice((S.SSI_DR0, S.SSI_DR0, *DR_ALIASES))))
         elif roll < 0.93:
             ops.append(("cs", r.choice((CS_LOW, CS_HIGH, CS_HIGH, CS_RELEASED))))
         elif roll < 0.96:
-            ops.append(("dr0_read",))
+            ops.append(("dr0_read", r.choice((S.SSI_DR0, *DR_ALIASES))))
         elif roll < 0.985:
             ops.append(("reset",))
         else:
@@ -512,7 +521,9 @@ def coverage(ops: list[tuple]) -> dict[str, int]:
         original_cs(self, value, last)
 
     def write(self: Any, offset: int, value: int) -> None:
-        if offset == S.SSI_DR0:
+        if S.is_data_register(offset):
+            if offset != S.SSI_DR0:
+                count("dr.alias")
             count(
                 "dr0.cs_asserted"
                 if self._ssienr and self._cs_asserted

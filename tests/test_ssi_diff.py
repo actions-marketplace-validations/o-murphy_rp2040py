@@ -85,7 +85,7 @@ def test_the_runs_exercise_what_they_claim_to():
         "program.no_wel.long",
     ):
         assert total.get(name, 0) >= 20, (name, total)
-    for name in ("cs.assert", "cs.deassert", "dr0.cs_asserted", "dr0.cs_deasserted", "dr0.ssienr_clear"):
+    for name in ("cs.assert", "cs.deassert", "dr0.cs_asserted", "dr0.cs_deasserted", "dr0.ssienr_clear", "dr.alias"):
         assert total.get(name, 0) >= 50, (name, total)
     assert total.get("read.in_range", 0) >= 1000 and total.get("read.past_the_end", 0) >= 100, total
     assert total.get("shift.past_260", 0) >= 500, total  # a command longer than the 256 data bytes a program keeps

@@ -97,6 +97,23 @@ static void fresh() {
     env.warns = 0;
 }
 
+static void test_dr1_to_dr35_are_the_data_register_too() {
+    // datasheet 4.10.12: writing to any of the 36 locations pushes into the TX FIFO and reading from any pops the RX FIFO
+    fresh();
+    wr(SSIENR, 1);
+    cs(kCsLow);
+    wr(0x64, CMD_READ_STATUS_1);  // DR1
+    wr(0xEC, 0);                  // DR35
+    CHECK(rd(RXFLR) == 2 && rd(0x68) == 0xFF && rd(0xA0) == 0 && rd(RXFLR) == 0);  // popped through DR2 and DR16
+    CHECK(env.warns == 0);
+    CHECK(rd(0x66) == 0xFFFFFFFFu && env.warns == 1);  // not word aligned: no register
+    wr(0xF0, 0x77);                                    // RX_SAMPLE_DLY, not a data register
+    CHECK(rd(0xF0) == 0x77 && rd(RXFLR) == 0);
+    wr(0x60, CMD_READ_STATUS_1);
+    CHECK(rd(0xEC) == 0);  // pushed through DR0 (a third byte of the status command: WEL clear), popped through DR35
+    cs(kCsHigh);
+}
+
 int main() {
     PinHost host;
     const bool always_output_enabled = true;  // QSPI_SS is
@@ -106,6 +123,8 @@ int main() {
     ssi_host.warn = on_warn;
     ssi.init(flash, kFlashSize, ssi_host);
     CHECK(ssi.bind_cs(&cs_pin));
+    fresh();
+    test_dr1_to_dr35_are_the_data_register_too();
     fresh();
 
     // ---- the register file ----------------------------------------------------------------------------------------------
@@ -137,12 +156,12 @@ int main() {
     CHECK(ssi.reset());
     CHECK(rd(SPI_CTRL_R0) == 0x03000000u && rd(IMR) == 0 && rd(SER) == 0 && rd(CTRLR0) == 0);
     fresh();
-    CHECK(rd(0x64) == 0xFFFFFFFFu && env.warns == 1 && env.warn_kind[0] == kSsiWarnRead && env.warn_offset[0] == 0x64);
+    CHECK(rd(0xFC) == 0xFFFFFFFFu && env.warns == 1 && env.warn_kind[0] == kSsiWarnRead && env.warn_offset[0] == 0xFC);
     env.warns = 0;
-    CHECK(rd(0x1064) == 0xFFFFFFFFu && env.warns == 2 && env.warn_kind[0] == kSsiWarnRead && env.warn_kind[1] == kSsiWarnReadAtomicArea);
+    CHECK(rd(0x10FC) == 0xFFFFFFFFu && env.warns == 2 && env.warn_kind[0] == kSsiWarnRead && env.warn_kind[1] == kSsiWarnReadAtomicArea);
     env.warns = 0;
-    wr(0x68, 0x1234);
-    CHECK(env.warns == 1 && env.warn_kind[0] == kSsiWarnWrite && env.warn_offset[0] == 0x68 && env.warn_value[0] == 0x1234);
+    wr(0xFC, 0x1234);
+    CHECK(env.warns == 1 && env.warn_kind[0] == kSsiWarnWrite && env.warn_offset[0] == 0xFC && env.warn_value[0] == 0x1234);
     env.warns = 0;
     // the atomic aliases decode against a read of the register
     wr(CTRLR0, 0x0F, kAtomicNormal);

@@ -304,3 +304,18 @@ def test_disabling_the_ssi_clears_the_receive_fifo(rp2040_factory):
     chip.write_uint32(base + 0x08, 0)
     assert chip.read_uint32(base + 0x24) == 0
     assert not chip.read_uint32(base + 0x28) & 0x8  # SR.RFNE
+
+
+def test_dr1_to_dr35_are_the_data_register_too(rp2040_factory):
+    """Datasheet 4.10.12 ("Writing to any of these address locations has the same effect as pushing the data ... into the transmit FIFO. Reading from any of these locations has the same effect as popping data
+    from the receive FIFO") and the register list ("Data Register 0 (of 36)", 0x60 to 0xEC; RX_SAMPLE_DLY follows at 0xF0)."""
+    chip = rp2040_factory()
+    base = 0x18000000
+    chip.write_uint32(base + 0x08, 1)  # SSIENR
+    for offset in range(0x60, 0xF0, 4):
+        chip.write_uint32(base + offset, 0xAB)  # pushes one byte, whichever DR it is
+        assert chip.read_uint32(base + 0x24) == 1, hex(offset)  # RXFLR
+        chip.read_uint32(base + 0xEC if offset == 0x60 else base + 0x64)  # pops it through another DR
+        assert chip.read_uint32(base + 0x24) == 0, hex(offset)
+    chip.write_uint32(base + 0xF0, 0x55)  # RX_SAMPLE_DLY is a register of its own
+    assert chip.read_uint32(base + 0xF0) == 0x55 and chip.read_uint32(base + 0x24) == 0

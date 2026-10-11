@@ -40,3 +40,20 @@ def _collect_between_tests_on_a_32_bit_build():
     yield
     if IS32BIT:
         gc.collect()
+
+
+# PyPy only: littlefs-python's LittleFS/file C objects are finalised out of order when the interpreter shuts down ("lfs_file_close: Assertion `lfs_mlist_isopen(...)' failed", SIGABRT)
+# after any test has built an image in-process - an upstream limitation the CLI already works around with `os._exit()` (cli/__init__.py, `_cmd_mklittlefs`). A test run that has
+# passed must not end in a crash, so on PyPy the session ends by leaving through `os._exit()` with pytest's own exit status once everything has been reported.
+def pytest_sessionfinish(session, exitstatus):
+    session.config._rp2040py_exitstatus = int(exitstatus)
+
+
+def pytest_unconfigure(config):
+    import os
+    import sys
+
+    if sys.implementation.name == "pypy":
+        sys.stdout.flush()
+        sys.stderr.flush()
+        os._exit(getattr(config, "_rp2040py_exitstatus", 0))

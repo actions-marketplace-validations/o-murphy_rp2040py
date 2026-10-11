@@ -1167,6 +1167,11 @@ def _resolve_mklittlefs_layout(args: argparse.Namespace) -> "tuple[int, int] | N
     return block_size, block_count
 
 
+# True when `main()` was handed an explicit `argv` (a test or a library caller) rather than started as the entry point; set by `main()`. `_cmd_mklittlefs` needs to know,
+# because its PyPy-only `os._exit()` must never run inside somebody else's process.
+_called_with_explicit_argv = False
+
+
 def _cmd_mklittlefs(args: argparse.Namespace) -> None:
     if args.target is not None and (args.block_size is not None or args.block_count is not None):
         _logger.error("--target is mutually exclusive with --block-size/--block-count")
@@ -1192,7 +1197,7 @@ def _cmd_mklittlefs(args: argparse.Namespace) -> None:
         sys.exit(1)
     _logger.info("Wrote littlefs image: %s", args.output)
 
-    if sys.implementation.name == "pypy":
+    if sys.implementation.name == "pypy" and not _called_with_explicit_argv:
         # os._exit(), not a normal return: under PyPy, littlefs-python's LittleFS/file C objects
         # can get finalized out of order during interpreter shutdown - even after an explicit
         # lfs.unmount() and gc.collect() - crashing the process with "lfs_file_sync: Assertion
@@ -1201,7 +1206,9 @@ def _cmd_mklittlefs(args: argparse.Namespace) -> None:
         # reproducible under CPython, hence gating this rather than doing it unconditionally - an
         # unconditional os._exit() here would also kill the whole process if _cmd_mklittlefs (or
         # main()) is ever called in-process rather than as the actual entry point, e.g. from a test
-        # suite. The image on disk is already complete and correct at this point, so skipping the
+        # suite - which is exactly what happened once the pure-Python build began to be tested on PyPy
+        # (the run ended silently with exit code 0 at this command's test), so the exit is only taken
+        # when `main()` was called without an `argv`, i.e. as the real entry point. The image on disk is already complete and correct at this point, so skipping the
         # rest of shutdown is safe for the *pypy CLI* case specifically - it doesn't help a
         # long-running PyPy program that calls build_littlefs_image() as a library and keeps
         # running afterwards, which is a real upstream littlefs-python/PyPy limitation, not
@@ -1538,6 +1545,8 @@ def main(argv: "list[str] | None" = None) -> None:
     completion_parser.set_defaults(func=_cmd_install_completion)
 
     argcomplete.autocomplete(parser)
+    global _called_with_explicit_argv
+    _called_with_explicit_argv = argv is not None
     args = parser.parse_args(argv)
 
     # format="%(message)s": without a handler configured anywhere, stdlib logging's own "handler

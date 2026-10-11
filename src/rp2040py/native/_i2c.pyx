@@ -314,6 +314,14 @@ cdef class RPI2C:
         self._block.pending_restart = bool(value)
 
     @property
+    def _abort_pending(self):
+        return bool(self._block.abort_pending)
+
+    @_abort_pending.setter
+    def _abort_pending(self, value):
+        self._block.abort_pending = bool(value)
+
+    @property
     def _first_byte(self):
         return bool(self._block.first_byte)
 

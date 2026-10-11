@@ -135,3 +135,75 @@ def test_a_command_written_while_the_i2c_is_disabled_is_lost():
     chip.write_uint32(I2C0_BASE + IC_ENABLE, 1)
     chip.write_uint32(I2C0_BASE + 0x10, 0x155)
     assert chip.read_uint32(I2C0_BASE + 0x74) == 1  # accepted now
+
+
+def _bus(chip):
+    """A device that answers everything at once; the events are recorded."""
+    i2c = chip.i2c[0]
+    events: list[str] = []
+    i2c.on_start = lambda repeated: (events.append("start"), i2c.complete_start())
+    i2c.on_connect = lambda address, mode: (events.append("connect"), i2c.complete_connect(True))
+    i2c.on_write_byte = lambda byte: (events.append(f"byte {byte:x}"), i2c.complete_write(True))
+    i2c.on_stop = lambda: (events.append("stop"), i2c.complete_stop())
+    return i2c, events
+
+
+IC_ENABLE, IC_TX_ABRT_SOURCE = 0x6C, 0x80
+ABORT_BIT, ENABLE_BIT = 1 << 1, 1
+R_TX_ABRT, R_STOP_DET = 1 << 6, 1 << 9
+
+
+def test_abort_while_the_master_waits_for_a_command_issues_the_stop_and_clears_the_bit():
+    """Datasheet 4.3.10.3/4.3.10.4 and IC_ENABLE.ABORT (table 477): "In response to an ABORT, the controller issues a STOP and flushes the Tx FIFO after completing the current transfer, then sets the TX_ABORT
+    interrupt after the abort operation. The ABORT bit is cleared automatically after the abort operation." A master that has sent a byte without STOP and has nothing more to send holds SCL low; ABORT is
+    how it lets go ("you can issue the ABORT (IC_ENABLE.ABORT) to relinquish the I2C bus and then disable DW_apb_i2c")."""
+    chip, _ = _chip()
+    i2c, events = _bus(chip)
+    chip.write_uint32(I2C0_BASE + IC_ENABLE, 0)
+    chip.write_uint32(I2C0_BASE + 0x04, 0x50)  # IC_TAR
+    chip.write_uint32(I2C0_BASE + IC_ENABLE, ENABLE_BIT)
+    chip.write_uint32(I2C0_BASE + IC_DATA_CMD, 0x11)  # a byte, no STOP: the master waits for the next command
+    assert events == ["start", "connect", "byte 11"]
+    chip.write_uint32(I2C0_BASE + IC_ENABLE, ENABLE_BIT | ABORT_BIT)
+    assert events[-1] == "stop"  # the STOP is issued
+    assert chip.read_uint32(I2C0_BASE + IC_ENABLE) == ENABLE_BIT  # ABORT cleared by hardware
+    raw = chip.read_uint32(I2C0_BASE + IC_RAW_INTR_STAT)
+    assert raw & R_TX_ABRT and raw & R_STOP_DET
+    assert chip.read_uint32(I2C0_BASE + IC_TX_ABRT_SOURCE) & (1 << 16)  # ABRT_USER_ABRT
+
+
+def test_abort_is_ignored_unless_enable_is_already_set_or_the_bus_is_idle():
+    chip, _ = _chip()
+    i2c, events = _bus(chip)
+    chip.write_uint32(I2C0_BASE + IC_ENABLE, ABORT_BIT)  # not enabled: "the controller ignores any write to ABORT bit"
+    assert chip.read_uint32(I2C0_BASE + IC_ENABLE) == 0
+    chip.write_uint32(I2C0_BASE + IC_ENABLE, ENABLE_BIT | ABORT_BIT)  # ENABLE set by this very write: not "already set"
+    assert chip.read_uint32(I2C0_BASE + IC_ENABLE) == ENABLE_BIT
+    chip.write_uint32(I2C0_BASE + IC_ENABLE, ENABLE_BIT | ABORT_BIT)  # enabled, but nothing in progress
+    assert chip.read_uint32(I2C0_BASE + IC_ENABLE) == ENABLE_BIT and not events
+    assert not chip.read_uint32(I2C0_BASE + IC_RAW_INTR_STAT) & R_TX_ABRT
+
+
+def test_abort_in_the_middle_of_a_transfer_completes_the_current_transfer_then_stops_and_flushes():
+    chip, _ = _chip()
+    i2c = chip.i2c[0]
+    events: list[str] = []
+    held: list = []
+    i2c.on_start = lambda repeated: (events.append("start"), i2c.complete_start())
+    i2c.on_connect = lambda address, mode: (events.append("connect"), i2c.complete_connect(True))
+    i2c.on_write_byte = lambda byte: (events.append(f"byte {byte:x}"), held.append(1))  # the device is slow: the byte is in flight
+    i2c.on_stop = lambda: (events.append("stop"), i2c.complete_stop())
+    chip.write_uint32(I2C0_BASE + IC_ENABLE, 0)
+    chip.write_uint32(I2C0_BASE + 0x04, 0x50)
+    chip.write_uint32(I2C0_BASE + IC_ENABLE, ENABLE_BIT)
+    for byte in (0x11, 0x22, 0x33):
+        chip.write_uint32(I2C0_BASE + IC_DATA_CMD, byte)
+    assert events == ["start", "connect", "byte 11"]
+    chip.write_uint32(I2C0_BASE + IC_ENABLE, ENABLE_BIT | ABORT_BIT)
+    assert chip.read_uint32(I2C0_BASE + IC_ENABLE) == ENABLE_BIT | ABORT_BIT  # "ABORT operation in progress"
+    assert not chip.read_uint32(I2C0_BASE + IC_RAW_INTR_STAT) & R_TX_ABRT  # TX_ABRT comes after the abort operation, not before
+    i2c.complete_write(True)  # the current byte completes
+    assert events[-1] == "stop" and "byte 22" not in events  # then the STOP, and the rest is flushed
+    assert chip.read_uint32(I2C0_BASE + IC_ENABLE) == ENABLE_BIT
+    assert chip.read_uint32(I2C0_BASE + IC_RAW_INTR_STAT) & R_TX_ABRT
+    assert chip.read_uint32(I2C0_BASE + IC_TX_ABRT_SOURCE) >> 23 == 2  # two commands flushed

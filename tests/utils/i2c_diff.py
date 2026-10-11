@@ -205,6 +205,7 @@ class Rig:
                 bool(i2c._busy),
                 bool(i2c._stop),
                 bool(i2c._pending_restart),
+                bool(i2c._abort_pending),
                 bool(i2c._first_byte),
                 int(i2c.abort_source),
                 int(i2c.int_raw),
@@ -243,6 +244,16 @@ class Rig:
 
 
 # --- logic mutants of the reference: what the oracle must see ----------------------------------------------------------------
+
+
+ENABLE_VARIANTS = {
+    "enable_fifos_kept": {"flush_on_disable": False},
+    "enable_abort_when_idle": {"idle_check": False},
+    "enable_abort_not_sticky": {"sticky": False},
+    "enable_no_next_command": {"next_command": False},
+    "abort_without_enable": {"enabled_check": False},
+    "abort_rerequested": {"rerequest": True},
+}
 
 
 def mutant_rig(name: str) -> Rig:
@@ -477,22 +488,59 @@ def mutant_rig(name: str) -> Rig:
             super().complete_read(value)
 
         def complete_stop(self) -> None:
-            if name == "stop_no_next_command":
+            if name in ("stop_no_next_command", "stop_keeps_abort_bit", "abort_stop_no_tx_abrt", "abort_pending_not_cleared"):
                 self._state = I.I2CState.IDLE
                 self._set_interrupts(I.R_STOP_DET)
                 self._busy = False
                 self._pending_restart = False
-                if self.enable & I.ABORT:
-                    self.enable &= ~I.ABORT
-                return
-            if name == "stop_keeps_abort_bit":
-                self._state = I.I2CState.IDLE
-                self._set_interrupts(I.R_STOP_DET)
-                self._busy = False
-                self._pending_restart = False
-                self._next_command()
+                if self._abort_pending:
+                    if name != "abort_pending_not_cleared":
+                        self._abort_pending = False
+                    if name != "stop_keeps_abort_bit":
+                        self.enable &= ~I.ABORT
+                    if name != "abort_stop_no_tx_abrt":
+                        self._abort(I.ABRT_USER_ABRT)
+                elif name != "stop_no_next_command":
+                    self._next_command()
                 return
             super().complete_stop()
+
+        def _request_abort(self) -> None:
+            if name == "abort_no_stop_when_waiting":  # the old bug: a master waiting for a command never issues the STOP
+                self._abort_pending = True
+                self._stop = True
+                return
+            if name == "abort_flush_now":  # flushed and reported at the request, not when the STOP is done
+                self._abort(I.ABRT_USER_ABRT)
+            if name == "abort_not_pending":
+                self._stop = True
+                if not self._busy:
+                    self._busy = True
+                    self._state = I.I2CState.STOP
+                    self.on_stop()
+                return
+            super()._request_abort()
+
+        def _enable_write(self, value: int, *, flush_on_disable: bool = True, idle_check: bool = True, enabled_check: bool = True, sticky: bool = True, next_command: bool = True, rerequest: bool = False) -> None:
+            """The reference's IC_ENABLE write with every rule a parameter: the defaults are the reference, each mutant changes one."""
+            was_enabled = bool(self.enable & I.ENABLE)
+            accepted = bool(value & I.ABORT) and (rerequest or not self.enable & I.ABORT)
+            value &= I.ENABLE_MASK
+            if sticky:
+                value |= self.enable & I.ABORT
+            if accepted and ((enabled_check and not was_enabled) or (idle_check and self._state == I.I2CState.IDLE)):
+                value &= ~I.ABORT
+                accepted = False
+            if flush_on_disable and not (value & I.ENABLE):
+                self._tx_fifo.reset()
+                self._rx_fifo.reset()
+                self._update_rx_full()
+                self._clear_interrupts(I.R_ACTIVITY)
+            self.enable = value
+            if accepted:
+                self._request_abort()
+            if next_command:
+                self._next_command()
 
         def arbitration_lost(self) -> None:
             if name == "arb_lost_keeps_state":
@@ -659,53 +707,8 @@ def mutant_rig(name: str) -> Rig:
             if offset == I.IC_FS_SCL_HCNT and name == "hcnt_mask_wrong":
                 self.fs_clock_high_period = value & 0xFF
                 return
-            if offset == I.IC_ENABLE and name == "enable_fifos_kept":
-                value |= self.enable & I.ABORT
-                if value & I.ABORT:
-                    if self._state == I.I2CState.IDLE:
-                        value &= ~I.ABORT
-                    else:
-                        self._abort(I.ABRT_USER_ABRT)
-                        self._stop = True
-                self.enable = value
-                self._next_command()
-                return
-            if offset == I.IC_ENABLE and name == "enable_abort_when_idle":
-                value |= self.enable & I.ABORT
-                if value & I.ABORT:
-                    self._abort(I.ABRT_USER_ABRT)
-                    self._stop = True
-                if not (value & I.ENABLE):
-                    self._tx_fifo.reset()
-                    self._rx_fifo.reset()
-                self.enable = value
-                self._next_command()
-                return
-            if offset == I.IC_ENABLE and name == "enable_abort_not_sticky":
-                if value & I.ABORT:
-                    if self._state == I.I2CState.IDLE:
-                        value &= ~I.ABORT
-                    else:
-                        self._abort(I.ABRT_USER_ABRT)
-                        self._stop = True
-                if not (value & I.ENABLE):
-                    self._tx_fifo.reset()
-                    self._rx_fifo.reset()
-                self.enable = value
-                self._next_command()
-                return
-            if offset == I.IC_ENABLE and name == "enable_no_next_command":
-                value |= self.enable & I.ABORT
-                if value & I.ABORT:
-                    if self._state == I.I2CState.IDLE:
-                        value &= ~I.ABORT
-                    else:
-                        self._abort(I.ABRT_USER_ABRT)
-                        self._stop = True
-                if not (value & I.ENABLE):
-                    self._tx_fifo.reset()
-                    self._rx_fifo.reset()
-                self.enable = value
+            if offset == I.IC_ENABLE and name in ENABLE_VARIANTS:
+                self._enable_write(value, **ENABLE_VARIANTS[name])
                 return
             if offset == I.IC_INTR_MASK and name == "intr_mask_not_writable":
                 BasePeripheral.write_uint32(self, offset, value)
@@ -792,6 +795,7 @@ MUTANTS = (
     "tar_write_while_enabled", "sar_write_while_enabled", "sda_hold_write_while_enabled", "ss_hcnt_write_while_enabled", "con_unmasked", "tar_masked_10", "data_cmd_unmasked",
     "tx_empty_cleared_always", "ss_hcnt_no_minimum", "fs_lcnt_no_minimum", "sda_hold_not_stored", "sda_setup_masked_wrong", "dma_cr_unmasked", "enable_unmasked",
     "rx_tl_no_level_update", "disable_keeps_rx_full", "disable_keeps_activity", "activity_never_set",
+    "abort_without_enable", "abort_rerequested", "abort_no_stop_when_waiting", "abort_flush_now", "abort_not_pending", "abort_stop_no_tx_abrt", "abort_pending_not_cleared",
 )  # fmt: skip
 
 
@@ -848,6 +852,18 @@ def generate(seed: int, steps: int) -> list[tuple]:
                 ops.append(("write", offset, _value(r, offset), ALIASES[0]))
             ops.append(("write", I.IC_TAR, r.choice((0x50, 0x3C, 0x68, 0x3FF, 0x800 | 0x50, 0x400 | 0x50)), ALIASES[0]))
             ops.append(("write", I.IC_ENABLE, 1, ALIASES[0]))
+        elif roll < 0.255:  # commands queued behind TX_CMD_BLOCK and released; and RX_FULL against a moving threshold
+            if r.random() < 0.5:
+                ops.append(("write", I.IC_ENABLE, r.choice((5, 5, 7)), ALIASES[0]))
+                for _ in range(r.randrange(1, 5)):
+                    ops.append(("write", I.IC_DATA_CMD, _value(r, I.IC_DATA_CMD), ALIASES[0]))
+                ops.append(("write", I.IC_ENABLE, r.choice((1, 1, 3, 0)), ALIASES[0]))
+            else:
+                ops.extend([("write", I.IC_ENABLE, 1, ALIASES[0]), ("write", I.IC_RX_TL, r.choice((0, 1, 2)), ALIASES[0])])
+                for _ in range(r.randrange(2, 7)):
+                    ops.append(("write", I.IC_DATA_CMD, I.CMD | (I.STOP if r.random() < 0.7 else 0) | r.getrandbits(8), ALIASES[0]))
+                ops.append(("write", I.IC_RX_TL, r.choice((0, 1, 3, 5, 16)), ALIASES[0]))
+                ops.append(("write", I.IC_RX_TL, r.choice((0, 2, 4, 8)), ALIASES[0]))
         elif roll < 0.50:
             offset = r.choice(WRITABLE + (I.IC_DATA_CMD, I.IC_DATA_CMD, I.IC_DATA_CMD, I.IC_ENABLE))
             alias = ALIASES[0] if r.random() < 0.8 else r.choice(ALIASES[1:])

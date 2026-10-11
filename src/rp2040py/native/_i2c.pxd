@@ -48,6 +48,7 @@ cdef extern from "i2c.hpp" namespace "rp2040core":
         cppbool busy
         cppbool stop
         cppbool pending_restart
+        cppbool abort_pending
         cppbool first_byte
         uint32_t enable
         uint32_t rx_threshold

@@ -109,7 +109,7 @@ public:
 
     // The registers and the machine, public for the shell (the reference's attributes are read and, by tests, written directly).
     uint32_t state = i2c_regs::STATE_IDLE;
-    bool busy = false, stop = false, pending_restart = false, first_byte = false;
+    bool busy = false, stop = false, pending_restart = false, first_byte = false, abort_pending = false;
     uint32_t enable = 0, rx_threshold = 0, tx_threshold = 0;
     uint32_t control = i2c_regs::CON_SLAVE_DISABLE | i2c_regs::CON_RESTART_EN | (i2c_regs::SPEED_FAST << i2c_regs::CON_SPEED_SHIFT) | i2c_regs::CON_MASTER;
     uint32_t ss_clock_high = 0x0028, ss_clock_low = 0x002F, fs_clock_high = 0x0006, fs_clock_low = 0x000D;
@@ -130,7 +130,7 @@ public:
     bool reset() noexcept {
         using namespace i2c_regs;
         state = STATE_IDLE;
-        busy = stop = pending_restart = first_byte = false;
+        busy = stop = pending_restart = first_byte = abort_pending = false;
         rx.reset();
         tx.reset();
         enable = rx_threshold = tx_threshold = 0;
@@ -218,11 +218,25 @@ public:
         if (!set_interrupts(R_STOP_DET)) return false;
         busy = false;
         pending_restart = false;
-        if (enable & EN_ABORT) {
+        if (abort_pending) {
+            // "In response to an ABORT, the controller issues a STOP and flushes the Tx FIFO after completing the current transfer, then sets the TX_ABORT interrupt after the abort operation" (IC_ENABLE)
+            abort_pending = false;
             enable &= ~EN_ABORT;
-            return true;
+            return abort(ABRT_USER_ABRT);
         }
         return next_command();
+    }
+
+    // IC_ENABLE.ABORT: the current transfer ends with a STOP, and `complete_stop` flushes and raises TX_ABRT. A master waiting for its next command issues the STOP at once.
+    bool request_abort() noexcept {
+        abort_pending = true;
+        stop = true;
+        if (!busy) {
+            busy = true;
+            state = i2c_regs::STATE_STOP;
+            return host_.stop(host_.ctx);
+        }
+        return true;
     }
 
     bool arbitration_lost() noexcept {
@@ -370,16 +384,14 @@ public:
                 tx_threshold = word & 0xFFu;
                 if (tx_threshold > kFifoDepth) tx_threshold = kFifoDepth;
                 return true;
-            case ENABLE:
+            case ENABLE: {
+                const bool was_enabled = (enable & EN_ENABLE) != 0;
+                bool accepted = (word & EN_ABORT) != 0 && (enable & EN_ABORT) == 0;
                 word &= ENABLE_MASK;
                 word |= enable & EN_ABORT;  // ABORT can only be set by software, not cleared
-                if (word & EN_ABORT) {
-                    if (state == STATE_IDLE) {
-                        word &= ~EN_ABORT;
-                    } else {
-                        if (!abort(ABRT_USER_ABRT)) return false;
-                        stop = true;
-                    }
+                if (accepted && (!was_enabled || state == STATE_IDLE)) {
+                    word &= ~EN_ABORT;  // "only when ENABLE is already set"; nothing to abort when idle
+                    accepted = false;
                 }
                 if (!(word & EN_ENABLE)) {
                     tx.reset();
@@ -389,7 +401,9 @@ public:
                     if (!clear_interrupts(R_ACTIVITY, &ignored)) return false;  // "Disabling the DW_apb_i2c" clears the ACTIVITY bit
                 }
                 enable = word;
-                return next_command();  // TX_CMD_BLOCK may have changed
+                if (accepted && !request_abort()) return false;  // after `enable` is written: the STOP may complete at once and clear the bit
+                return next_command();                            // TX_CMD_BLOCK may have changed
+            }
             case FS_SPKLEN:
                 if (!(enable & EN_ENABLE)) spikelen = max_u32(word & 0xFFu, SPKLEN_MIN);  // only while disabled; 8 bits, minimum 1
                 return true;

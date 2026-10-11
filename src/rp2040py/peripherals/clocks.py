@@ -39,6 +39,14 @@ CLK_RTC_DIV = 0x70
 CLK_RTC_SELECTED = 0x74
 CLK_SYS_RESUS_CTRL = 0x78
 CLK_SYS_RESUS_STATUS = 0x7C
+FC0_REF_KHZ = 0x80
+FC0_MIN_KHZ = 0x84
+FC0_MAX_KHZ = 0x88
+FC0_DELAY = 0x8C
+FC0_INTERVAL = 0x90
+FC0_SRC = 0x94
+FC0_STATUS = 0x98
+FC0_RESULT = 0x9C
 WAKE_EN0 = 0xA0
 WAKE_EN1 = 0xA4
 SLEEP_EN0 = 0xA8
@@ -47,6 +55,31 @@ INTR = 0xB8
 INTE = 0xBC
 INTF = 0xC0
 INTS = 0xC4
+
+# The frequency counter (datasheet 2.15.4 and 2.15.6.2, tables 238-246): the widths and the reset values of its registers.
+FC0_REF_KHZ_MASK = 0xFFFFF
+FC0_MIN_KHZ_MASK = 0x1FFFFFF
+FC0_MAX_KHZ_MASK = 0x1FFFFFF
+FC0_MAX_KHZ_RESET = 0x1FFFFFF
+FC0_DELAY_MASK = 0x7
+FC0_DELAY_RESET = 0x1
+FC0_INTERVAL_MASK = 0xF
+FC0_INTERVAL_RESET = 0x8
+FC0_SRC_MASK = 0xFF
+FC0_STATUS_DIED = 1 << 28
+FC0_STATUS_FAST = 1 << 24
+FC0_STATUS_SLOW = 1 << 20
+FC0_STATUS_FAIL = 1 << 16
+FC0_STATUS_RUNNING = 1 << 8
+FC0_STATUS_DONE = 1 << 4
+FC0_STATUS_PASS = 1 << 0
+FC0_RESULT_MASK = 0x3FFFFFFF  # KHZ 29:5 and FRAC 4:0: the frequency in kHz with five fractional bits
+FC0_RESULT_FRAC_BITS = 5
+FC0_INTERVAL_NANOS = 980.0  # "The test interval is 0.98us * 2**interval"
+# FC0_SRC: the clock sent to the counter (table 243)
+FC0_SRC_PLL_SYS, FC0_SRC_PLL_USB, FC0_SRC_ROSC, FC0_SRC_ROSC_PH, FC0_SRC_XOSC = 0x01, 0x02, 0x03, 0x04, 0x05
+FC0_SRC_GPIN0, FC0_SRC_GPIN1, FC0_SRC_CLK_REF, FC0_SRC_CLK_SYS, FC0_SRC_CLK_PERI = 0x06, 0x07, 0x08, 0x09, 0x0A
+FC0_SRC_CLK_USB, FC0_SRC_CLK_ADC, FC0_SRC_CLK_RTC = 0x0B, 0x0C, 0x0D
 
 # Registers that are stored and not acted on (clock gating in sleep, the resus and its interrupt are not modelled): offset -> (writable mask, reset value). WAKE_EN/SLEEP_EN
 # reset to all ones (every clock runs in sleep); CLK_SYS_RESUS_CTRL is CLEAR 16, FRCE 12, ENABLE 8 and TIMEOUT 7:0 (reset 0xFF); INTE/INTF are the one bit of the resus interrupt.
@@ -142,6 +175,9 @@ class RPClocks(BasePeripheral):
         self.rtc_ctrl = 0
         self.rtc_div = 0x100
         self._stored = {offset: reset for offset, (_mask, reset) in STORED_REGISTERS.items()}
+        self._fc_alarm = rp2040.clock.create_alarm(self._fc_done)
+        self._fc_started_hz = 0.0
+        self._fc_reset()
 
     def reset(self) -> None:
         """Every CLK_*_CTRL/DIV back to its power-on value (0089 Phase 5) - `0x100`, i.e. a
@@ -167,6 +203,7 @@ class RPClocks(BasePeripheral):
         self.rtc_ctrl = 0
         self.rtc_div = 0x100
         self._stored = {offset: reset for offset, (_mask, reset) in STORED_REGISTERS.items()}
+        self._fc_reset()
 
     @property
     def ref_freq(self) -> float:
@@ -199,12 +236,10 @@ class RPClocks(BasePeripheral):
             return rp2040.xosc_freq
         return 0
 
-    @property
-    def rtc_freq(self) -> float:
-        """clk_rtc in Hz (datasheet 2.15, table 234/235): the RTC's reference, the aux source divided by CLK_RTC_DIV (24.8, INT = 0 divides by 2^16). 0 while the generator is stopped
-        (ENABLE clear, which is the reset state, or KILL) and for the GPIN0/GPIN1 sources, which are not modelled - the RTC does not count then."""
+    def _aux_generator_freq(self, ctrl: int, div: int) -> float:
+        """A clock generator driven from the aux mux that CLK_USB, CLK_ADC and CLK_RTC share (tables 230, 232, 234: AUXSRC 7:5 = PLL_USB, PLL_SYS, ROSC_PH, XOSC, GPIN0, GPIN1), over its divider. 0
+        while the generator is stopped (ENABLE clear, which is its reset state, or KILL) and for the GPIN0/GPIN1 sources, which are not modelled."""
         rp2040 = self.rp2040
-        ctrl = self.rtc_ctrl
         if not (ctrl & CLK_RTC_CTRL_ENABLE) or ctrl & CLK_RTC_CTRL_KILL:
             return 0
         source = (ctrl >> CLK_RTC_CTRL_AUXSRC_SHIFT) & CLK_RTC_CTRL_AUXSRC_MASK
@@ -218,7 +253,82 @@ class RPClocks(BasePeripheral):
             frequency = rp2040.xosc_freq
         else:
             return 0
-        return frequency / clock_divisor(self.rtc_div)
+        return frequency / clock_divisor(div)
+
+    @property
+    def rtc_freq(self) -> float:
+        """clk_rtc in Hz (datasheet 2.15, table 234/235): the RTC's reference, the aux source divided by CLK_RTC_DIV (24.8, INT = 0 divides by 2^16)."""
+        return self._aux_generator_freq(self.rtc_ctrl, self.rtc_div)
+
+    @property
+    def usb_freq(self) -> float:
+        """clk_usb in Hz (tables 230/231), by the same mux and enable as clk_rtc; the divider is INT only."""
+        return self._aux_generator_freq(self.usb_ctrl, self.usb_div)
+
+    @property
+    def adc_freq(self) -> float:
+        """clk_adc in Hz (tables 232/233), by the same mux and enable as clk_rtc; the divider is INT only."""
+        return self._aux_generator_freq(self.adc_ctrl, self.adc_div)
+
+    def frequency_of(self, source: int) -> float:
+        """What the frequency counter measures for an FC0_SRC value, in Hz; 0 for NULL, a source that is stopped, GPIN0/GPIN1 (not modelled) and a value that selects nothing."""
+        rp2040 = self.rp2040
+        return {
+            FC0_SRC_PLL_SYS: lambda: rp2040.pll_sys.frequency,
+            FC0_SRC_PLL_USB: lambda: rp2040.pll_usb.frequency,
+            FC0_SRC_ROSC: lambda: rp2040.rosc_freq,
+            FC0_SRC_ROSC_PH: lambda: rp2040.rosc_freq,
+            FC0_SRC_XOSC: lambda: rp2040.xosc_freq,
+            FC0_SRC_CLK_REF: lambda: self.ref_freq,
+            FC0_SRC_CLK_SYS: lambda: (
+                rp2040.clk_sys
+            ),  # the frequency the chip runs at: 125 MHz until firmware configures the tree
+            FC0_SRC_CLK_PERI: lambda: rp2040.clk_peri,
+            FC0_SRC_CLK_USB: lambda: self.usb_freq,
+            FC0_SRC_CLK_ADC: lambda: self.adc_freq,
+            FC0_SRC_CLK_RTC: lambda: self.rtc_freq,
+        }.get(source, lambda: 0.0)()
+
+    # ---- the frequency counter (2.15.4, 2.15.6.2) ----
+    def _fc_reset(self) -> None:
+        self._fc_ref_khz = 0
+        self._fc_min_khz = 0
+        self._fc_max_khz = FC0_MAX_KHZ_RESET
+        self._fc_delay = FC0_DELAY_RESET
+        self._fc_interval = FC0_INTERVAL_RESET
+        self._fc_src = 0
+        self._fc_status = 0
+        self._fc_result = 0
+        self._fc_alarm.cancel()
+
+    def _fc_start(self, src: int) -> None:
+        """Writing FC0_SRC "initiates the frequency count" (it runs even for NULL: pico-sdk's `frequency_count_khz()` says so). The test takes FC0_DELAY periods of clk_ref (from FC0_REF_KHZ) and then
+        0.98 us * 2**FC0_INTERVAL; it is RUNNING until then and DONE after. The configuration is read at the start; a count already running is replaced."""
+        self._fc_src = src
+        self._fc_started_hz = self.frequency_of(src)
+        self._fc_status = FC0_STATUS_RUNNING
+        self._fc_result = 0
+        delay = self._fc_delay * 1e6 / self._fc_ref_khz if self._fc_ref_khz else 0.0
+        self._fc_alarm.schedule(delay + FC0_INTERVAL_NANOS * (1 << self._fc_interval))
+
+    def _fc_done(self) -> None:
+        """The test interval is over. The result is the clock's frequency in kHz with five fractional bits, exact (the real counter is only as accurate as table 206 says; not independently sourced).
+        A clock that is stopped at the start or at the end of the test sets DIED (and, as the datasheet says, FAIL); a frequency above FC0_MAX_KHZ sets FAST and below FC0_MIN_KHZ SLOW; PASS is
+        set when DONE is and none of them is. Whether DONE is set for a DIED test is not stated; here it is - pico-sdk would otherwise wait for it for ever."""
+        end_hz = self.frequency_of(self._fc_src)
+        died = self._fc_started_hz == 0 or end_hz == 0
+        khz = 0.0 if died else end_hz / 1000.0
+        status = FC0_STATUS_DONE
+        if died:
+            status |= FC0_STATUS_DIED
+        else:
+            if khz > self._fc_max_khz:
+                status |= FC0_STATUS_FAST
+            if khz < self._fc_min_khz:
+                status |= FC0_STATUS_SLOW
+        status |= FC0_STATUS_FAIL if status & (FC0_STATUS_DIED | FC0_STATUS_FAST | FC0_STATUS_SLOW) else FC0_STATUS_PASS
+        self._fc_status = status
+        self._fc_result = int(khz * (1 << FC0_RESULT_FRAC_BITS)) & FC0_RESULT_MASK
 
     @property
     def _ref_source_freq(self) -> float:
@@ -310,6 +420,22 @@ class RPClocks(BasePeripheral):
             return self.rtc_div
         if offset == CLK_RTC_SELECTED:
             return 1
+        if offset == FC0_REF_KHZ:
+            return self._fc_ref_khz
+        if offset == FC0_MIN_KHZ:
+            return self._fc_min_khz
+        if offset == FC0_MAX_KHZ:
+            return self._fc_max_khz
+        if offset == FC0_DELAY:
+            return self._fc_delay
+        if offset == FC0_INTERVAL:
+            return self._fc_interval
+        if offset == FC0_SRC:
+            return self._fc_src
+        if offset == FC0_STATUS:
+            return self._fc_status
+        if offset == FC0_RESULT:
+            return self._fc_result
         if offset in STORED_REGISTERS:
             return self._stored[offset]
         if offset == CLK_SYS_RESUS_STATUS:
@@ -368,6 +494,20 @@ class RPClocks(BasePeripheral):
         elif offset == CLK_RTC_DIV:
             self.rtc_div = value
             self.rp2040.update_clocks()
+        elif offset == FC0_REF_KHZ:
+            self._fc_ref_khz = value & FC0_REF_KHZ_MASK
+        elif offset == FC0_MIN_KHZ:
+            self._fc_min_khz = value & FC0_MIN_KHZ_MASK
+        elif offset == FC0_MAX_KHZ:
+            self._fc_max_khz = value & FC0_MAX_KHZ_MASK
+        elif offset == FC0_DELAY:
+            self._fc_delay = value & FC0_DELAY_MASK
+        elif offset == FC0_INTERVAL:
+            self._fc_interval = value & FC0_INTERVAL_MASK
+        elif offset == FC0_SRC:
+            self._fc_start(value & FC0_SRC_MASK)
+        elif offset in (FC0_STATUS, FC0_RESULT):
+            return  # read only
         elif offset in STORED_REGISTERS:
             self._stored[offset] = value & STORED_REGISTERS[offset][0]
         elif offset in (CLK_SYS_RESUS_STATUS, INTR, INTS):

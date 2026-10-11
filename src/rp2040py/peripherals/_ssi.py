@@ -100,7 +100,7 @@ JEDEC_ID = (0xEF, 0x40, 0x15)
 
 def is_data_register(offset: int) -> bool:
     """Any of the 36 locations DR0..DR35: "Writing to any of these address locations has the same effect as pushing the data ... into the transmit FIFO. Reading from any of these locations has the same effect
-as popping data from the receive FIFO" (4.10.12). The text says sixty-four locations and the register list 36; RX_SAMPLE_DLY sits at 0xF0, so 36 is what fits, and the list is followed."""
+    as popping data from the receive FIFO" (4.10.12). The text says sixty-four locations and the register list 36; RX_SAMPLE_DLY sits at 0xF0, so 36 is what fits, and the list is followed."""
     return SSI_DR0 <= offset <= SSI_DR_LAST and offset & 3 == 0
 
 

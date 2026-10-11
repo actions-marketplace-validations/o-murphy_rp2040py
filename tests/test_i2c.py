@@ -191,7 +191,10 @@ def test_abort_in_the_middle_of_a_transfer_completes_the_current_transfer_then_s
     held: list = []
     i2c.on_start = lambda repeated: (events.append("start"), i2c.complete_start())
     i2c.on_connect = lambda address, mode: (events.append("connect"), i2c.complete_connect(True))
-    i2c.on_write_byte = lambda byte: (events.append(f"byte {byte:x}"), held.append(1))  # the device is slow: the byte is in flight
+    i2c.on_write_byte = lambda byte: (
+        events.append(f"byte {byte:x}"),
+        held.append(1),
+    )  # the device is slow: the byte is in flight
     i2c.on_stop = lambda: (events.append("stop"), i2c.complete_stop())
     chip.write_uint32(I2C0_BASE + IC_ENABLE, 0)
     chip.write_uint32(I2C0_BASE + 0x04, 0x50)
@@ -201,7 +204,9 @@ def test_abort_in_the_middle_of_a_transfer_completes_the_current_transfer_then_s
     assert events == ["start", "connect", "byte 11"]
     chip.write_uint32(I2C0_BASE + IC_ENABLE, ENABLE_BIT | ABORT_BIT)
     assert chip.read_uint32(I2C0_BASE + IC_ENABLE) == ENABLE_BIT | ABORT_BIT  # "ABORT operation in progress"
-    assert not chip.read_uint32(I2C0_BASE + IC_RAW_INTR_STAT) & R_TX_ABRT  # TX_ABRT comes after the abort operation, not before
+    assert (
+        not chip.read_uint32(I2C0_BASE + IC_RAW_INTR_STAT) & R_TX_ABRT
+    )  # TX_ABRT comes after the abort operation, not before
     i2c.complete_write(True)  # the current byte completes
     assert events[-1] == "stop" and "byte 22" not in events  # then the STOP, and the rest is flushed
     assert chip.read_uint32(I2C0_BASE + IC_ENABLE) == ENABLE_BIT

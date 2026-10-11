@@ -488,7 +488,12 @@ def mutant_rig(name: str) -> Rig:
             super().complete_read(value)
 
         def complete_stop(self) -> None:
-            if name in ("stop_no_next_command", "stop_keeps_abort_bit", "abort_stop_no_tx_abrt", "abort_pending_not_cleared"):
+            if name in (
+                "stop_no_next_command",
+                "stop_keeps_abort_bit",
+                "abort_stop_no_tx_abrt",
+                "abort_pending_not_cleared",
+            ):
                 self._state = I.I2CState.IDLE
                 self._set_interrupts(I.R_STOP_DET)
                 self._busy = False
@@ -506,7 +511,9 @@ def mutant_rig(name: str) -> Rig:
             super().complete_stop()
 
         def _request_abort(self) -> None:
-            if name == "abort_no_stop_when_waiting":  # the old bug: a master waiting for a command never issues the STOP
+            if (
+                name == "abort_no_stop_when_waiting"
+            ):  # the old bug: a master waiting for a command never issues the STOP
                 self._abort_pending = True
                 self._stop = True
                 return
@@ -521,7 +528,17 @@ def mutant_rig(name: str) -> Rig:
                 return
             super()._request_abort()
 
-        def _enable_write(self, value: int, *, flush_on_disable: bool = True, idle_check: bool = True, enabled_check: bool = True, sticky: bool = True, next_command: bool = True, rerequest: bool = False) -> None:
+        def _enable_write(
+            self,
+            value: int,
+            *,
+            flush_on_disable: bool = True,
+            idle_check: bool = True,
+            enabled_check: bool = True,
+            sticky: bool = True,
+            next_command: bool = True,
+            rerequest: bool = False,
+        ) -> None:
             """The reference's IC_ENABLE write with every rule a parameter: the defaults are the reference, each mutant changes one."""
             was_enabled = bool(self.enable & I.ENABLE)
             accepted = bool(value & I.ABORT) and (rerequest or not self.enable & I.ABORT)
@@ -859,9 +876,18 @@ def generate(seed: int, steps: int) -> list[tuple]:
                     ops.append(("write", I.IC_DATA_CMD, _value(r, I.IC_DATA_CMD), ALIASES[0]))
                 ops.append(("write", I.IC_ENABLE, r.choice((1, 1, 3, 0)), ALIASES[0]))
             else:
-                ops.extend([("write", I.IC_ENABLE, 1, ALIASES[0]), ("write", I.IC_RX_TL, r.choice((0, 1, 2)), ALIASES[0])])
+                ops.extend(
+                    [("write", I.IC_ENABLE, 1, ALIASES[0]), ("write", I.IC_RX_TL, r.choice((0, 1, 2)), ALIASES[0])]
+                )
                 for _ in range(r.randrange(2, 7)):
-                    ops.append(("write", I.IC_DATA_CMD, I.CMD | (I.STOP if r.random() < 0.7 else 0) | r.getrandbits(8), ALIASES[0]))
+                    ops.append(
+                        (
+                            "write",
+                            I.IC_DATA_CMD,
+                            I.CMD | (I.STOP if r.random() < 0.7 else 0) | r.getrandbits(8),
+                            ALIASES[0],
+                        )
+                    )
                 ops.append(("write", I.IC_RX_TL, r.choice((0, 1, 3, 5, 16)), ALIASES[0]))
                 ops.append(("write", I.IC_RX_TL, r.choice((0, 2, 4, 8)), ALIASES[0]))
         elif roll < 0.50:

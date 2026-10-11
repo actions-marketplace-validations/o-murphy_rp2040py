@@ -34,8 +34,8 @@ From there, drill down rather than infer:
 ## Verification
 
 Use `uv run pre-commit run --all-files` as the standard way to verify a change (runs `uv lock`,
-`uv sync`, `mypy`, `ruff` lint+format, and pytest on **both** builds, in the right order: the pure-Python build on **PyPy** (CPython without
-the extensions is far too slow to be the tested configuration) in its own `.venv-pypy`, the native-Cython build on CPython 3.10). Don't reach for ad hoc `pytest`/`ruff check`/`mypy` calls instead -
+`uv sync`, `mypy`, `ruff` lint+format, and pytest on **both** the pure-Python and native-Cython
+builds, in the right order). Don't reach for ad hoc `pytest`/`ruff check`/`mypy` calls instead -
 they duplicate config that already exists here and can drift from it. A narrower ad hoc command
 (a single `pytest tests/test_x.py`) is fine for a fast inner loop while actively iterating, but
 run the full `pre-commit` pass before considering work done.

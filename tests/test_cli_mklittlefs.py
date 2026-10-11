@@ -1,8 +1,9 @@
 from pathlib import Path
 
 import pytest
+from utils.littlefs import importorskip_littlefs
 
-littlefs = pytest.importorskip("littlefs", reason="mklittlefs needs the optional 'fs' extra (littlefs-python)")
+littlefs = importorskip_littlefs()
 
 from rp2040py.cli.mklittlefs import (
     LITTLEFS_DEFAULT_DISK_VERSION,

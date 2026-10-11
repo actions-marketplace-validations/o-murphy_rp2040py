@@ -47,19 +47,16 @@ repos:
 
       # pre-commit's hook schema has no `env:` key (language: system runs entry/args directly,
       # no shell) - `env VAR=val cmd...` is the portable way to set one for the child process.
-      # The pure-Python build is tested on PyPy (CPython without the extensions is far too slow to be the
-      # tested configuration); its own environment, so that it never replaces the CPython `.venv` the other
-      # hooks use. The native build is tested on CPython below.
       - id: uv-pytest-pure
-        name: uv run pytest (pure-Python on PyPy, RP2040PY_SKIP_CYTHON=1)
+        name: uv run pytest (pure-Python, RP2040PY_SKIP_CYTHON=1)
         entry: env
-        args: ["RP2040PY_SKIP_CYTHON=1", "UV_PROJECT_ENVIRONMENT=.venv-pypy", "uv", "run", "--python", "pypy-3.10", "pytest"]
+        args: ["RP2040PY_SKIP_CYTHON=1", "uv", "run", "pytest"]
         language: system
         pass_filenames: false
         files: '\.(py|pyx|pyd)$'
 
       - id: uv-pytest-native
-        name: uv run pytest (native-cpython-extensions, CPython 3.10, RP2040PY_SKIP_CYTHON=0)
+        name: uv run pytest (native-cpython-extensions, RP2040PY_SKIP_CYTHON=0)
         entry: env
         args: ["RP2040PY_SKIP_CYTHON=0", "uv", "run", "pytest"]
         language: system

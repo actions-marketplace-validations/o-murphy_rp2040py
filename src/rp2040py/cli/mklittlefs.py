@@ -4,7 +4,6 @@ Requires the optional ``littlefs-python`` dependency (``pip install rp2040py[fs]
 lazily here so the rest of the CLI stays usable without it.
 """
 
-import sys
 from collections.abc import Sequence
 from os import PathLike
 from pathlib import Path
@@ -31,12 +30,6 @@ LITTLEFS_DEFAULT_DISK_VERSION = "2.0"
 _MICROPYTHON_PICO_FLASH_LAYOUT = _flash_layout(MICROPYTHON, "pico")
 _MICROPYTHON_PICO_FS_BLOCKSIZE = _MICROPYTHON_PICO_FLASH_LAYOUT["fs_blocksize"]
 _MICROPYTHON_PICO_FS_BLOCKCOUNT = _MICROPYTHON_PICO_FLASH_LAYOUT["fs_blockcount"]
-
-
-# PyPy only: littlefs-python's file and LittleFS objects abort the process ("lfs_file_close: Assertion `lfs_mlist_isopen(...)' failed") when PyPy's collector finalises them at an arbitrary
-# later point - in a long-lived process that built an image in-process (a test run, a library caller), the next `gc.collect()` is enough. They are therefore kept alive for the life of the
-# process instead; the image is complete before that, and the CLI entry point leaves through `os._exit()`. The objects are small, one set per image built.
-_PYPY_KEEPALIVE: list[object] = []
 
 
 def build_littlefs_image(
@@ -104,10 +97,6 @@ def build_littlefs_image(
     for dest_name, filename in dest_names.items():
         with open(filename, "rb") as src_file, lfs.open(dest_name, "wb") as lfs_file:
             lfs_file.write(src_file.read())
-        if sys.implementation.name == "pypy":
-            _PYPY_KEEPALIVE.append(lfs_file)
-    if sys.implementation.name == "pypy":
-        _PYPY_KEEPALIVE.append(lfs)
 
     # Explicit unmount, not left to GC: littlefs-python's LittleFS otherwise only gets torn down
     # implicitly when garbage collected, and under PyPy's non-refcounting GC that can happen at an

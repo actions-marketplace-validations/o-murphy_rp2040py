@@ -23,13 +23,20 @@ ALL = "all"  # every register of the block
 # Blocks read against the datasheet (record 0098) and, but for the exceptions listed below, acting on their registers
 AUDITED = {
     "M0PLUS", "SIO", "TIMER", "WATCHDOG", "RTC", "UART", "SPI", "I2C", "ADC", "PWM", "DMA", "PIO", "SSI", "CLOCKS", "PLL", "XOSC", "PSM", "RESETS", "SYSCFG", "SYSINFO", "TBMAN",
-    "VREG_AND_CHIP_RESET", "BUSCTRL",
+    "VREG_AND_CHIP_RESET", "BUSCTRL", "ROSC",
 }  # fmt: skip
-# Blocks never audited: whatever they answer is unchecked (IO_BANK0, PADS_*, USB, XIP: the ports still to do; ROSC and IO_QSPI: nothing there)
-UNAUDITED = {"IO_BANK0", "IO_QSPI", "PADS_BANK0", "PADS_QSPI", "USB", "ROSC"}
+# Blocks never audited: whatever they answer is unchecked (IO_BANK0, PADS_*, USB, XIP: the ports still to do; IO_QSPI: nothing there)
+UNAUDITED = {"IO_BANK0", "IO_QSPI", "PADS_BANK0", "PADS_QSPI", "USB"}
 
 # block -> {offset: what is not acted on} for registers that act but not in every field (from 0098's backlog and the second passes)
 PARTIAL: dict[str, dict[int, str]] = {
+    "ROSC": {
+        0x00: "CTRL: DISABLE is stored, the oscillator keeps running; STABLE follows ENABLE at once",
+        0x04: "FREQA: the drive strengths are validated and stored; they do not change the frequency (no figures in the datasheet)",
+        0x08: "FREQB: the drive strengths are validated and stored; they do not change the frequency (no figures in the datasheet)",
+        0x0C: "DORMANT: stored, nothing goes dormant",
+        0x14: "PHASE: validated and stored; there is no phase-shifted output",
+    },
     "M0PLUS": {0xED0C: "AIRCR: SYSRESETREQ resets the core only; VECTCLRACTIVE (a debug bit) is ignored"},
     "UART": {
         0x000: "DR[11:8] (OE/BE/PE/FE of the entry) always 0",

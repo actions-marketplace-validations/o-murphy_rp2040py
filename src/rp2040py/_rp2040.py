@@ -22,7 +22,16 @@ from rp2040py.peripherals._dma import (  # the pure chip's own DMA: the native o
 )
 from rp2040py.peripherals._i2c import RPI2C  # the pure chip's own I2C: the native one is the native chip's
 from rp2040py.peripherals._ppb import RPPPB  # the pure chip's own PPB: the native one is the native chip's
-from rp2040py.peripherals._psm import PSM_BITS_MASK, RPPSM, WDSEL_CLOCKS, WDSEL_RESETS, WDSEL_SIO, WDSEL_XIP, WDSEL_XOSC
+from rp2040py.peripherals._psm import (
+    PSM_BITS_MASK,
+    RPPSM,
+    WDSEL_CLOCKS,
+    WDSEL_RESETS,
+    WDSEL_ROSC,
+    WDSEL_SIO,
+    WDSEL_XIP,
+    WDSEL_XOSC,
+)
 from rp2040py.peripherals._pwm import RPPWM  # the pure chip's own PWM: the native one is the native chip's
 from rp2040py.peripherals._reset import (
     RESET_ADC,
@@ -48,6 +57,7 @@ from rp2040py.peripherals._reset import (
     RESETS_BITS_MASK,
     RPReset,
 )
+from rp2040py.peripherals._rosc import RPROSC
 from rp2040py.peripherals._rtc import RP2040RTC
 from rp2040py.peripherals._spi import (
     RPSPI,
@@ -69,7 +79,7 @@ from rp2040py.peripherals._xosc import RPXOSC
 from rp2040py.peripherals.clocks import RPClocks, reset_clock_tree, update_clocks
 from rp2040py.peripherals.io import RPIO
 from rp2040py.peripherals.pads import RPPADS
-from rp2040py.peripherals.peripheral import Peripheral, UnimplementedPeripheral
+from rp2040py.peripherals.peripheral import Peripheral
 from rp2040py.peripherals.pio import RPPIO
 from rp2040py.peripherals.pll import RPPLL
 from rp2040py.peripherals.timer import RPTimer
@@ -220,6 +230,7 @@ class RP2040:
         self.xip_ctrl = RPXIPCtrl(self, "XIP_CTRL_BASE")
         self.ssi = RPSSI(self, "SSI")
         self.xosc = RPXOSC(self, "XOSC_BASE")
+        self.rosc = RPROSC(self, "ROSC_BASE")
 
         self.peripherals: dict[int, Peripheral] = {
             0x14000: self.xip_ctrl,
@@ -248,7 +259,7 @@ class RP2040:
             0x40054: self.timer,
             0x40058: self.watchdog,
             0x4005C: self.rtc,
-            0x40060: UnimplementedPeripheral(self, "ROSC_BASE"),
+            0x40060: self.rosc,
             0x40064: self.vreg_and_chip_reset,
             0x4006C: RPTBMAN(self, "TBMAN_BASE"),
             0x50000: self.dma,
@@ -412,7 +423,7 @@ class RP2040:
 
         What is still *not* reset, split by why:
 
-        - **`rosc`** - nothing to reset. It is an `UnimplementedPeripheral` with no state at all.
+        - **`rosc`** - not a special case any more: a `PSM.WDSEL` domain like XOSC, handled by the same gate.
         - **`xosc`** - not a special case at all any more: it is a `PSM.WDSEL` domain like SIO and
           CLOCKS, so the existing gate gets it exactly right on both paths. `watchdog_reboot()`
           selects "everything apart from ROSC and XOSC" - the oscillators produce the clock the
@@ -509,9 +520,12 @@ class RP2040:
         # all (read-only chip identity), so `BasePeripheral`'s default no-op is the correct implementation.
         if psm_wdsel & WDSEL_XOSC:
             # Only ever selected on a RUN-pin/power-on reset: `watchdog_reboot()` clears this bit
-            # deliberately, because the oscillators clock the reset itself. `rosc` has no
-            # counterpart here - it is an UnimplementedPeripheral with no state to restore.
+            # deliberately, because the oscillators clock the reset itself. `rosc`
+            # follows below.
             self.xosc.reset()
+        if psm_wdsel & WDSEL_ROSC:
+            # Like XOSC: only ever selected on a RUN-pin/power-on reset (`watchdog_reboot()` clears it)
+            self.rosc.reset()
         if psm_wdsel & WDSEL_XIP:
             # The XIP domain is a PSM bit, not a RESETS one - there is no RESETS_RESET_XIP or
             # _SSI. Both halves of it reset together, as they do on silicon.

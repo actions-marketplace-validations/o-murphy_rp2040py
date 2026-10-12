@@ -28,7 +28,7 @@ One place to see, block by block and datasheet section by section, what is model
 | CLOCKS | Partial | Yes + second pass | Python only | resus, clock enables / sleep, GPIN, the GPOUT clock outputs; 18 of 48 registers are stubs |
 | PLL | Partial | Yes | Python only | always locked |
 | XOSC | Partial | Yes | Ported | DORMANT, the start-up delay and `COUNT` are stored; `STABLE` is set at once |
-| ROSC | Missing | No | No | the whole block - **Next** |
+| ROSC | Partial | Yes (read with the port) | Ported | the oscillator never stops (DORMANT and DISABLE are stored), STABLE is immediate, the drive strengths and the phase output do nothing |
 | PSM, RESETS, SYSINFO, TBMAN | Done | Yes | Ported | - |
 | SYSCFG | Stub | Yes | Ported | only `PROC0_NMI_MASK` acts |
 | VREG_AND_CHIP_RESET | Partial | Yes | Ported | `VREG`, `BOD` are stored; `CHIP_RESET` acts |
@@ -81,7 +81,7 @@ Follows the datasheet's own table of contents (chapter.section), so a row is som
 | 2.9, 2.10 | Power supplies, core regulator (analogue) | n/a | the `VREG` / `BOD` registers are stored (Stub) | - |
 | 2.11.1 | Top-level clock gates | Missing | | Go-ahead |
 | 2.11.2 | SLEEP state | Unchecked | | - |
-| 2.11.3 | DORMANT state | Missing | `XOSC.DORMANT` is stored; `ROSC` is missing | Go-ahead |
+| 2.11.3 | DORMANT state | Missing | `XOSC.DORMANT` and `ROSC.DORMANT` are stored | Go-ahead |
 | 2.11.4 | Memory power down | Stub | `SYSCFG.MEMPOWERDOWN` is stored | - |
 | 2.12 | Chip-level reset: power-on, external, watchdog, source of last reset | Done | 0098 | - |
 | 2.12.3 | Brown-out detection | Stub | `BOD` is stored | - |
@@ -90,7 +90,7 @@ Follows the datasheet's own table of contents (chapter.section), so a row is som
 | 2.14 | Subsystem resets | Done | 0098 | - |
 | 2.15.1-2.15.3 | Clocks: overview, multiplexers, dividers, generators | Done | | - |
 | 2.15.2 | Clock sources: XOSC, PLLs | Done | PLL always locked | - |
-| 2.15.2.1 | Clock source: ROSC | Missing | | **Next** |
+| 2.15.2.1 | Clock source: ROSC | Done | `rosc_freq` follows `DIV` and `FREQ_RANGE`, the clock tree is retuned (0098) | - |
 | 2.15.2.3 | Clock source: external clocks (GPIN) | Missing | | Go-ahead |
 | 2.15.3.4 | Duty cycle correction | Unchecked | | - |
 | 2.15.3.5 | Clock enables (`WAKE_EN` / `SLEEP_EN` / `ENABLED0/1`), system sleep | Stub | stored; `ENABLED0/1` absent; needs the cores' sleep state | Go-ahead |
@@ -103,7 +103,11 @@ Follows the datasheet's own table of contents (chapter.section), so a row is som
 | 2.16.3 | XOSC: start-up delay | Stub | `STARTUP` is stored; `STABLE` is set at once, not after the delay | Go-ahead |
 | 2.16.4 | XOSC counter | Stub | `COUNT` is loaded by a write and never counts down | Go-ahead |
 | 2.16.5 | XOSC DORMANT | Stub | stored, no effect | Go-ahead |
-| 2.17 | **ROSC**: overview, trade-offs, frequency, divider, random number generator, counter, DORMANT | Missing | the whole chapter; `rosc_freq` is an attribute the clock tree reads | **Next** |
+| 2.17.1-2.17.3 | ROSC: overview, CTRL (`ENABLE`, `FREQ_RANGE`), frequency | Partial | `FREQ_RANGE` ratios and `DIV` set the frequency (6.5 MHz nominal); FREQA / FREQB validated and stored, **no effect on the frequency** (the datasheet gives no figures); the oscillator does not stop when disabled | - |
+| 2.17.4 | ROSC divider, phase-shifted output | Partial | `DIV` works; `PHASE` is validated and stored, there is no second output | - |
+| 2.17.5 | ROSC: random number generator | Done | `RANDOMBIT` from a hook (seeded generator by default) | - |
+| 2.17.6 | ROSC counter | Done | counts down at the ROSC frequency, stops at zero (the "ROSC frequency" is taken as the output frequency: not independently sourced) | - |
+| 2.17.7 | ROSC DORMANT | Stub | the register is stored; nothing goes dormant (see 2.11.3) | Go-ahead |
 | 2.18 | PLL | Partial | always locked, no start-up time | - |
 | 2.19.2 | GPIO function select | Done | | - |
 | 2.19.3 | GPIO interrupts | Partial | core-0 registers work; **`PROC1_*` and `DORMANT_WAKE_*` absent** (24 register tables); IO_BANK0 never audited | With the IO_BANK0 port |

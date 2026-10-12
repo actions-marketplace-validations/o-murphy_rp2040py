@@ -359,6 +359,7 @@ Also needed when core 1 is built (not now): the bootrom launch handshake over th
 
 ## Progress log
 
+- 2026-10-12: **The ROSC is a block, in C++** (`core/rosc.hpp`, shell `native/_rosc.pyx`, reference `peripherals/_rosc.py`, facade `peripherals/rosc.py`; it was an `UnimplementedPeripheral`): the first port done in the recipe's order, the audit and the port in one pass (0098, section "ROSC"). New host functions: `frequency_changed` (the chip's clock tree follows `DIV` / `FREQ_RANGE`) and `random_bit`; COUNT is derived from the chip's `Clock` without an alarm. Also found: the clock's `double` nanoseconds lose all sub-resolution delays once simulated time passes ~104 days; an integer time base is authorised as the next cross-block change.
 - 2026-10-12: **The DMA transfers at one `clk_sys` cycle per word** (`DmaBlock::transfer_ns`, kept current by the shell through a `clk_sys` listener; 0098): a ready transfer is no longer an alarm at +0 ns.
 - 2026-10-12: **The PIO machine's FIFOs have a runtime size** (`PioFifo::size` 4, 8 or 0, `resize()`): SHIFTCTRL.FJOIN_TX / FJOIN_RX (0098). No host function changed.
 - 2026-10-12: **The SPI has a transmitter time** (0098): `SpiBlock::init` now takes the chip's `Clock`, `SpiHost` gained `bit_ns`, and a word's `DSS + 1` bit clocks are a frame `Alarm`; the block is no longer "without timing of its own". The shell requires the native `SimulationClock` like the UART's.

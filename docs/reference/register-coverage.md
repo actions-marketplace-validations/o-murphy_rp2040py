@@ -12,7 +12,7 @@
 
 **This is a curated list, not a measurement.** "Answers" is measured (a read at the register's address does not warn "Unimplemented peripheral read"; for a write-only register, a write of 0 does not warn). "Acts" is curated: it means the block was audited and the register is in none of the stub / partial lists of `scripts/audit/register_status.py`, each entry of which carries its evidence. A stub that nobody has listed yet shows as Acts; if you find one, add it there and re-run the script. For what each block does and does not do, see [feature-coverage.md](feature-coverage.md). A table shared by several instances (UART0/UART1, the DMA's per-channel tables) is listed once, as the datasheet gives it.
 
-**474 registers: 281 act, 88 are stubs, 17 partial, 33 exist but are unchecked, 55 are absent.**
+**474 registers: 285 act, 88 are stubs, 22 partial, 33 exist but are unchecked, 46 are absent.**
 
 | Block | Registers | Acts | Stub | Partial | Unchecked | Absent |
 |---|---|---|---|---|---|---|
@@ -32,7 +32,7 @@
 | CLOCKS | 48 | 28 | 18 | 0 | 0 | 2 |
 | PLL | 4 | 2 | 1 | 1 | 0 | 0 |
 | XOSC | 5 | 2 | 1 | 2 | 0 | 0 |
-| ROSC | 9 | 0 | 0 | 0 | 0 | 9 |
+| ROSC | 9 | 4 | 0 | 5 | 0 | 0 |
 | PSM | 4 | 4 | 0 | 0 | 0 | 0 |
 | RESETS | 3 | 3 | 0 | 0 | 0 | 0 |
 | SYSCFG | 7 | 1 | 6 | 0 | 0 | 0 |
@@ -494,15 +494,15 @@ Stubs in this block: COUNT is loaded by a write but never counts down (periphera
 
 | Offset | Register | Status | Note |
 |---|---|---|---|
-| `0x00` | CTRL | Absent |  |
-| `0x04` | FREQA | Absent |  |
-| `0x08` | FREQB | Absent |  |
-| `0x0c` | DORMANT | Absent |  |
-| `0x10` | DIV | Absent |  |
-| `0x14` | PHASE | Absent |  |
-| `0x18` | STATUS | Absent |  |
-| `0x1c` | RANDOMBIT | Absent |  |
-| `0x20` | COUNT | Absent |  |
+| `0x00` | CTRL | Partial | CTRL: DISABLE is stored, the oscillator keeps running; STABLE follows ENABLE at once |
+| `0x04` | FREQA | Partial | FREQA: the drive strengths are validated and stored; they do not change the frequency (no figures in the datasheet) |
+| `0x08` | FREQB | Partial | FREQB: the drive strengths are validated and stored; they do not change the frequency (no figures in the datasheet) |
+| `0x0c` | DORMANT | Partial | DORMANT: stored, nothing goes dormant |
+| `0x10` | DIV | Acts |  |
+| `0x14` | PHASE | Partial | PHASE: validated and stored; there is no phase-shifted output |
+| `0x18` | STATUS | Acts |  |
+| `0x1c` | RANDOMBIT | Acts |  |
+| `0x20` | COUNT | Acts |  |
 
 ## PSM
 

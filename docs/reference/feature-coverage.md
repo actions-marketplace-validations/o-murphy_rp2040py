@@ -36,7 +36,7 @@ One place to see, block by block and datasheet section by section, what is model
 | IO_BANK0 | Partial | Yes | C++ (`core/io.hpp`) over the shared pin bank; also IO_QSPI, PADS_BANK0, PADS_QSPI (`core/pads.hpp`) | `PROC1_*` / `DORMANT_WAKE_*` are stored and raise nothing (no core 1, no dormant); the pad electrical model (drive, slew, Schmitt, `VOLTAGE_SELECT`) is absent; PIO pin-write arbitration (`OUT_STICKY`...) is not done |
 | PADS_BANK0 / PADS_QSPI / IO_QSPI | Partial | Yes | C++ (with IO_BANK0, above) | `VOLTAGE_SELECT` and `SWCLK` / `SWD` are stored; pad drive, slew and Schmitt have no electrical model |
 | GPIO: input synchronisers | Missing | Yes | - | two clk_sys cycles of latency (2.21), bypassed by `SYSCFG.PROC_IN_SYNC_BYPASS(_HI)` and the PIO's `INPUT_SYNC_BYPASS`, both stored; needs a go-ahead |
-| XIP_CTRL | Stub | No | Python only | no cache, no streaming (record 0052); **Next** after IO_BANK0 |
+| XIP_CTRL | Done | Yes | Ported | tag-only 2-way cache, aliases, counters, flush, cache-as-SRAM, streaming FIFO + `DREQ_XIP_STREAM`, `XIP_AUX`; the XIP window is read-only to the bus (0098); no bus fault is raised |
 | USB controller + CDC host | Partial | No | Python only | host mode works; `USB_MUXING`, `USBPHY_*` absent; device mode unchecked |
 
 ## 2. Every section of the datasheet
@@ -74,7 +74,7 @@ Follows the datasheet's own table of contents (chapter.section), so a row is som
 | 2.5 | DMA: `HIGH_PRIORITY` and arbitration, read/write/AHB error flags, bus contention | Missing | a transfer never waits for the bus; the flags are stored | Go-ahead |
 | 2.6.1 | ROM | Done | the real boot ROM image | - |
 | 2.6.2 | SRAM | Unchecked | striped / non-striped, per-bank | - |
-| 2.6.3 | Flash and the XIP cache | Stub | XIP_CTRL registers exist, no cache, no streaming | With the XIP_CTRL port |
+| 2.6.3 | Flash and the XIP cache | Done | 0098; tags only (the data comes from the image); LRU, flush time and stream pace are model choices | - |
 | 2.7 | Boot sequence | Done | flash boot with boot2: MicroPython, CircuitPython, Kaluma, SDK examples in CI | - |
 | 2.8.1, 2.8.3 | Bootrom: processor-controlled boot, ROM contents | Done | flash routines go through the SSI | - |
 | 2.8.2 | Bootrom: launching code on core 1 | Missing | | Needs core 1 |
@@ -171,7 +171,7 @@ Follows the datasheet's own table of contents (chapter.section), so a row is som
 | 4.10.5, 4.10.7, 4.10.8 | SSI: own 16-entry FIFOs, the five interrupts, `TMOD` 00/01/10/11 | Stub | 21 of 28 registers are stubs; requirements in 0098 | With XIP_CTRL port |
 | 4.10.6 | SSI: 32-bit frame size | Missing | | Go-ahead |
 | 4.10.11 | SSI: DMA interface | Missing | | Go-ahead |
-| 4.10 | SSI: XIP streaming | Missing | read datasheet 2.6 first | With the XIP_CTRL port |
+| 4.10 | SSI: XIP streaming | Done | stream FIFO, `XIP_AUX`, DREQ 37 in XIP_CTRL (0098) | - |
 
 ### Chapters 1 and 5
 

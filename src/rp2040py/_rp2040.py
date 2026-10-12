@@ -77,6 +77,10 @@ from rp2040py.peripherals._uart import (  # the pure chip's own UART: the native
 )
 from rp2040py.peripherals._vreg_and_chip_reset import RPVREGAndChipReset
 from rp2040py.peripherals._watchdog import RPWatchdog
+from rp2040py.peripherals._xip_ctrl import (  # the pure chip's own XIP: the native one works on the native chip's flash buffer and memory map
+    RPXIPAux,
+    RPXIPCtrl,
+)
 from rp2040py.peripherals._xosc import RPXOSC
 from rp2040py.peripherals.clocks import RPClocks, reset_clock_tree, update_clocks
 from rp2040py.peripherals.peripheral import Peripheral
@@ -84,7 +88,6 @@ from rp2040py.peripherals.pio import RPPIO
 from rp2040py.peripherals.pll import RPPLL
 from rp2040py.peripherals.timer import RPTimer
 from rp2040py.peripherals.usb import RPUSBController
-from rp2040py.peripherals.xip_ctrl import RPXIPCtrl
 from rp2040py.qspi_pads import QSPI_PAD_RESET_VALUES
 from rp2040py.sio import RPSIO
 from rp2040py.utils.bit import (
@@ -236,6 +239,7 @@ class RP2040:
 
         self.peripherals: dict[int, Peripheral] = {
             0x14000: self.xip_ctrl,
+            0x50400: RPXIPAux(self, "XIP_AUX_BASE"),
             0x18000: self.ssi,
             0x40000: RP2040SysInfo(self, "SYSINFO_BASE"),
             0x40004: self.syscfg,
@@ -565,8 +569,12 @@ class RP2040:
             # - 0x11000000 XIP_NOALLOC
             # - 0x12000000 XIP_NOCACHE
             # - 0x13000000 XIP_NOCACHE_NOALLOC
-            offset = address & 0x00FFFFFF
-            return read_uint32_le(self.flash, offset)
+            self.xip_ctrl.access(address)
+            return read_uint32_le(self.flash, address & 0x00FFFFFF)
+        if address >> 24 == 0x15:
+            # the cache's data RAM, usable as SRAM while the cache is off (a bus error otherwise)
+            value = self.xip_ctrl.sram_read(address)
+            return 0xFFFFFFFF if value is None else value
         if RAM_START_ADDRESS <= address < RAM_START_ADDRESS + self.ram_byte_size:
             return read_uint32_le(self.sram, address - RAM_START_ADDRESS)
         if DPRAM_START_ADDRESS <= address < DPRAM_START_ADDRESS + self.dpram_byte_size:
@@ -593,6 +601,7 @@ class RP2040:
     def read_uint16(self, address: int) -> int:
         """We assume the address is 16-bit aligned."""
         if FLASH_START_ADDRESS <= address < FLASH_START_ADDRESS + self.flash_byte_size:
+            self.xip_ctrl.access(address)
             return read_uint16_le(self.flash, address - FLASH_START_ADDRESS)
         if RAM_START_ADDRESS <= address < RAM_START_ADDRESS + self.ram_byte_size:
             return read_uint16_le(self.sram, address - RAM_START_ADDRESS)
@@ -602,6 +611,7 @@ class RP2040:
 
     def read_uint8(self, address: int) -> int:
         if FLASH_START_ADDRESS <= address < FLASH_START_ADDRESS + self.flash_byte_size:
+            self.xip_ctrl.access(address)
             return self.flash[address - FLASH_START_ADDRESS]
         if RAM_START_ADDRESS <= address < RAM_START_ADDRESS + self.ram_byte_size:
             return self.sram[address - RAM_START_ADDRESS]
@@ -619,8 +629,11 @@ class RP2040:
         # was always going to miss; write_uint8()/write_uint16() never had this problem.
         if address < self.bootrom_byte_size:
             bootrom[address // 4] = value & 0xFFFFFFFF
-        elif FLASH_START_ADDRESS <= address < FLASH_START_ADDRESS + self.flash_byte_size:
-            write_uint32_le(self.flash, address - FLASH_START_ADDRESS, value)
+        elif FLASH_START_ADDRESS <= address < FLASH_END_ADDRESS:
+            # the XIP window is read-only to the bus: flash changes through the SSI, and a write here only deletes a matching cache entry (or faults)
+            self.xip_ctrl.write_access(address)
+        elif address >> 24 == 0x15:
+            self.xip_ctrl.sram_write(address, value)
         elif RAM_START_ADDRESS <= address < RAM_START_ADDRESS + self.ram_byte_size:
             write_uint32_le(self.sram, address - RAM_START_ADDRESS, value)
         elif DPRAM_START_ADDRESS <= address < DPRAM_START_ADDRESS + self.dpram_byte_size:
@@ -643,6 +656,9 @@ class RP2040:
     def write_uint8(self, address: int, value: int) -> None:
         if RAM_START_ADDRESS <= address < RAM_START_ADDRESS + self.ram_byte_size:
             self.sram[address - RAM_START_ADDRESS] = value & 0xFF
+            return
+        if FLASH_START_ADDRESS <= address < FLASH_END_ADDRESS:
+            self.xip_ctrl.write_access(address)
             return
 
         aligned_address = u32(address & 0xFFFFFFFC)
@@ -668,6 +684,9 @@ class RP2040:
 
         if RAM_START_ADDRESS <= address < RAM_START_ADDRESS + self.ram_byte_size:
             write_uint16_le(self.sram, address - RAM_START_ADDRESS, value)
+            return
+        if FLASH_START_ADDRESS <= address < FLASH_END_ADDRESS:
+            self.xip_ctrl.write_access(address)
             return
 
         aligned_address = u32(address & 0xFFFFFFFC)

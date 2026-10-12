@@ -26,6 +26,11 @@ from rp2040py.native._cortex_m0_core cimport CortexM0Core
 from rp2040py.native._memory_map cimport (
     Region,
     kNotifyOnWrite,
+    kXip,
+    XipAccessFn,
+    XipHooks,
+    XipSramReadFn,
+    XipSramWriteFn,
     kSubWord,
     kWordIndexed,
 )
@@ -57,7 +62,7 @@ from rp2040py.peripherals.i2c import RPI2C
 from rp2040py.peripherals.io import RPIO
 from rp2040py.peripherals.pads import RPPADS
 from rp2040py.peripherals.vreg_and_chip_reset import RPVREGAndChipReset
-from rp2040py.peripherals.xip_ctrl import RPXIPCtrl
+from rp2040py.peripherals.xip_ctrl import RPXIPAux, RPXIPCtrl
 from rp2040py.qspi_pads import QSPI_PAD_RESET_VALUES
 from rp2040py.peripherals.pio import RPPIO
 from rp2040py.peripherals.ppb import RPPPB
@@ -167,6 +172,36 @@ cdef uint32_t _python_window_read32(void* ctx, uint32_t offset) noexcept:
 cdef void _python_window_write32(void* ctx, uint32_t offset, int64_t raw_value, uint32_t atomic_type) noexcept:
     try:
         (<_PythonWindow> ctx).peripheral.write_uint32_atomic(offset, raw_value, atomic_type)
+    except BaseException as error:
+        park_error(error)
+
+
+cdef void _python_xip_read_access(void* ctx, uint32_t address) noexcept:
+    try:
+        (<object> ctx).access(address)
+    except BaseException as error:
+        park_error(error)
+
+
+cdef void _python_xip_write_access(void* ctx, uint32_t address) noexcept:
+    try:
+        (<object> ctx).write_access(address)
+    except BaseException as error:
+        park_error(error)
+
+
+cdef uint32_t _python_xip_sram_read(void* ctx, uint32_t address) noexcept:
+    try:
+        value = (<object> ctx).sram_read(address)
+        return 0xFFFFFFFFU if value is None else <unsigned int> value
+    except BaseException as error:
+        park_error(error)
+        return 0
+
+
+cdef void _python_xip_sram_write(void* ctx, uint32_t address, uint32_t value) noexcept:
+    try:
+        (<object> ctx).sram_write(address, value)
     except BaseException as error:
         park_error(error)
 
@@ -316,7 +351,7 @@ cdef class RP2040:
         region.size = self.flash_byte_size
         region.mask = 0x00FFFFFFU
         region.data = <uint8_t*> &self._flash[0]
-        region.flags = kSubWord
+        region.flags = kSubWord | kXip  # the whole window is read-only to the bus; the XIP block (once built) is told of every access
         self._bus.mem.attach(region)
         region.base = RAM_START
         region.window = self.ram_byte_size
@@ -431,6 +466,7 @@ cdef class RP2040:
         self.busctrl = RPBUSCTRL(self, "BUSCTRL_BASE")
         self.syscfg = RP2040SysCfg(self, "SYSCFG")
         self.xip_ctrl = RPXIPCtrl(self, "XIP_CTRL_BASE")
+        self._attach_xip_hooks(self.xip_ctrl)
         self.ssi = RPSSI(self, "SSI")
         self.xosc = RPXOSC(self, "XOSC_BASE")
         self.io_bank0 = RPIO(self, "IO_BANK0_BASE")
@@ -439,6 +475,7 @@ cdef class RP2040:
 
         self.peripherals = {
             0x14000: self.xip_ctrl,
+            0x50400: RPXIPAux(self, "XIP_AUX_BASE"),
             0x18000: self.ssi,
             0x40000: RP2040SysInfo(self, "SYSINFO_BASE"),
             0x40004: self.syscfg,
@@ -806,6 +843,30 @@ cdef class RP2040:
     def ppb(self, value) -> None:
         self._ppb = value
         self._bus.set_ppb(self._direct_handler(value, False))
+
+    def _attach_xip_hooks(self, xip):
+        """Hands the C++ memory map the XIP block's hooks, so the flash window (read-only to the bus, its reads counted and cached) and the `0x15...` cache-as-SRAM segment are served
+        through it. A block with native hooks (looked up on the TYPE, like `_native_window`) lends its own C++ functions; any other block (the pure-Python reference, which the facade hands out when
+        the native one is switched off) is reached through Python trampolines, so the flash window means the same thing whichever XIP the chip has."""
+        cdef XipHooks hooks
+        native_hooks = getattr(type(xip), "_native_xip_hooks", None)
+        if native_hooks is None:
+            hooks.read_access = _python_xip_read_access
+            hooks.write_access = _python_xip_write_access
+            hooks.sram_read = _python_xip_sram_read
+            hooks.sram_write = _python_xip_sram_write
+            hooks.ctx = <void*> xip
+            self._xip_owner = xip  # keeps the block (and so the context pointer) alive
+            self._bus.mem.set_xip(hooks)
+        else:
+            read_access, write_access, sram_read, sram_write, ctx = native_hooks(xip)
+            hooks.read_access = <XipAccessFn> <size_t> read_access
+            hooks.write_access = <XipAccessFn> <size_t> write_access
+            hooks.sram_read = <XipSramReadFn> <size_t> sram_read
+            hooks.sram_write = <XipSramWriteFn> <size_t> sram_write
+            hooks.ctx = <void*> <size_t> ctx
+            self._xip_owner = xip  # keeps the block (and so the context pointer) alive
+            self._bus.mem.set_xip(hooks)
 
     def _native_flash_address(self):
         """The address and size of this chip's flash buffer, for a native block that works on it directly (the SSI): allocated once, only ever

@@ -1,95 +1,52 @@
-"""XIP_CTRL (`0x14000000`) - the execute-in-place cache's control registers.
-
-**No cache is modelled, and none should be.** This emulator reads flash directly, so there is no
-hit/miss behaviour to reproduce and no timing model that a cache would change. What firmware
-legitimately expects, though, is that these registers *exist* and read back sane values: the
-RP2040 boot path enables the cache, flushes it, and polls for the flush to complete. Left
-unimplemented, `BasePeripheral` answers every read with `0xFFFFFFFF` - every status bit reads as
-set, which is the same class of trap that made `CHIP_RESET` look like a permanent psm_restart (see
-docs/records/0050-qspi-pad-reset-values.md's own "not the fix" section).
-
-So: the registers are real, flushes complete instantly (there is nothing to flush), and the hit/
-access counters stay at zero rather than inventing numbers. Writes to offsets past the register
-block are ignored rather than warned about - a real boot does write there (`0x2000` was observed
-during CircuitPython's), and with no cache to maintain there is nothing for us to do about it.
+"""Public facade for XIP_CTRL / XIP_AUX: prefers the native block in `rp2040py.native._xip_ctrl` (a Cython shell over `native/core/xip_ctrl.hpp`) when it is importable, falling back to the
+plain-Python reference in `_xip_ctrl.py` otherwise. Every caller imports from here - never from `_xip_ctrl.py` or `rp2040py.native` directly (the pure-Python chip, `_rp2040.py`, is the one
+deliberate exception). Held to identical behaviour by `tests/test_xip_diff.py` (docs/records/0098-datasheet-conformance-audit.md, "XIP_CTRL and the XIP subsystem").
 """
 
-from rp2040py.peripherals.peripheral import BasePeripheral
+from rp2040py._native_gate import native_disabled
+from rp2040py.peripherals._xip_ctrl import (
+    CTR_ACC,
+    CTR_HIT,
+    CTRL,
+    CTRL_EN,
+    CTRL_ERR_BADWRITE,
+    CTRL_POWER_DOWN,
+    DREQ_XIP_STREAM,
+    FLUSH,
+    SSI_BAUDR,
+    STAT,
+    STAT_FIFO_EMPTY,
+    STAT_FIFO_FULL,
+    STAT_FLUSH_READY,
+    STREAM_ADDR,
+    STREAM_CTR,
+    STREAM_FIFO,
+)
 
-__all__ = ("RPXIPCtrl",)
+try:
+    if native_disabled():
+        raise ImportError("RP2040PY_SKIP_CYTHON=1 set, forcing pure-Python fallback")
+    from rp2040py.native._xip_ctrl import RPXIPAux, RPXIPCtrl
+except ImportError:
+    from rp2040py.peripherals._xip_ctrl import RPXIPAux, RPXIPCtrl
 
-CTRL = 0x00
-FLUSH = 0x04
-STAT = 0x08
-CTR_HIT = 0x0C
-CTR_ACC = 0x10
-STREAM_ADDR = 0x14
-STREAM_CTR = 0x18
-STREAM_FIFO = 0x1C
-
-# CTRL: EN (bit 0) | ERR_BADWRITE (bit 1). Datasheet reset value.
-_CTRL_RESET = 0x00000003
-
-# STAT: FLUSH_READY (bit 1) and FIFO_EMPTY (bit 2). Both are permanently true here - a flush that
-# has nothing to flush is always ready, and a streaming FIFO that never streams is always empty.
-FLUSH_READY = 1 << 1
-FIFO_EMPTY = 1 << 2
-_STAT_VALUE = FLUSH_READY | FIFO_EMPTY
-
-_LAST_REGISTER = STREAM_FIFO
-
-
-class RPXIPCtrl(BasePeripheral):
-    def __init__(self, rp2040: "object", name: str) -> None:  # type: ignore[override]
-        super().__init__(rp2040, name)  # type: ignore[arg-type]
-        self.ctrl = _CTRL_RESET
-        self.stream_addr = 0
-        self.stream_ctr = 0
-
-    def reset(self) -> None:
-        """The XIP domain, which is a `PSM.WDSEL` bit rather than a `RESETS` one - there is no
-        `RESETS_RESET_XIP` (0089 Phase 5). No cache is modelled here on purpose
-        (docs/records/0052-xip-ctrl-registers.md), so there is nothing to flush: these three
-        registers are the block."""
-        self.ctrl = _CTRL_RESET
-        self.stream_addr = 0
-        self.stream_ctr = 0
-
-    def read_uint32(self, offset: int) -> int:
-        if offset == CTRL:
-            return self.ctrl
-        if offset == FLUSH:
-            # Reading FLUSH blocks until the flush completes on real hardware; here it is already
-            # done by the time anyone can look.
-            return 1
-        if offset == STAT:
-            return _STAT_VALUE
-        if offset in (CTR_HIT, CTR_ACC):
-            return 0  # no cache, so no hits and no accesses to count
-        if offset == STREAM_ADDR:
-            return self.stream_addr
-        if offset == STREAM_CTR:
-            return self.stream_ctr
-        if offset == STREAM_FIFO:
-            return 0
-        # Anything else in this block: 0, not BasePeripheral's 0xFFFFFFFF - see the module
-        # docstring for why all-ones is actively dangerous for a register block firmware polls.
-        return 0
-
-    def write_uint32(self, offset: int, value: int) -> None:
-        if offset == CTRL:
-            self.ctrl = value & 0xFFFFFFFF
-            return
-        if offset == FLUSH:
-            return  # nothing to flush
-        if offset == STREAM_ADDR:
-            self.stream_addr = value & 0xFFFFFFFC
-            return
-        if offset == STREAM_CTR:
-            self.stream_ctr = value & 0xFFFFFFFF
-            return
-        if offset in (STAT, CTR_HIT, CTR_ACC, STREAM_FIFO):
-            return  # read-only / counters we do not keep
-        if offset > _LAST_REGISTER:
-            return  # cache maintenance on a cache that does not exist
-        super().write_uint32(offset, value)
+__all__ = (
+    "CTRL",
+    "CTRL_EN",
+    "CTRL_ERR_BADWRITE",
+    "CTRL_POWER_DOWN",
+    "CTR_ACC",
+    "CTR_HIT",
+    "DREQ_XIP_STREAM",
+    "FLUSH",
+    "SSI_BAUDR",
+    "STAT",
+    "STAT_FIFO_EMPTY",
+    "STAT_FIFO_FULL",
+    "STAT_FLUSH_READY",
+    "STREAM_ADDR",
+    "STREAM_CTR",
+    "STREAM_FIFO",
+    "RPXIPAux",
+    "RPXIPCtrl",
+)

@@ -25,7 +25,7 @@ AUDITED = {
     "M0PLUS", "SIO", "TIMER", "WATCHDOG", "RTC", "UART", "SPI", "I2C", "ADC", "PWM", "DMA", "PIO", "SSI", "CLOCKS", "PLL", "XOSC", "PSM", "RESETS", "SYSCFG", "SYSINFO", "TBMAN",
     "VREG_AND_CHIP_RESET", "BUSCTRL", "ROSC", "IO_BANK0", "IO_QSPI", "PADS_BANK0", "PADS_QSPI",
 }  # fmt: skip
-# Blocks never audited: whatever they answer is unchecked (USB, XIP: the ports still to do)
+# Blocks never audited: whatever they answer is unchecked (USB: the port still to do)
 UNAUDITED = {"USB"}
 
 # block -> {offset: what is not acted on} for registers that act but not in every field (from 0098's backlog and the second passes)
@@ -95,10 +95,6 @@ PARTIAL: dict[str, dict[int, str]] = {
 }
 # block -> (offsets that are stubs | ALL, why)
 STUBS: dict[str, tuple[object, str]] = {
-    "XIP": (
-        ALL,
-        "no cache and no streaming is modelled; the registers exist so the boot path's enable/flush/poll works (record 0052, peripherals/xip_ctrl.py)",
-    ),
     "SSI": (
         set(ssi.STORED_REGISTERS) | set(ssi.ZERO_REGISTERS) | {0x00, 0x04, 0x14, 0xF0, 0xF4, 0xF8},
         "the SSI is a flash-command model: these are stored (`STORED_REGISTERS`, and CTRLR0, CTRLR1, BAUDR, RX_SAMPLE_DLY, SPI_CTRLR0, TXD_DRIVE_EDGE in their own attributes) or read 0 (`ZERO_REGISTERS`) in peripherals/_ssi.py",

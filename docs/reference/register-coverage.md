@@ -12,7 +12,7 @@
 
 **This is a curated list, not a measurement.** "Answers" is measured (a read at the register's address does not warn "Unimplemented peripheral read"; for a write-only register, a write of 0 does not warn). "Acts" is curated: it means the block was audited and the register is in none of the stub / partial lists of `scripts/audit/register_status.py`, each entry of which carries its evidence. A stub that nobody has listed yet shows as Acts; if you find one, add it there and re-run the script. For what each block does and does not do, see [feature-coverage.md](feature-coverage.md). A table shared by several instances (UART0/UART1, the DMA's per-channel tables) is listed once, as the datasheet gives it.
 
-**474 registers: 303 act, 91 are stubs, 57 partial, 13 exist but are unchecked, 10 are absent.**
+**474 registers: 303 act, 83 are stubs, 57 partial, 21 exist but are unchecked, 10 are absent.**
 
 | Block | Registers | Acts | Stub | Partial | Unchecked | Absent |
 |---|---|---|---|---|---|---|
@@ -45,7 +45,7 @@
 | PADS_BANK0 | 4 | 0 | 3 | 1 | 0 | 0 |
 | PADS_QSPI | 3 | 0 | 1 | 2 | 0 | 0 |
 | USB | 23 | 0 | 6 | 1 | 13 | 3 |
-| XIP | 8 | 0 | 8 | 0 | 0 | 0 |
+| XIP | 8 | 0 | 0 | 0 | 8 | 0 |
 
 ## M0PLUS
 
@@ -688,15 +688,13 @@ Stubs in this block: EP_ABORT, EP_ABORT_DONE, EP_STALL_ARM, NAK_POLL, EP_STATUS_
 
 ## XIP
 
-Stubs in this block: no cache and no streaming is modelled; the registers exist so the boot path's enable/flush/poll works (record 0052, peripherals/xip_ctrl.py).
-
 | Offset | Register | Status | Note |
 |---|---|---|---|
-| `0x00` | CTRL | Stub |  |
-| `0x04` | FLUSH | Stub |  |
-| `0x08` | STAT | Stub |  |
-| `0x0c` | CTR_HIT | Stub |  |
-| `0x10` | CTR_ACC | Stub |  |
-| `0x14` | STREAM_ADDR | Stub |  |
-| `0x18` | STREAM_CTR | Stub |  |
-| `0x1c` | STREAM_FIFO | Stub |  |
+| `0x00` | CTRL | Unchecked | the block was never audited |
+| `0x04` | FLUSH | Unchecked | the block was never audited |
+| `0x08` | STAT | Unchecked | the block was never audited |
+| `0x0c` | CTR_HIT | Unchecked | the block was never audited |
+| `0x10` | CTR_ACC | Unchecked | the block was never audited |
+| `0x14` | STREAM_ADDR | Unchecked | the block was never audited |
+| `0x18` | STREAM_CTR | Unchecked | the block was never audited |
+| `0x1c` | STREAM_FIFO | Unchecked | the block was never audited |

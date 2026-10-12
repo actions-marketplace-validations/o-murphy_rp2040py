@@ -26,12 +26,8 @@ start_emulator() {
 
 stop_emulator() { [ -n "$EMU_PID" ] && kill "$EMU_PID" 2>/dev/null; wait "$EMU_PID" 2>/dev/null; true; }
 
-{
-  echo "MicroPython official tests on the emulated RP2040 ($TAG)"
-  echo
-  echo "| test | result |"
-  echo "|---|---|"
-} >"$OUT"
+ROWS=$WORK/rows.md
+: >"$ROWS"
 
 start_emulator
 cd "$MP_DIR/tests" || exit 0
@@ -41,20 +37,32 @@ for t in ports/rp2/*.py extmod/machine_*.py; do
   # `_thread` starts the second core (multicore_launch_core1 waits for the bootrom FIFO handshake): the emulator has no core 1 yet (record 0096, dual-core seams), so
   # the file would only hang until the timeout and cost an emulator restart
   if grep -q "_thread" "$t"; then
-    echo "| $t | SKIP (needs core 1) |" >>"$OUT"; echo "$t: SKIP (needs core 1)"; skip=$((skip + 1)); continue
+    echo "| $t | :fast_forward: SKIP (needs core 1) |" >>"$ROWS"; echo "$t: SKIP (needs core 1)"; skip=$((skip + 1)); continue
   fi
   timeout "$PER_TEST_TIMEOUT" "$VIRTUAL_ENV/bin/python" run-tests.py -t "$DEV" -r "$WORK/res" "$t" >"$log" 2>&1
   rc=$?
   if [ $rc = 124 ]; then
-    r=HANG; hang=$((hang + 1)); stop_emulator; start_emulator
-  elif grep -q "^pass " "$log"; then r=PASS; pass=$((pass + 1))
-  elif grep -q "^FAIL " "$log"; then r=FAIL; fail=$((fail + 1))
-  elif grep -qi "^skip" "$log"; then r=SKIP; skip=$((skip + 1))
-  else r="ERROR (see log)"; fail=$((fail + 1)); fi
-  echo "| $t | $r |" >>"$OUT"
+    r=":hourglass: HANG"; hang=$((hang + 1)); stop_emulator; start_emulator
+  elif grep -q "^pass " "$log"; then r=":white_check_mark: PASS"; pass=$((pass + 1))
+  elif grep -q "^FAIL " "$log"; then r=":x: FAIL"; fail=$((fail + 1))
+  elif grep -qi "^skip" "$log"; then r=":fast_forward: SKIP"; skip=$((skip + 1))
+  else r=":warning: ERROR (see the job log)"; fail=$((fail + 1)); fi
+  echo "| $t | $r |" >>"$ROWS"
   echo "$t: $r"
 done
 stop_emulator
-{ echo; echo "pass $pass, fail $fail, skip $skip, hang $hang"; } >>"$OUT"
+{
+  echo "## MicroPython official tests on the emulated RP2040 ($TAG)"
+  echo
+  echo "**:white_check_mark: $pass passed, :x: $fail failed, :fast_forward: $skip skipped, :hourglass: $hang hung** - report only, nothing here gates the build."
+  echo
+  echo "| test | result |"
+  echo "|---|---|"
+  cat "$ROWS"
+  echo
+  echo "Why the failures happen: see \`docs/records/0098-datasheet-conformance-audit.md\` (section on MicroPython's own test suite)."
+} >"$OUT"
 cat "$OUT"
+# straight into the run's summary page as well, so it shows even if a later step fails
+[ -n "${GITHUB_STEP_SUMMARY:-}" ] && cat "$OUT" >>"$GITHUB_STEP_SUMMARY"
 exit 0

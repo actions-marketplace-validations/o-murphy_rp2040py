@@ -52,10 +52,6 @@ jobs:
           source .venv/bin/activate
           bash tests/micropython_official/run_suite.sh "$RUNNER_TEMP/micropython" ${{ matrix.micropython_tag }} "$RUNNER_TEMP/official-tests.md"
 
-      - name: Job summary
-        if: always()
-        run: cat "$RUNNER_TEMP/official-tests.md" >> "$GITHUB_STEP_SUMMARY" || true
-
       - name: Upload the report
         if: always()
         uses: actions/upload-artifact@v7

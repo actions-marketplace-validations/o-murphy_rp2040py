@@ -158,7 +158,7 @@ def test_abort_while_the_master_waits_for_a_command_issues_the_stop_and_clears_t
     interrupt after the abort operation. The ABORT bit is cleared automatically after the abort operation." A master that has sent a byte without STOP and has nothing more to send holds SCL low; ABORT is
     how it lets go ("you can issue the ABORT (IC_ENABLE.ABORT) to relinquish the I2C bus and then disable DW_apb_i2c")."""
     chip, _ = _chip()
-    i2c, events = _bus(chip)
+    _i2c, events = _bus(chip)
     chip.write_uint32(I2C0_BASE + IC_ENABLE, 0)
     chip.write_uint32(I2C0_BASE + 0x04, 0x50)  # IC_TAR
     chip.write_uint32(I2C0_BASE + IC_ENABLE, ENABLE_BIT)
@@ -174,7 +174,7 @@ def test_abort_while_the_master_waits_for_a_command_issues_the_stop_and_clears_t
 
 def test_abort_is_ignored_unless_enable_is_already_set_or_the_bus_is_idle():
     chip, _ = _chip()
-    i2c, events = _bus(chip)
+    _i2c, events = _bus(chip)
     chip.write_uint32(I2C0_BASE + IC_ENABLE, ABORT_BIT)  # not enabled: "the controller ignores any write to ABORT bit"
     assert chip.read_uint32(I2C0_BASE + IC_ENABLE) == 0
     chip.write_uint32(I2C0_BASE + IC_ENABLE, ENABLE_BIT | ABORT_BIT)  # ENABLE set by this very write: not "already set"

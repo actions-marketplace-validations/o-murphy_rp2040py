@@ -8,7 +8,7 @@
 //     (CTRL bit 1) reads the same condition, and MATCH_ACTIVE (IRQ_SETUP_0 bit 29) reads MATCH_ENA, both instant. CTRL.LOAD copies SETUP_0/1 into the counter at once, enabled or not, and starts a
 //     new second; a change of CLKDIV_M1 or of clk_rtc does too, a CTRL write that only keeps the state does not;
 //   - the raw interrupt (INTR bit 0) is a level: MATCH_ENA and every enabled field of IRQ_SETUP_0/1 equal to the counter. It is re-evaluated, and the host's `irq(level)` called with
-//     ((raw | INTF) & INTE) & 1, after each second, a load, a write to IRQ_SETUP_0/1, INTE or INTF, and a reset;
+//     ((raw & INTE) | INTF) & 1, after each second, a load, a write to IRQ_SETUP_0/1, INTE or INTF, and a reset;
 //   - RTC_0 (offset 0x1C) read latches the date half; a read of RTC_1 returns the latch (the datasheet: "Reading RTC_0 latches the value of RTC_1");
 //   - RTC_0, RTC_1, INTR and INTS are read-only: a write is ignored, silently. An unimplemented offset warns and reads 0xFFFFFFFF; an alias write decodes against a *read* of the register (so an alias
 //     write to RTC_0 latches RTC_1), as the reference's `BasePeripheral.write_uint32_atomic` does.
@@ -125,7 +125,7 @@ public:
     // The raw level, masked and forced, to the NVIC line.
     bool check_interrupts() noexcept {
         const uint32_t raw = raw_interrupt() ? 1u : 0u;
-        return host_.irq == nullptr || host_.irq(host_.ctx, (((raw | intf) & inte) & rtc_regs::INT_RTC) != 0);
+        return host_.irq == nullptr || host_.irq(host_.ctx, ((((raw & inte) | intf)) & rtc_regs::INT_RTC) != 0);
     }
 
     // RESETS.RESET_RTC: every register 0, the counter 0, the latch 0, the divider stopped; clk_rtc is the CLOCKS block's and is kept.
@@ -152,7 +152,7 @@ public:
             case REG_INTR: return raw_interrupt() ? 1u : 0u;
             case REG_INTE: return inte;
             case REG_INTF: return intf;
-            case REG_INTS: return ((raw_interrupt() ? 1u : 0u) | intf) & inte;
+            case REG_INTS: return ((raw_interrupt() ? 1u : 0u) & inte) | intf;
             default: break;
         }
         if (host_.warn) {

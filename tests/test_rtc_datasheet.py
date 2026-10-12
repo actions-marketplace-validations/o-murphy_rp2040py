@@ -296,10 +296,10 @@ def test_the_interrupt_is_masked_by_inte_and_forced_by_intf(rp2040_factory):
     chip.write_uint32(RTC + INTE, 0)
     assert chip.core.pending_interrupts & RTC_IRQ == 0
     chip.write_uint32(RTC + IRQ_SETUP_0, 0)
-    chip.write_uint32(RTC + INTF, 1)  # forced
-    assert chip.read_uint32(RTC + INTR) == 0 and chip.read_uint32(RTC + INTS) == 0
-    chip.write_uint32(RTC + INTE, 1)
-    assert chip.read_uint32(RTC + INTS) == 1 and chip.core.pending_interrupts & RTC_IRQ
+    chip.write_uint32(RTC + INTF, 1)  # forced: INTS is "after masking & forcing", (INTR & INTE) | INTF - the force is not masked by INTE
+    assert chip.read_uint32(RTC + INTR) == 0 and chip.read_uint32(RTC + INTS) == 1 and chip.core.pending_interrupts & RTC_IRQ
+    chip.write_uint32(RTC + INTF, 0)
+    assert chip.read_uint32(RTC + INTS) == 0 and chip.core.pending_interrupts & RTC_IRQ == 0
 
 
 def test_a_reset_of_the_block_clears_it_and_keeps_the_clock(rp2040_factory):

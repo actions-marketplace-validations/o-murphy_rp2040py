@@ -288,10 +288,12 @@ static void test_the_interrupt_is_masked_by_inte_and_forced_by_intf() {
     r.block.write(REG_INTE, 0);
     CHECK(r.block.read(REG_INTS) == 0 && !r.env.irq_level);
     r.block.write(REG_IRQ_SETUP_0, 0);
-    r.block.write(REG_INTF, 1);
-    CHECK(r.block.read(REG_INTR) == 0 && r.block.read(REG_INTS) == 0 && !r.env.irq_level);
+    r.block.write(REG_INTF, 1);  // "after masking & forcing": (INTR & INTE) | INTF - the force is not masked by INTE
+    CHECK(r.block.read(REG_INTR) == 0 && r.block.read(REG_INTS) == 1 && r.env.irq_level);
     r.block.write(REG_INTE, 1);
     CHECK(r.block.read(REG_INTS) == 1 && r.env.irq_level);
+    r.block.write(REG_INTF, 0);
+    CHECK(r.block.read(REG_INTS) == 0 && !r.env.irq_level);
 }
 
 static void test_a_failing_interrupt_line_is_a_failure_of_the_write_the_load_or_the_second() {

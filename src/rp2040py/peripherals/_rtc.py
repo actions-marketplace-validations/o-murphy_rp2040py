@@ -17,7 +17,7 @@ What the block does, with its sources (RP2040 datasheet RP-008371-DS-1, section 
   reads 0). *Not independently sourced.*
 - **Alarm** (4.8.3, 4.8.5.4): `IRQ_SETUP_0/1` hold a time and one enable bit per field; with `MATCH_ENA` set, the *raw* interrupt (`INTR.RTC`) is high while every enabled field equals the counter - a level, which
   stays up for the whole second the match lasts (the SDK handler's comment: "If it matches on a second it can keep firing for that second"). `MATCH_ACTIVE` (RO) is the synchronised MATCH_ENA, instant here. With
-  no field enabled and `MATCH_ENA` set, every second matches. `INTE`/`INTF`/`INTS` are the usual masking and forcing; the line is NVIC interrupt 25. The wake of ROSC/XOSC from dormant mode (4.8.3) is not modelled.
+  no field enabled and `MATCH_ENA` set, every second matches. `INTS` is "Interrupt status after masking & forcing" - `(INTR & INTE) | INTF`, as in every interrupt block of the chip: a forced bit reaches the line whether or not it is enabled; the line is NVIC interrupt 25. The wake of ROSC/XOSC from dormant mode (4.8.3) is not modelled.
 - **Reset** (`RESETS.RESET_RTC`; the block is "reset" by pico-sdk's `rtc_init()` before use): every register 0, the counter 0, the latch 0, the divider stopped. Not independently sourced: the counter's reset value
   ("-" in table 559/560).
 """
@@ -219,7 +219,7 @@ class RP2040RTC(BasePeripheral):
 
     def check_interrupts(self) -> None:
         raw = self.raw_interrupt
-        self.rp2040.set_interrupt(IRQ.RTC, bool(((int(raw) | self.intf) & self.inte) & INT_RTC))
+        self.rp2040.set_interrupt(IRQ.RTC, bool((((int(raw) & self.inte) | self.intf)) & INT_RTC))
 
     def reset(self) -> None:
         """`RESETS_RESET_RTC` (0089 Phase 5). pico-sdk's own `rtc_init()` starts with `reset_block(RESETS_RESET_RTC_BITS)`, so firmware re-initialises this block after a reset rather than
@@ -260,7 +260,7 @@ class RP2040RTC(BasePeripheral):
         if offset == INTF:
             return self.intf
         if offset == INTS:
-            return (raw | self.intf) & self.inte
+            return (raw & self.inte) | self.intf
         return super().read_uint32(offset)
 
     def write_uint32(self, offset: int, value: int) -> None:

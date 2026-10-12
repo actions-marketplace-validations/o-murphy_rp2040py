@@ -212,6 +212,8 @@ MUTANTS = (
     "rtc0_no_latch",
     "rtc1_latch_is_time",
     "ints_ignores_inte",
+    "ints_masks_the_force",
+    "irq_masks_the_force",
     "ints_ignores_intf",
     "intr_includes_intf",
     "ro_write_warns",
@@ -358,6 +360,8 @@ def mutant_rig(name: str) -> Rig:
                 return value
             if name == "ints_ignores_inte" and offset == R.INTS:
                 return int(self.raw_interrupt) | self.intf
+            if name == "ints_masks_the_force" and offset == R.INTS:  # the order of "masking & forcing" the wrong way round: (INTR | INTF) & INTE
+                return (int(self.raw_interrupt) | self.intf) & self.inte
             if name == "ints_ignores_intf" and offset == R.INTS:
                 return int(self.raw_interrupt) & self.inte
             if name == "intr_includes_intf" and offset == R.INTR:
@@ -500,7 +504,9 @@ def mutant_rig(name: str) -> Rig:
                 inte = 1
             if name == "irq_ignores_intf":
                 intf = 0
-            level = bool(((int(raw) | intf) & inte) & R.INT_RTC)
+            level = bool((((int(raw) & inte) | intf)) & R.INT_RTC)
+            if name == "irq_masks_the_force":
+                level = bool(((int(raw) | intf) & inte) & R.INT_RTC)
             if name == "irq_only_when_changed":
                 if level == getattr(self, "_last_level", None):
                     return

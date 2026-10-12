@@ -35,7 +35,6 @@ One place to see, block by block and datasheet section by section, what is model
 | BUSCTRL | Stub | Yes | Ported | no arbitration, no performance counters |
 | IO_BANK0 | Partial | Yes | C++ (`core/io.hpp`) over the shared pin bank; also IO_QSPI, PADS_BANK0, PADS_QSPI (`core/pads.hpp`) | `PROC1_*` / `DORMANT_WAKE_*` are stored and raise nothing (no core 1, no dormant); the pad electrical model (drive, slew, Schmitt, `VOLTAGE_SELECT`) is absent; PIO pin-write arbitration (`OUT_STICKY`...) is not done |
 | PADS_BANK0 / PADS_QSPI / IO_QSPI | Partial | Yes | C++ (with IO_BANK0, above) | `VOLTAGE_SELECT` and `SWCLK` / `SWD` are stored; pad drive, slew and Schmitt have no electrical model |
-| GPIO: a pin reads its own drive | Missing | Yes | - | "the input is always connected" (2.19.2): `GPIO_IN`, `INTR` and the PIO's input should see the level the chip itself drives; today only the external drive / the pull is seen (0098, "Second pass"); **decision needed** |
 | GPIO: input synchronisers | Missing | Yes | - | two clk_sys cycles of latency (2.21), bypassed by `SYSCFG.PROC_IN_SYNC_BYPASS(_HI)` and the PIO's `INPUT_SYNC_BYPASS`, both stored; needs a go-ahead |
 | XIP_CTRL | Stub | No | Python only | no cache, no streaming (record 0052); **Next** after IO_BANK0 |
 | USB controller + CDC host | Partial | No | Python only | host mode works; `USB_MUXING`, `USBPHY_*` absent; device mode unchecked |

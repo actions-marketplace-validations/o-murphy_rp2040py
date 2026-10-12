@@ -241,14 +241,26 @@ class GPIOPin:
 
         return False
 
+    def _chip_drive_level(self) -> bool | None:
+        """The level the chip itself drives onto the pad, or None if it does not drive it: the last announced state (HIGH / LOW are the only states in which the pad is driven; it
+        is the state after the output enable, the overrides and PADS.OD). A QSPI pin that is not under SIO is driven by the XIP side, which is not modelled: not counted."""
+        if self._last_value == GPIOPinState.HIGH or self._last_value == GPIOPinState.LOW:
+            if self._always_output_enabled and self.function_select != FUNCTION_SIO:
+                return None
+            return self._last_value == GPIOPinState.HIGH
+        return None
+
     @property
     def _effective_raw_input_value(self) -> bool:
-        """The pad's actual electrical reading: whatever last actively drove it, or - if nothing
-        ever has - resolved from whichever pull resistor is enabled (matching real hardware; a
-        floating pin isn't guaranteed low). Bus-keeper mode (both pulls enabled) and no-pulls both
-        fall back to the plain _raw_input_value default, same as before this resolution existed."""
+        """The pad's actual electrical reading: whatever last actively drove it from outside; else the level the chip itself drives (the input is always connected, datasheet
+        2.19.2: software reads back its own output); else - nothing drives it - resolved from whichever pull resistor is enabled (matching real hardware; a floating pin isn't
+        guaranteed low). Bus-keeper mode (both pulls enabled) and no-pulls both fall back to the plain _raw_input_value default. An external drive wins over the chip's own: the
+        model has no drive strengths to settle a contention with."""
         if self._driven:
             return self._raw_input_value
+        driven_by_chip = self._chip_drive_level()
+        if driven_by_chip is not None:
+            return driven_by_chip
         if self.pullup_enabled and not self.pulldown_enabled:
             return True
         if self.pulldown_enabled and not self.pullup_enabled:
@@ -364,9 +376,13 @@ class GPIOPin:
     def check_for_updates(self) -> None:
         last_value, value = self._last_value, self.value
         if value != last_value:
+            input_before = self.input_value
             self._last_value = value
             for listener in self._listeners:
                 listener(value, last_value)
+            # the chip's own drive is part of what the pad reads: if it moved the level the interrupt logic sees, or the input the PIO / PWM read, it is an input change
+            if self._seen_level() != self._seen or self.input_value != input_before:
+                self.refresh_input()
 
     def refresh_input(self) -> None:
         self._apply_input_value(self._raw_input_value)

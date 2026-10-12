@@ -229,10 +229,23 @@ public:
         return true;
     }
 
-    // The level after pull resistors and the external drive, before the pad's input enable and the input override.
+    // The level the chip itself drives onto the pad, if it drives it: the last announced state (HIGH / LOW are the only states in which the pad is driven; it is the state after the
+    // output enable, the overrides and PADS.OD). A QSPI pin that is not under SIO is driven by the XIP side, which is not modelled: not counted.
+    bool chip_drive_level(uint32_t i, bool* level) const noexcept {
+        const Pin& p = pins_[i];
+        if (p.last_state != kPinHigh && p.last_state != kPinLow) return false;
+        if (p.always_output_enabled && (p.ctrl & 0x1F) != kFuncSio) return false;
+        *level = p.last_state == kPinHigh;
+        return true;
+    }
+
+    // The level the pad reads, before its input enable and the input override: the external drive; else the level the chip itself drives (the input is always connected, datasheet
+    // 2.19.2: software reads back its own output); else the pull resistors. An external drive wins over the chip's own: the model has no drive strengths to settle a contention with.
     bool eff_raw_input(uint32_t i) const noexcept {
         const Pin& p = pins_[i];
         if (p.driven) return p.raw_input_value;
+        bool driven_by_chip = false;
+        if (chip_drive_level(i, &driven_by_chip)) return driven_by_chip;
         const bool pull_up = (p.pad_value & pin_bits::kPadPullup) != 0;
         const bool pull_down = (p.pad_value & pin_bits::kPadPulldown) != 0;
         if (pull_up && !pull_down) return true;
@@ -311,10 +324,14 @@ public:
         Pin& p = pins_[i];
         const int last = p.last_state;
         if (s == last) return true;
+        const bool input_before = input_value(i);
         p.last_state = s;
         for (uint32_t n = 0; n < p.direct_count; ++n)
             if (!p.direct[n].fn(p.direct[n].ctx, p.index, s, last)) return false;
-        return host_.on_change == nullptr || host_.on_change(host_.ctx, p.index, s, last);
+        if (host_.on_change != nullptr && !host_.on_change(host_.ctx, p.index, s, last)) return false;
+        // the chip's own drive is part of what the pad reads: if it moved the level the interrupt logic sees, or the input the PIO / PWM read, it is an input change
+        if (seen_level(i) != p.seen || input_value(i) != input_before) return refresh_input(i);
+        return true;
     }
 
     bool set_input_value(uint32_t i, bool value) noexcept {
@@ -379,11 +396,11 @@ public:
             p.irq_status = 0;
         }
         if (pads) p.pad_value = pad_reset;
-        p.seen = false;
-        sync_irq_levels(i, /*edges=*/false);  // a reset raises no edge; the level bits follow the pin
         int code = 0;
         if (!state_code(i, &code)) return false;
-        p.last_state = code;
+        p.last_state = code;  // before the levels: the pad reads the pin's own drive, which is the announced state
+        p.seen = false;
+        sync_irq_levels(i, /*edges=*/false);  // a reset raises no edge; the level bits follow the pin
         return true;
     }
 

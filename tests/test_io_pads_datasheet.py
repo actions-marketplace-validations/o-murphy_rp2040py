@@ -154,3 +154,51 @@ def test_a_qspi_pin_driven_by_sio_tells_its_listeners(rp2040_factory):
     chip.write_uint32(SIO + GPIO_HI_OUT, 1 << 1)
     chip.write_uint32(SIO + GPIO_HI_OUT, 0)
     assert heard == [GPIOPinState.LOW, GPIOPinState.HIGH, GPIOPinState.LOW]
+
+
+def test_a_pin_the_chip_drives_reads_back_its_own_level(rp2040_factory):
+    """ "The input is always connected, so software can check the state of GPIOs at any time" (2.19.2): GPIO_IN shows the level SIO drives onto an output pin, and so does STATUS.INFROMPAD."""
+    chip = rp2040_factory()
+    chip.write_uint32(IO + 8 * 3 + 4, FUNCSEL_SIO)
+    chip.write_uint32(SIO + 0x24, 1 << 3)  # GPIO_OE_SET
+    assert (chip.read_uint32(SIO + 4) >> 3) & 1 == 0
+    chip.write_uint32(SIO + 0x14, 1 << 3)  # GPIO_OUT_SET
+    assert (chip.read_uint32(SIO + 4) >> 3) & 1 == 1
+    assert chip.read_uint32(IO + 8 * 3) & (1 << 17)  # INFROMPAD
+    chip.write_uint32(SIO + 0x18, 1 << 3)  # GPIO_OUT_CLR
+    assert (chip.read_uint32(SIO + 4) >> 3) & 1 == 0
+    chip.write_uint32(SIO + 0x18, 1 << 3)
+    chip.write_uint32(SIO + 0x28, 1 << 3)  # GPIO_OE_CLR: released, the pull-down decides
+    chip.write_uint32(SIO + 0x14, 1 << 3)
+    assert (chip.read_uint32(SIO + 4) >> 3) & 1 == 0
+
+
+def test_a_pin_the_chip_drives_raises_its_own_edge_interrupts(rp2040_factory):
+    """An edge interrupt is a transition of the pad, whoever causes it: the chip toggling its own output latches EDGE_HIGH then EDGE_LOW."""
+    chip = rp2040_factory()
+    chip.write_uint32(IO + 8 * 3 + 4, FUNCSEL_SIO)
+    chip.write_uint32(SIO + 0x24, 1 << 3)
+    chip.write_uint32(SIO + 0x14, 1 << 3)
+    assert (chip.read_uint32(IO + INTR0) >> 12) & EDGE_HIGH
+    chip.write_uint32(IO + INTR0, 0xFFFFFFFF)
+    assert (chip.read_uint32(IO + INTR0) >> 12) & (EDGE_HIGH | EDGE_LOW) == 0
+    chip.write_uint32(SIO + 0x18, 1 << 3)
+    assert (chip.read_uint32(IO + INTR0) >> 12) & EDGE_LOW
+
+
+def test_an_external_drive_wins_over_the_chips_own_output(rp2040_factory):
+    """No drive strengths are modelled to settle a contention: what is wired to the pin (a button, a device) wins over the chip's output, and releasing it hands the pad back to the chip."""
+    chip = rp2040_factory()
+    chip.write_uint32(IO + 8 * 3 + 4, FUNCSEL_SIO)
+    chip.write_uint32(SIO + 0x24, 1 << 3)
+    chip.write_uint32(SIO + 0x14, 1 << 3)
+    chip.gpio[3].set_input_value(False)
+    assert (chip.read_uint32(SIO + 4) >> 3) & 1 == 0
+    chip.gpio[3].release_input()
+    assert (chip.read_uint32(SIO + 4) >> 3) & 1 == 1
+
+
+def test_a_qspi_pin_not_under_sio_is_not_read_as_driven_low(rp2040_factory):
+    """The XIP side that drives the QSPI pins is not modelled: an undriven QSPI_SS still reads its pull-up (the BOOTSEL read and CircuitPython's poll rely on it)."""
+    chip = rp2040_factory()
+    assert (chip.read_uint32(SIO + 8) >> 1) & 1 == 1  # GPIO_HI_IN: SS high through its pull-up

@@ -81,6 +81,7 @@ struct RefPin {
     uint32_t ctrl, pad;
     uint32_t irq_enable, irq_force, irq_status;
     bool raw_input, driven, always_oe;
+    int last_state;  // the last announced state: when it is HIGH / LOW the chip drives the pad
 };
 
 static bool ov(bool v, uint32_t t) { return t == 0 ? v : t == 1 ? !v : t == 2 ? false : true; }
@@ -115,6 +116,7 @@ static int ref_state(const RefPin& p, const uint32_t* src, uint32_t index) {
 
 static bool ref_eff_input(const RefPin& p) {
     if (p.driven) return p.raw_input;
+    if ((p.last_state == 0 || p.last_state == 1) && !(p.always_oe && (p.ctrl & 0x1F) != 5)) return p.last_state == 1;  // the input reads the chip's own drive
     if ((p.pad & 8) && !(p.pad & 4)) return true;
     if ((p.pad & 4) && !(p.pad & 8)) return false;
     return p.raw_input;
@@ -222,7 +224,7 @@ static void test_a_bank_of_one_pin_uses_its_own_number() {
     CHECK(r.changes == 2 && r.change_new[1] == kPinLow);
     bank.pin(0).pad_value |= pin_bits::kPadInputEnable;
     CHECK(bank.set_input_value(0, true));
-    CHECK(r.inputs == 1 && r.input_pin[0] == 7);
+    CHECK(r.inputs == 3 && r.input_pin[0] == 7 && r.input_pin[2] == 7);  // the pad rose and fell with the chip's own drive (two input changes), then an external drive was applied
 }
 
 struct Direct {
@@ -455,6 +457,8 @@ static void test_level_function_against_the_reference_transcription() {
         ref.raw_input = p.raw_input_value;
         ref.driven = p.driven;
         ref.always_oe = p.always_output_enabled;
+        p.last_state = static_cast<int>(rnd() % 6);  // any announced state, stale or not: the pad reads the last one
+        ref.last_state = p.last_state;
         int code = -1;
         uint32_t status = 0;
         CHECK(bank.state_code(i, &code));

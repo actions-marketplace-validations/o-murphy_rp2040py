@@ -131,6 +131,7 @@ Follows the datasheet's own table of contents (chapter.section), so a row is som
 | 4.1 | USB controller as a host with the Python USB device and the CDC console | Done | not audited against the datasheet | With the USB port |
 | 4.1 | USB device mode | Unchecked | | - |
 | 4.1.3 | `USB_MUXING`, `USBPHY_DIRECT*`, `USBPHY_TRIM` | Missing | | With the USB port |
+| 4.1.3 | `EP_ABORT`, `EP_ABORT_DONE`, `EP_STALL_ARM`, `NAK_POLL`, `EP_STATUS_STALL_NAK`, `USB_PWR` | Stub | stored; nothing acts on them (found by a static scan; the block is not audited) | With the USB port |
 | 4.2.2, 4.2.3 | UART: functional description, operation, transmitter time | Done | 0098 | - |
 | 4.2.3 | UART: receive timing | Missing | bytes fed from outside arrive at once | Go-ahead |
 | 4.2.4 | UART: hardware flow control (CTS / RTS) | Missing | | Go-ahead |

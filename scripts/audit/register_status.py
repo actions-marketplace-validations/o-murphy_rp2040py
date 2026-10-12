@@ -55,6 +55,9 @@ PARTIAL: dict[str, dict[int, str]] = {
     "I2C": {0x000: "IC_CON: the slave bits (IC_SLAVE_DISABLE, IC_10BITADDR_SLAVE) do nothing: no slave mode"},
     "PLL": {0x000: "CS.LOCK is always 1 (no start-up time)"},
     "SIO": {0x000: "CPUID is always 0 (no core 1)"},
+    "USB": {
+        0x000: "ADDR_ENDP: acts as the host's device address (`_dev_addr_ctrl`); in device mode the value is only stored"
+    },
     "XOSC": {
         0x008: "DORMANT is stored; the oscillator does not go dormant",
         0x00C: "STARTUP delay is stored; STABLE is set at once, not after the delay",
@@ -111,6 +114,10 @@ STUBS: dict[str, tuple[object, str]] = {
     ),
     "XOSC": ({0x1C}, "COUNT is loaded by a write but never counts down (peripherals/_xosc.py)"),
     "PADS_BANK0": ({0x00}, "VOLTAGE_SELECT is stored (peripherals/pads.py)"),
+    "USB": (
+        {0x60, 0x64, 0x68, 0x6C, 0x70, 0x78},
+        "EP_ABORT, EP_ABORT_DONE, EP_STALL_ARM, NAK_POLL, EP_STATUS_STALL_NAK and USB_PWR are stored in peripherals/usb.py and nothing reads them back for behaviour (found by a static scan; the block itself is not audited)",
+    ),
 }
 
 

@@ -15,16 +15,17 @@ inside `on_transmit`: the block is re-entered from its own host callback, as the
 
 The API is the reference's: the registers' private attributes (readable and writable), `rx_fifo`/`tx_fifo` (views with the reference FIFO's attribute
 names), `int_status`, `enabled`, `data_bits`, `master_mode`, `spi_mode`, `clock_frequency`, `complete_transmit`, `check_interrupts`, `reset`, plus
-`BasePeripheral`'s surface. Unlike the DMA it needs neither the chip's bus nor a native clock.
+`BasePeripheral`'s surface. Unlike the DMA it does not need the chip's bus, but a word's time on the wire is an alarm of the chip's C++ clock, so it needs the native `SimulationClock` (as the UART and the ADC do).
 """
 
 from libc.stdint cimport int64_t, uint32_t
 from libcpp cimport bool as cppbool
 
 from rp2040py.native._pending cimport park_error, pending_flag, raise_if_pending
+from rp2040py.native._simulation_clock cimport SimulationClock
 from rp2040py.native._window_map cimport WindowHandler
 
-from rp2040py.peripherals._spi import _clock_frequency
+from rp2040py.peripherals._spi import _bit_ns, _clock_frequency
 
 __all__ = ("RPSPI",)
 
@@ -67,6 +68,16 @@ cdef cppbool _transmit_trampoline(void* ctx, uint32_t value) noexcept:
             # The reference's default device: the byte comes straight back as 0, from inside the callback. Never leaves C++.
             return spi._block.complete_transmit(0)
         callback(value)
+    except BaseException as error:
+        park_error(error)
+        return False
+    return True
+
+
+cdef cppbool _bit_trampoline(void* ctx, double* nanos) noexcept:
+    cdef RPSPI spi = <RPSPI> ctx
+    try:
+        nanos[0] = _bit_ns(spi.rp2040.clk_peri, spi._block.clock_divisor, (spi._block.control0 >> SCR_SHIFT) & SCR_MASK)
     except BaseException as error:
         park_error(error)
         return False
@@ -132,6 +143,14 @@ cdef class _Fifo:
 cdef class RPSPI:
     def __init__(self, rp2040, name, irq, dreq):
         cdef SpiHost host
+        clock = rp2040.clock
+        if not isinstance(clock, SimulationClock):
+            raise TypeError(
+                "the native SPI schedules a word's time on the wire as an alarm of the native SimulationClock; "
+                f"{type(rp2040).__name__} with {type(clock).__name__} is not that "
+                "(use the pure-Python peripherals/_spi.RPSPI with it)"
+            )
+        self.clock = clock
         self.rp2040 = rp2040
         self.name = name
         self.irq = irq
@@ -140,13 +159,18 @@ cdef class RPSPI:
         host.irq = _irq_trampoline
         host.dreq = _dreq_trampoline
         host.transmit = _transmit_trampoline
+        host.bit_ns = _bit_trampoline
         host.warn = _warn_trampoline
         host.ctx = <void*> self
         host.failed = pending_flag()
-        self._block.init(host)
+        self._block.init(&(<SimulationClock> clock)._clock, host)
         # The reference's constructor publishes both DREQs.
         if not self._block.power_on():
             raise_if_pending()
+
+    def __dealloc__(self):
+        # Safe whichever of this block and its clock the collector frees first: the C++ clock unlinks its alarms when it dies.
+        self._block.detach()
 
     # --- the device on the bus -------------------------------------------------------------------
 
@@ -191,6 +215,14 @@ cdef class RPSPI:
     @_busy.setter
     def _busy(self, value):
         self._block.busy = bool(value)
+
+    @property
+    def _frame_active(self):
+        return bool(self._block.frame_active)
+
+    @property
+    def _reply(self):
+        return self._block.reply if self._block.has_reply else None
 
     @property
     def _control0(self):

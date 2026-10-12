@@ -146,6 +146,8 @@ class Rig:
             spi.reset()
         elif kind == "clk":
             chip.clk_peri = op[1]
+        elif kind == "tick":
+            chip.clock.tick(op[1])
         else:
             raise ValueError(f"unknown op {op!r}")
         return None
@@ -166,6 +168,13 @@ class Rig:
                 int(spi._int_enable),
                 bool(spi._busy),
                 int(spi.raw_write_value),
+                bool(spi._frame_active),
+                None if spi._reply is None else int(spi._reply),
+            ),
+            "time": (
+                float(chip.clock.nanos),
+                bool(chip.clock.has_scheduled_alarm),
+                float(chip.clock.nanos_to_next_alarm),
             ),
             "rx": (bool(rx.empty), bool(rx.full), int(rx.item_count), tuple(int(v) for v in rx.items)),
             "tx": (bool(tx.empty), bool(tx.full), int(tx.item_count), tuple(int(v) for v in tx.items)),
@@ -247,6 +256,7 @@ def mutant_rig(name: str) -> Rig:
             if name == "busy_not_set":
                 if not self._busy and not self.tx_fifo.empty:
                     value = self.tx_fifo.pull()
+                    self._begin_frame()
                     self.on_transmit(value)
                     self._fifos_updated()
                 return
@@ -254,12 +264,14 @@ def mutant_rig(name: str) -> Rig:
                 if not self._busy and not self.tx_fifo.empty:
                     value = self.tx_fifo.pull()
                     self._busy = True
+                    self._begin_frame()
                     self.on_transmit(value)
                 return
             if name == "tx_ignores_sse":
                 if not self._busy and not self.tx_fifo.empty:
                     value = self.tx_fifo.pull()
                     self._busy = True
+                    self._begin_frame()
                     if self._control1 & P.LBM:
                         self.complete_transmit(value)
                     else:
@@ -270,12 +282,53 @@ def mutant_rig(name: str) -> Rig:
                 if not self._busy and not self.tx_fifo.empty and self._control1 & P.SSE:
                     value = self.tx_fifo.pull()
                     self._busy = True
+                    self._begin_frame()
                     self.on_transmit(value)
                     self._fifos_updated()
                 return
             super()._do_tx()
 
+        def _frame_ns(self) -> float:
+            bit = P._bit_ns(self.rp2040.clk_peri, self._clock_divisor, (self._control0 >> P.SCR_SHIFT) & P.SCR_MASK)
+            if name == "frame_one_bit":
+                return bit if self.master_mode else 0.0
+            if name == "frame_slave_timed":
+                return bit * self.data_bits
+            if name == "frame_ignores_scr":
+                return (
+                    P._bit_ns(self.rp2040.clk_peri, self._clock_divisor, 0) * self.data_bits
+                    if self.master_mode
+                    else 0.0
+                )
+            if name == "frame_dss_plus_one":
+                return bit * (self.data_bits + 1) if self.master_mode else 0.0
+            return super()._frame_ns()
+
         def complete_transmit(self, rx_value: int) -> None:
+            if name == "reply_not_held":
+                self._deliver(rx_value)
+                return
+            if name == "reply_dropped_in_frame" and self._frame_active:
+                return
+            super().complete_transmit(rx_value)
+
+        def _on_frame_done(self) -> None:
+            if name == "frame_done_drops_reply":
+                self._frame_active = False
+                self._reply = None
+                return
+            if name == "frame_done_frees_busy":
+                super()._on_frame_done()
+                self._busy = False
+                return
+            if name == "frame_done_keeps_active":
+                reply, self._reply = self._reply, None
+                if reply is not None:
+                    self._deliver(reply)
+                return
+            super()._on_frame_done()
+
+        def _deliver(self, rx_value: int) -> None:
             if name == "overrun_not_flagged":
                 self._busy = False
                 if not self.rx_fifo.full:
@@ -291,7 +344,7 @@ def mutant_rig(name: str) -> Rig:
                     self._int_raw |= P.SSPRORINTR
                 self._fifos_updated()
                 return
-            super().complete_transmit(rx_value)
+            super()._deliver(rx_value)
 
         def _fifos_updated(self) -> None:
             if name in ("tx_threshold_lt", "rx_threshold_gt"):
@@ -374,6 +427,12 @@ def mutant_rig(name: str) -> Rig:
 
         def reset(self) -> None:
             on_transmit = self.on_transmit
+            if name == "reset_keeps_frame":
+                active, reply = self._frame_active, self._reply
+                super().reset()
+                self._frame_active, self._reply = active, reply
+                self.on_transmit = on_transmit
+                return
             if name == "reset_no_dma_publish":
                 self.rx_fifo.reset()
                 self.tx_fifo.reset()
@@ -400,6 +459,8 @@ MUTANTS = (
     "dr_write_when_full_pushes", "cpsr_mask_ff", "icr_decoded_value", "icr_clears_all", "icr_clears_tx", "imsc_unmasked", "reset_no_dma_publish", "reset_clears_callback",
     "init_raw_zero", "reset_raw_zero", "cr0_unmasked", "cr1_unmasked", "dmacr_unmasked", "cr1_write_no_start", "dmacr_write_no_publish", "tx_ignores_sse", "loopback_ignored",
     "dma_tx_ignores_sse", "dma_tx_ignores_txdmae", "dma_rx_ignores_sse", "dma_rx_ignores_rxdmae",
+    "frame_one_bit", "frame_slave_timed", "frame_ignores_scr", "frame_dss_plus_one", "reply_not_held", "reply_dropped_in_frame", "frame_done_drops_reply", "frame_done_frees_busy",
+    "frame_done_keeps_active", "reset_keeps_frame",
 )  # fmt: skip
 
 
@@ -423,10 +484,26 @@ def _value(r: random.Random, offset: int) -> int:
     return r.getrandbits(32)
 
 
+TICKS = (
+    1,
+    20,
+    100,
+    500,
+    1000,
+    5000,
+    20_000,
+    100_000,
+    1_000_000,
+    10_000_000,
+)  # ns: a 16-bit word at 125 MHz / 2 is 256 ns, at 125 MHz / 254 / 256 about 520 ms
+
+
 def generate(seed: int, steps: int) -> list[tuple]:
     r = random.Random(seed)
     ops: list[tuple] = []
     while len(ops) < steps:
+        if r.random() < 0.2:
+            ops.append(("tick", r.choice(TICKS)))
         roll = r.random()
         if roll < 0.12 and ops:  # attach a device only after a while: the default behaviour gets a prefix of its own
             ops.append(("device", r.choice(("immediate", "deferred", "silent", "deferred"))))
@@ -529,6 +606,7 @@ def coverage(ops: list[tuple]) -> dict[str, int]:
     for op in ops:
         before = len(rig.log)
         was_busy, tx_full, rx_full = spi._busy, spi.tx_fifo.full, spi.rx_fifo.full
+        was_frame = spi._frame_active
         if op[0] == "write" and op[1] == P.SSPDR and op[3] == 0 and tx_full:
             count("tx.full_drop")
         if op[0] == "complete":
@@ -548,4 +626,10 @@ def coverage(ops: list[tuple]) -> dict[str, int]:
             count(f"log.{event[0]}" + (f".{event[2]}" if event[0] in ("dreq", "irq") else ""))
         if op[0] == "reset":
             count("reset.busy" if was_busy else "reset")
+        if op[0] == "tick" and was_frame:
+            count("tick.in_frame")
+            if not spi._frame_active:
+                count("frame.ended" + (".with_reply" if spi._reply is None and not spi._busy else ""))
+        if spi._frame_active and spi._reply is not None:
+            count("reply.held")
     return counts

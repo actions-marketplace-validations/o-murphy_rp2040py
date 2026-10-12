@@ -2,8 +2,8 @@
 // (tests/test_spi_diff.py).
 //
 // What it owns: the register file (SSPCR0/1, the prescale divisor, the DMA control, the raw and enabled interrupts), the two 8-entry FIFOs, the busy flag, and the whole of the
-// block's behaviour towards the guest. It has **no timing of its own**: a byte written to SSPDR leaves through the host's `transmit(value)` and the transfer ends when the device calls
-// `complete_transmit(rx_value)` - at once from inside the callback or later from a clock alarm. What it does not own, reached through a `SpiHost` of plain function pointers (see
+// block's behaviour towards the guest. A byte written to SSPDR leaves through the host's `transmit(value)` and the transfer ends when the device calls
+// `complete_transmit(rx_value)` - at once from inside the callback or later from a clock alarm - but not before the word's time on the wire (`data_bits` SSPCLKOUT periods, a frame alarm of the chip's clock): an early reply is held until then. What it does not own, reached through a `SpiHost` of plain function pointers (see
 // core_host.hpp): the interrupt line, the two DREQs (the chip's DMA), the transmit callback and the logger.
 //
 // Re-entrancy is part of the design, not an accident: `do_tx()` marks the block busy and calls `transmit`, which may call `complete_transmit()` before it returns, which pushes the received
@@ -20,6 +20,8 @@
 //   - both DREQs are re-published on every FIFO change, every write of CR1 and DMACR, and by `reset()` (and `power_on()`, the constructor's own publication): TX is asserted while the TX FIFO
 //     is not full, RX while the RX FIFO is not empty - and only with SSE and the matching DMACR enable set ("all request signals are deasserted if the PrimeCell SSP is disabled, or the DMA
 //     enable signal is cleared", datasheet 4.4.3.16);
+//   - a word takes DATA_BITS x SSPCLKOUT (clk_peri / (CPSDVSR x (1 + SCR))) on the wire; the inter-frame gap of SPH = 0 (SSPFSSOUT is pulsed high between words) is not modelled - the datasheet gives it only in a figure and no
+//     source for its length was read. A slave (MS) and an unconfigured bit clock have no frame time. Disabling the SSP mid-word does not abort it. A reply before the frame's end is held; one after it completes at once;
 //   - nothing leaves a disabled SSP (a primed TX FIFO starts when CR1 enables it, 4.4.3.3); with CR1.LBM the transmitted word comes straight back into the RX FIFO instead of reaching the device;
 //   - RIS resets to 0x8 (TX FIFO empty);
 //   - a SET/CLR/XOR alias write decodes against a *read* of the register, and a read of SSPDR pulls a byte from the RX FIFO;
@@ -32,6 +34,7 @@
 
 #include <cstdint>
 
+#include "clock.hpp"
 #include "core_host.hpp"
 #include "fifo.hpp"
 
@@ -39,6 +42,7 @@ namespace rp2040core {
 
 using SpiIrqFn = bool (*)(void* ctx, bool level);                       // false: failure parked
 using SpiDreqFn = bool (*)(void* ctx, bool tx, bool asserted);          // `tx`: the TX DREQ, else the RX one; false: failure parked
+using SpiBitFn = bool (*)(void* ctx, double* nanos);                    // one SSPCLKOUT period (0 while no bit clock is configured); false: failure parked
 using SpiTransmitFn = bool (*)(void* ctx, uint32_t value);              // a byte (already masked to DSS + 1 bits) is on the wire; false: failure parked
 constexpr uint32_t kSpiWarnRead = kRegWarnRead, kSpiWarnReadAtomicArea = kRegWarnReadAtomicArea, kSpiWarnWrite = kRegWarnWrite;
 using SpiWarnFn = RegWarnFn;
@@ -47,6 +51,7 @@ struct SpiHost {
     SpiIrqFn irq = nullptr;
     SpiDreqFn dreq = nullptr;
     SpiTransmitFn transmit = nullptr;
+    SpiBitFn bit_ns = nullptr;
     SpiWarnFn warn = nullptr;
     void* ctx = nullptr;
     const int* failed = nullptr;  // the shared parked-failure flag (see _pending.pyx)
@@ -81,7 +86,21 @@ public:
     bool busy = false;
     Fifo<kFifoDepth> rx, tx;
 
-    void init(const SpiHost& host) noexcept { host_ = host; }
+    // `clock` carries the frame alarm: a word occupies the wire for `data_bits` SSPCLKOUT periods from the moment it leaves the TX FIFO, and the device's reply is held until then.
+    void init(Clock* clock, const SpiHost& host) noexcept {
+        clock_ = clock;
+        host_ = host;
+        frame_active = has_reply = false;
+        frame_alarm.fire = &SpiBlock::on_frame_done;
+        frame_alarm.ctx = this;
+    }
+
+    // Unlinks the frame alarm from the clock; the owner calls it before the block goes away.
+    void detach() noexcept { cancel_alarm(&frame_alarm); }
+
+    Alarm frame_alarm;
+    bool frame_active = false, has_reply = false;  // a word is being shifted out / the device has answered before its last bit
+    uint32_t reply = 0;
 
     bool failed() const noexcept { return host_failed(host_.failed); }
     int64_t raw_write_value() const noexcept { return raw_write_value_; }
@@ -101,6 +120,9 @@ public:
         rx.reset();
         tx.reset();
         busy = false;
+        frame_active = false;
+        has_reply = false;
+        clock_->cancel(&frame_alarm);
         control0 = control1 = dma_control = clock_divisor = 0;
         int_raw = spi_regs::INT_TX;
         int_enable = 0;
@@ -113,6 +135,15 @@ public:
 
     // The device finishes the transfer in flight (or, with none in flight, hands over a value anyway: the reference accepts it).
     bool complete_transmit(uint32_t rx_value) noexcept {
+        if (frame_active) {  // the word is still being shifted out: it completes when its last bit has gone
+            reply = rx_value;
+            has_reply = true;
+            return true;
+        }
+        return deliver(rx_value);
+    }
+
+    bool deliver(uint32_t rx_value) noexcept {
         busy = false;
         if (!rx.full()) {
             rx.push(rx_value);
@@ -217,6 +248,12 @@ private:
         if (!busy && !tx.empty() && enabled()) {  // nothing leaves a disabled SSP (datasheet 4.4.3.3)
             const uint32_t value = tx.pull();
             busy = true;
+            double ns = 0.0;
+            if (!frame_ns(&ns)) return false;
+            if (ns > 0) {
+                frame_active = true;
+                clock_->schedule(&frame_alarm, ns);
+            }
             if (control1 & spi_regs::CR1_LBM) {  // loop back: the transmit shifter feeds the receive shifter
                 if (!complete_transmit(value)) return false;
             } else if (!host_.transmit(host_.ctx, value)) {
@@ -225,6 +262,25 @@ private:
             return fifos_updated();
         }
         return true;
+    }
+
+    // How long the word that just left the TX FIFO is on the wire. A slave (CR1.MS) is clocked from outside, and an unconfigured bit clock has no time: both are instant.
+    bool frame_ns(double* ns) noexcept {
+        *ns = 0.0;
+        if (control1 & spi_regs::CR1_MS) return true;
+        double bit = 0.0;
+        if (!host_.bit_ns(host_.ctx, &bit)) return false;
+        *ns = bit * static_cast<double>(data_bits());
+        return true;
+    }
+
+    // The word's last bit has gone: the device's reply, if it already came, completes the transfer; otherwise BSY stays up until it does.
+    static bool on_frame_done(void* ctx) noexcept {
+        SpiBlock* block = static_cast<SpiBlock*>(ctx);
+        block->frame_active = false;
+        if (!block->has_reply) return true;
+        block->has_reply = false;
+        return block->deliver(block->reply);
     }
 
     bool fifos_updated() noexcept {
@@ -248,6 +304,7 @@ private:
     }
 
     SpiHost host_;
+    Clock* clock_ = nullptr;
     int64_t raw_write_value_ = 0;
 };
 

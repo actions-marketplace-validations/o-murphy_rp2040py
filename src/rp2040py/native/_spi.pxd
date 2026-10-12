@@ -4,6 +4,7 @@
 from libc.stdint cimport int64_t, uint32_t
 from libcpp cimport bool as cppbool
 
+from rp2040py.native._clock cimport Alarm, Clock
 from rp2040py.native._window_map cimport WindowHandler
 
 cdef extern from "fifo.hpp" namespace "rp2040core":
@@ -25,6 +26,7 @@ cdef extern from "spi.hpp" namespace "rp2040core":
 
     ctypedef cppbool (*SpiIrqFn)(void* ctx, cppbool level)
     ctypedef cppbool (*SpiDreqFn)(void* ctx, cppbool tx, cppbool asserted)
+    ctypedef cppbool (*SpiBitFn)(void* ctx, double* nanos)
     ctypedef cppbool (*SpiTransmitFn)(void* ctx, uint32_t value)
     ctypedef void (*SpiWarnFn)(void* ctx, uint32_t kind, uint32_t offset, int64_t value)
 
@@ -33,6 +35,7 @@ cdef extern from "spi.hpp" namespace "rp2040core":
         SpiIrqFn irq
         SpiDreqFn dreq
         SpiTransmitFn transmit
+        SpiBitFn bit_ns
         SpiWarnFn warn
         void* ctx
         const int* failed
@@ -45,10 +48,15 @@ cdef extern from "spi.hpp" namespace "rp2040core":
         uint32_t int_raw
         uint32_t int_enable
         cppbool busy
+        Alarm frame_alarm
+        cppbool frame_active
+        cppbool has_reply
+        uint32_t reply
         Fifo8 rx
         Fifo8 tx
         SpiBlock() noexcept
-        void init(const SpiHost& host) noexcept
+        void init(Clock* clock, const SpiHost& host) noexcept
+        void detach() noexcept
         int64_t raw_write_value() noexcept
         uint32_t int_status() noexcept
         cppbool enabled() noexcept
@@ -68,4 +76,5 @@ cdef class RPSPI:
     cdef public object name
     cdef public object irq
     cdef public object dreq
+    cdef public object clock
     cdef object _on_transmit

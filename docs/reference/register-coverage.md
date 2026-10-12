@@ -235,7 +235,7 @@ Stubs in this block: UARTILPR (IrDA low-power counter) is stored: there is no Ir
 | Offset | Register | Status | Note |
 |---|---|---|---|
 | `0x000` | SSPCR0 | Partial | FRF: TI and Microwire frames are not modelled |
-| `0x004` | SSPCR1 | Partial | MS: slave mode is not modelled; no transmitter time |
+| `0x004` | SSPCR1 | Partial | MS: slave mode is not modelled (a word has no time on the wire as a slave) |
 | `0x008` | SSPDR | Acts |  |
 | `0x00c` | SSPSR | Acts |  |
 | `0x010` | SSPCPSR | Acts |  |

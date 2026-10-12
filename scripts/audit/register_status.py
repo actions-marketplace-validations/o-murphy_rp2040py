@@ -42,7 +42,7 @@ PARTIAL: dict[str, dict[int, str]] = {
     },
     "SPI": {
         0x000: "FRF: TI and Microwire frames are not modelled",
-        0x004: "MS: slave mode is not modelled; no transmitter time",
+        0x004: "MS: slave mode is not modelled (a word has no time on the wire as a slave)",
     },
     "ADC": {0x000: "TS_EN does not gate channel 4; the SAR error flag is never raised"},
     "DMA": {

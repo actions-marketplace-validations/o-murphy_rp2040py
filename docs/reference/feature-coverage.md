@@ -18,7 +18,7 @@ One place to see, block by block and datasheet section by section, what is model
 | WATCHDOG | Partial | Yes | Ported | `PAUSE_DBG*`/`PAUSE_JTAG` are stored (no debug halt) |
 | RTC | Partial | Yes | Ported | clk_rtc synchroniser latency, dormant wake, GPIN reference |
 | UART0/1 | Partial | Yes + second pass | Ported | receive timing, `UARTRTINTR`, per-entry error flags, flow control, modem lines |
-| SPI0/1 | Partial | Yes + second pass | Ported | transmitter time, slave mode, TI/Microwire, receive timeout |
+| SPI0/1 | Partial | Yes + second pass | Ported | slave mode, TI/Microwire, receive timeout; the inter-frame gap of SPH = 0 |
 | I2C0/1 | Partial | Yes + second pass | Ported | slave mode, DREQs, `IC_SAR` and friends are stubs |
 | ADC | Partial | Yes + second pass | Ported | `TS_EN` gating, SAR error flag |
 | PWM | Done | Yes | Ported | - |
@@ -149,7 +149,7 @@ Follows the datasheet's own table of contents (chapter.section), so a row is som
 | 4.3.15 | I2C: DMA interface | Stub | registers stored; **no DREQ** | Go-ahead |
 | 4.3.16 | I2C: interrupt registers | Done | | - |
 | 4.4 | SPI (PL022): Motorola SPI frame format, master, FIFOs, DMA requests | Done | 0098 | - |
-| 4.4 | SPI: transmitter time | Missing | MicroPython `machine_spi_rate` fails for it | Go-ahead |
+| 4.4 | SPI: transmitter time | Done | a word takes `DSS+1` periods of `SSPCLKOUT` = `clk_peri / (CPSDVSR x (1 + SCR))`, `BSY` and the RX data follow it, the device's reply is held to the frame's end; the gap between words of SPH = 0 (`SSPFSSOUT` pulsed) is **not** modelled: the datasheet gives it only in a figure (0098) | - |
 | 4.4 | SPI: slave mode, receive timeout, TI and Microwire frames | Missing | | Go-ahead |
 | 4.5 | PWM: counter, TOP, compare A/B, phase-correct, dividers, B-pin counting modes, `PH_ADV` / `PH_RET`, wrap interrupt | Done | 0098 | - |
 | 4.6 | Timer: 64-bit counter, `TIMEHW` / `TIMELW`, four alarms, `PAUSE` | Done | 0098 | - |

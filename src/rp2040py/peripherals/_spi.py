@@ -84,6 +84,12 @@ def _clock_frequency(clk_peri: float, clock_divisor: int, scr: int) -> float:
     return clk_peri / (clock_divisor * (1 + scr))
 
 
+def _bit_ns(clk_peri: float, clock_divisor: int, scr: int) -> float:
+    """The time of one SSPCLKOUT period in nanoseconds (0 while the prescale divisor is 0: no bit clock is configured). Shared with the native SPI's shell, as `_clock_frequency` is."""
+    frequency = _clock_frequency(clk_peri, clock_divisor, scr)
+    return 1e9 / frequency if frequency else 0.0
+
+
 class ISPIDMAChannels(NamedTuple):
     rx: DREQChannel
     tx: DREQChannel
@@ -101,6 +107,11 @@ class RPSPI(BasePeripheral):
         self.on_transmit: Callable[[int], None] = lambda value: self.complete_transmit(0)
 
         self._busy = False
+        # A word's time on the wire: data_bits SSPCLKOUT periods from the moment it leaves the TX FIFO. The device's reply (`complete_transmit`) is held until then; a device that is slower
+        # than the frame completes it later, on its own.
+        self._frame_active = False
+        self._reply: int | None = None
+        self._frame_alarm = rp2040.clock.create_alarm(self._on_frame_done)
         self._control0 = 0
         self._control1 = 0
         self._dma_control = 0
@@ -121,6 +132,9 @@ class RPSPI(BasePeripheral):
         self.rx_fifo.reset()
         self.tx_fifo.reset()
         self._busy = False
+        self._frame_active = False
+        self._reply = None
+        self._frame_alarm.cancel()
         self._control0 = 0
         self._control1 = 0
         self._dma_control = 0
@@ -160,6 +174,22 @@ class RPSPI(BasePeripheral):
     def clock_frequency(self) -> float:
         return _clock_frequency(self.rp2040.clk_peri, self._clock_divisor, (self._control0 >> SCR_SHIFT) & SCR_MASK)
 
+    def _frame_ns(self) -> float:
+        """How long the word that just left the TX FIFO is on the wire: `data_bits` bit-clock periods. A slave (SSPCR1.MS) is clocked from outside, and an unconfigured bit clock has no time: both are instant."""
+        if not self.master_mode:
+            return 0.0
+        return (
+            _bit_ns(self.rp2040.clk_peri, self._clock_divisor, (self._control0 >> SCR_SHIFT) & SCR_MASK)
+            * self.data_bits
+        )
+
+    def _begin_frame(self) -> None:
+        ns = self._frame_ns()
+        if ns > 0:
+            self._frame_active = True
+            self._reply = None
+            self._frame_alarm.schedule(ns)
+
     def _update_dma_tx(self) -> None:
         # "All request signals are deasserted if the PrimeCell SSP is disabled, or the DMA enable signal is cleared" (datasheet 4.4.3.16): SSE and TXDMAE gate the request, which is
         # otherwise up while the TX FIFO has an empty place.
@@ -179,6 +209,7 @@ class RPSPI(BasePeripheral):
         if not self._busy and not self.tx_fifo.empty and self._control1 & SSE:
             value = self.tx_fifo.pull()
             self._busy = True
+            self._begin_frame()
             if self._control1 & LBM:  # loop back: the output of the transmit shifter feeds the receive shifter
                 self.complete_transmit(value)
             else:
@@ -186,6 +217,18 @@ class RPSPI(BasePeripheral):
             self._fifos_updated()
 
     def complete_transmit(self, rx_value: int) -> None:
+        if self._frame_active:
+            self._reply = rx_value  # the word is still being shifted out: it completes when its last bit has gone
+            return
+        self._deliver(rx_value)
+
+    def _on_frame_done(self) -> None:
+        self._frame_active = False
+        reply, self._reply = self._reply, None
+        if reply is not None:
+            self._deliver(reply)  # (no reply yet: BSY stays up until the device completes)
+
+    def _deliver(self, rx_value: int) -> None:
         self._busy = False
         if not self.rx_fifo.full:
             self.rx_fifo.push(rx_value)

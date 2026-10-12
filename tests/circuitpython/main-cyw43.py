@@ -41,6 +41,11 @@ print("connected:", wifi.radio.connected)
 print("ipv4_address:", wifi.radio.ipv4_address)
 print("ipv4_gateway:", wifi.radio.ipv4_gateway)
 
+# Everything above is produced by the emulator alone (no internet): CI hard-fails on this marker, while
+# the real TCP / DNS below stay soft-failing.
+if connected and wifi.radio.connected and wifi.radio.ipv4_address is not None and len(found) > 0:
+    print("CIRCUITPYTHON CYW43 CORE OK")
+
 if connected and wifi.radio.ipv4_address is not None:
     pool = socketpool.SocketPool(wifi.radio)
 

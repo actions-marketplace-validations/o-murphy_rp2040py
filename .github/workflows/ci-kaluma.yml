@@ -122,6 +122,12 @@ jobs:
       # Soft-failing for the same reason ci-micropython.yml's pico-w step is - a CI-runner network
       # hiccup is not an emulator regression. 13s measured locally (2026-08-16); the 5m cap is a
       # runner-speed allowance over that.
+      # The Wi-Fi test's part that needs no internet (scan, join) is a hard check: the emulator alone produces it, so a failure is a regression. The step below
+      # also waits for a real TCP response and stays soft-failing.
+      - name: Test Kaluma pico-w WLAN core ${{ matrix.kaluma_version }}
+        if: ${{ matrix.python_runtime == 'cpython-3.10' }}
+        run: timeout 5m uv run --python ${{ matrix.python_runtime }} --no-dev -- rp2040py kaluma --image ${{ matrix.kaluma_version }} --board pico_w tests/kaluma/main-cyw43.js --expect-text "KALUMA CYW43 CORE OK"
+
       - name: Test Kaluma pico-w WLAN ${{ matrix.kaluma_version }}
         if: ${{ matrix.python_runtime == 'cpython-3.10' }}
         run: |

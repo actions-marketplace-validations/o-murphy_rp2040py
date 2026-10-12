@@ -126,6 +126,15 @@ jobs:
       # the same reason: it opens a real TCP connection and a real DNS query to the internet
       # through the emulator's NAT bridge, so a CI-runner network hiccup is not an emulator
       # regression.
+      # The Wi-Fi test's part that needs no internet (scan, join, the DHCP lease) is a hard check: the emulator alone produces it, so a failure is a regression.
+      # The step below adds real TCP / DNS and stays soft-failing.
+      - name: Test CircuitPython pico-w WLAN core ${{ matrix.tag }}
+        if: ${{ matrix.wlan }}
+        run: |
+          set -o pipefail
+          timeout 5m uv run --no-dev -- rp2040py micropython --circuitpython --image ${{ matrix.tag }} --board pico_w tests/circuitpython/main-cyw43.py | tee wlan.log
+          grep -q "CIRCUITPYTHON CYW43 CORE OK" wlan.log
+
       - name: Test CircuitPython pico-w WLAN ${{ matrix.tag }}
         if: ${{ matrix.wlan }}
         run: |

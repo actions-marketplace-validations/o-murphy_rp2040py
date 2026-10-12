@@ -388,3 +388,12 @@ cases):
   evidence, the two MicroPython API traps hit on the way (`read(n)` blocking for exactly n;
   v1.23.0's `SSLSocket` having no `send()`), and why the WebSocket half is verified by hand rather
   than wired into CI.
+
+## Addendum (2026-10-12): the Wi-Fi core is a hard CI check, the internet part stays soft
+
+The three Wi-Fi steps (MicroPython, CircuitPython, Kaluma) used to be wrapped in `|| echo ::warning`, so *nothing* in them could fail the job - including scan, join and the DHCP lease, which the
+emulator produces entirely by itself. Each workflow now has a **core** step before the soft one: MicroPython runs `tests/micropython/main-cyw43-core.py` (scan, join, a DHCP lease of `10.0.0.2`, disconnect;
+prints `MICROPYTHON CYW43 CORE OK` only if every step held) and greps the log; CircuitPython greps `CIRCUITPYTHON CYW43 CORE OK` in the existing script's output (printed right after the lease, before the
+sockets); Kaluma waits for `KALUMA CYW43 CORE OK` (printed after the join, before the socket). The existing steps, which also open real TCP / DNS / NTP / TLS, stay soft-failing: a runner's network is not
+the emulator's. Run locally on the current code: MicroPython 1.24.1, CircuitPython 9.2.9 and Kaluma 1.2.1 all print their markers.
+

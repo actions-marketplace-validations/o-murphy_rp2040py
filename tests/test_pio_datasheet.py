@@ -102,3 +102,21 @@ def test_pin_mappings_wrap_after_gpio31(kind):
         0xFFFFFFFF, 4, 32
     )  # a full-width mapping starting at pin 4 still reaches every pin (a rotation, not a shift)
     assert pio.pin_directions == 0x3FFFFFFF
+
+
+def test_irq_force_has_eight_bits_and_the_read_only_registers_ignore_writes_silently():
+    """PIO tables 371-387: IRQ and IRQ_FORCE are 7:0 (the rest reserved), and FSTAT, FLEVEL, RXFn, DBG_PADOUT, DBG_PADOE, DBG_CFGINFO, INTR and IRQ0/1_INTS are read only - a write is ignored, not logged
+    as an unimplemented register. Through the bus, so it runs on whichever implementation the build gives."""
+    chip = RP2040()
+    warnings: list[str] = []
+    chip.logger.warning = lambda _name, message: warnings.append(message)  # type: ignore[method-assign]
+    pio = 0x50200000
+    chip.write_uint32(pio + 0x34, 0xFFFFFFFF)  # IRQ_FORCE
+    assert chip.read_uint32(pio + 0x30) == 0xFF  # IRQ: eight flags
+    chip.write_uint32(pio + 0x30, 0xFFFFFFFF)  # write 1 to clear
+    assert chip.read_uint32(pio + 0x30) == 0
+    before = {offset: chip.read_uint32(pio + offset) for offset in (0x04, 0x0C, 0x20, 0x24, 0x28, 0x2C, 0x3C, 0x40, 0x44, 0x128, 0x134, 0x140)}
+    for offset in before:
+        chip.write_uint32(pio + offset, 0xFFFFFFFF)
+    assert {offset: chip.read_uint32(pio + offset) for offset in before} == before
+    assert warnings == []

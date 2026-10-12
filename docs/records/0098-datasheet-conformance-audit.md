@@ -462,6 +462,16 @@ Read: the instruction set (3.4.2-3.4.10: every encoding and operation), 3.5.1 (s
 - **Left, deliberately:** autopull is done when the next OUT starts, not right after the OUT that reaches the threshold or "at any point between two OUTs when data arrives" (3.5.4.2), so the TX FIFO drains later than on silicon by up to one OUT; an OUT that finds the OSR exhausted pulls and shifts in the same cycle, where the datasheet stalls that cycle ("it cannot fill an empty OSR and OUT it on the same cycle"). The cycle counts of streaming programs are the same, FIFO levels read slightly high, and a change needs a design of its own (the pacing of `due` times, 0063).
 - Tests: `tests/test_pio_datasheet.py` (five cases on both implementations), `tests/cpp/test_pio.cpp` (one directed test, the register-mask checks updated). The PIO oracle has no logic mutants (it compares the two implementations only), so there are none to add.
 
+### PIO, second pass: the system-level registers (tables 371-387, 2026-10-12)
+
+The first pass left CTRL, FSTAT, FDEBUG, FLEVEL, IRQ, IRQ_FORCE, INPUT_SYNC_BYPASS, DBG_* and INTR / IRQ0,1_INTE / INTF / INTS to the tool, which only reads the first register of a family. Read against the tables and probed through the bus on both builds (the probes agreed, the two implementations being held together by the oracle):
+
+- **Fixed: `IRQ_FORCE` stored bits 31:8 in `IRQ`.** IRQ and IRQ_FORCE are 7:0 (reserved above); a write of ones left `IRQ` reading `0xFFFFFFFF`. Now `irq |= value & 0xFF`, in the reference and the C++.
+- **Fixed: a write to a read-only register was logged as "unimplemented".** FSTAT, FLEVEL, RXF0-3, DBG_PADOUT, DBG_PADOE, DBG_CFGINFO, INTR and IRQ0/1_INTS are RO; the other blocks ignore such a write silently (SYSINFO, TBMAN, PSM, RESETS, the SSI's TXFLR, WATCHDOG's REASON), and these now do too. (`SMx_ADDR` already did.)
+- **Checked and consistent, by probe:** the reset values (FSTAT `0x0F000F00`, DBG_CFGINFO `0x00200404`, everything else 0; INTR reads `0xF0` at reset because the four TXNFULL bits are levels of an empty FIFO - the table's "0x0" is a placeholder for a status register), FSTAT/FLEVEL following the FIFOs, `FDEBUG.TXOVER` on a write to a full TX FIFO without touching the FIFO, `RXUNDER` on a read of an empty RX FIFO (reads 0), the write-1-to-clear behaviour of FDEBUG and IRQ, IRQ_FORCE setting the flags the state machines see, INTR's SM-IRQ bits 11:8 following IRQ 3:0, `INTS = (INTR & INTE) | INTF`, `SMx_INSTR` reading the instruction at the PC and executing a write, `SMx_ADDR` being 5 bits and read only, `INSTR_MEMx` write-only (a read warns, as before: the datasheet does not say what a read returns).
+- **Not independently sourced / unchanged:** a read of `IRQ_FORCE` (WF) and `TXFx` return what they did; `DBG_PADOUT`/`DBG_PADOE` follow the model's pin images (30 bits).
+- Tests: `tests/test_pio_datasheet.py` (one case through the bus, both builds), `tests/cpp/test_pio.cpp`, and the oracle's stimulus now writes the reserved IRQ_FORCE bits and the read-only registers.
+
 ### SYSINFO and TBMAN (datasheet 2.20 and 2.22; ported as they were read, 2026-10-06)
 
 Both are read-only identity blocks; read together with pico-sdk's `platform.c`/`platform.h`, `hardware/regs/sysinfo.h` and `tbman.h` (fetched from raw.githubusercontent.com).

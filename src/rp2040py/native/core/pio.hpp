@@ -428,8 +428,10 @@ public:
                 return irq_updated();
             case INPUT_SYNC_BYPASS: input_sync_bypass = value; return true;
             case IRQ_FORCE:
-                irq |= value;
+                irq |= value & 0xFFu;  // IRQ_FORCE and IRQ have eight bits (3.7: 7:0, the rest reserved)
                 return irq_updated();
+            case FSTAT: case FLEVEL: case RXF0: case RXF0 + 4: case RXF0 + 8: case RXF0 + 12: case DBG_PADOUT: case DBG_PADOE: case DBG_CFGINFO: case INTR: case IRQ0_INTS: case IRQ1_INTS:
+                return true;  // read only (tables 371-387): a write is ignored, silently, as for the other read-only registers
             case IRQ0_INTE: irq0_int_enable = value & 0xFFF; return check_interrupts();
             case IRQ0_INTF: irq0_int_force = value & 0xFFF; return check_interrupts();
             case IRQ1_INTE: irq1_int_enable = value & 0xFFF; return check_interrupts();

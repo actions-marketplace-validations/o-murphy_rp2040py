@@ -434,6 +434,13 @@ static void test_registers_aliases_and_warnings() {
     // IRQ is write-1-to-clear through the raw value; IRQ_FORCE sets
     CHECK(r.pio.write_atomic(IRQ_FORCE, 0b101, kAtomicNormal) && r.pio.irq == 0b101);
     CHECK(r.pio.write_atomic(IRQ, 0b001, kAtomicNormal) && r.pio.irq == 0b100);
+    CHECK(r.pio.write_atomic(IRQ_FORCE, 0xFFFFFFFFu, kAtomicNormal) && r.pio.irq == 0xFF);  // eight flags: 31:8 are reserved
+    CHECK(r.pio.write_atomic(IRQ, 0xFFFFFFFFu, kAtomicNormal) && r.pio.irq == 0);
+    // the read-only registers (tables 371-387) ignore a write, silently
+    r.host.count = 0;
+    const uint32_t read_only[] = {FSTAT, FLEVEL, RXF0, RXF0 + 4, RXF0 + 8, RXF0 + 12, DBG_PADOUT, DBG_PADOE, DBG_CFGINFO, INTR, IRQ0_INTS, IRQ1_INTS};
+    for (uint32_t offset : read_only) CHECK(r.pio.write_atomic(offset, 0xFFFFFFFFu, kAtomicNormal));
+    CHECK(r.host.count == 0 && r.pio.read(DBG_CFGINFO) == 0x200404);
     // FDEBUG is write-1-to-clear too, but the stall bits come straight back
     r.pio.fdebug = 0xFFFFFFFF;
     r.pio.tx_stall = 1u << 24;

@@ -119,6 +119,10 @@ public:
     uint32_t int_raw = 0;
 
     // Binds the block to its bus, clock and host. Must be called once, before anything else.
+    // One clk_sys cycle in nanoseconds: "The DMA can perform one read access and one write access, up to 32 bits in size, every clock cycle" (datasheet 2.5). The host keeps it
+    // current (1e9 / clk_sys) when clk_sys changes, so a transfer never asks Python for the clock.
+    double transfer_ns = 8.0;
+
     void init(Bus* bus, Clock* clock, const DmaHost& host) noexcept {
         bus_ = bus;
         clock_ = clock;
@@ -312,7 +316,7 @@ inline bool DmaChannel::start() noexcept {
 inline bool DmaChannel::schedule_transfer() noexcept {
     Clock* clock = dma_->clock_;
     if (dma_->dreq(treq) || treq == dma_regs::TREQ_PERMANENT) {
-        clock->schedule(&alarm, 0.0);
+        clock->schedule(&alarm, dma_->transfer_ns);  // a transfer that is ready takes one clk_sys cycle (datasheet 2.5)
         return true;
     }
     bool ok;

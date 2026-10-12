@@ -49,6 +49,7 @@ cdef extern from "dma.hpp" namespace "rp2040core":
     cdef cppclass DmaBlock:
         DmaChannel channels[12]
         uint32_t int_raw
+        double transfer_ns
         DmaBlock() noexcept
         void init(Bus* bus, Clock* clock, const DmaHost& host) noexcept
         void detach() noexcept
@@ -76,3 +77,4 @@ cdef class RPDMA:
     cdef public object clock
     cdef object _channels
     cdef object _dreq_view
+    cdef object _unsubscribe_clock

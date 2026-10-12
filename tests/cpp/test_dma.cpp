@@ -163,14 +163,23 @@ int main() {
     dma.init(&bus, &clk, dma_host);
     bus.windows.attach(kDmaBase, dma.window_handler());
 
-    // ---- a plain 32-bit copy on PERMANENT: everything happens at the same instant --------------------------------------
+    // ---- a plain 32-bit copy on PERMANENT: one clk_sys cycle a word (the host keeps `transfer_ns` = 1e9 / clk_sys) -------------
+    fresh();
+    dma.transfer_ns = 20.0;
+    run(0, kRam, kRam + 0x100, 4, ctrl_word(2, true, true, TREQ_PERMANENT, 0));
+    CHECK(clk.nanos_to_next_alarm() == 20.0);
+    (void)clk.tick(79);
+    CHECK(reg(0, CTRL_TRIG) & BUSY);
+    (void)clk.tick(1);
+    CHECK(!(reg(0, CTRL_TRIG) & BUSY));  // four words, 20 ns each
+    dma.transfer_ns = 8.0;
     fresh();
     for (uint32_t i = 0; i < 4; ++i) bus.write32(kRam + 4 * i, 0x11111111u * (i + 1));
     wr(INTE0, 0x1);
     env.irqs = 0;
     run(0, kRam, kRam + 0x100, 4, ctrl_word(2, true, true, TREQ_PERMANENT, 0));
     CHECK(reg(0, CTRL_TRIG) & BUSY);
-    CHECK(clk.has_alarm() && clk.nanos_to_next_alarm() == 0.0);
+    CHECK(clk.has_alarm() && clk.nanos_to_next_alarm() == 8.0);
     CHECK(bus.read32(kRam + 0x100) == 0);  // nothing moved before the clock runs
     settle();
     for (uint32_t i = 0; i < 4; ++i) CHECK(bus.read32(kRam + 0x100 + 4 * i) == 0x11111111u * (i + 1));
@@ -263,7 +272,7 @@ int main() {
     env.on_probe_write = 2;
     env.probe_dreq = 5;
     CHECK(dma.set_dreq(5) && clk.has_alarm());
-    (void)clk.tick(0);
+    (void)clk.tick(8);
     CHECK(reg(0, TRANS_COUNT) == 3 && env.probe_write_count == 1 && env.probe_writes[0][1] == 0x100);
     CHECK(!dma.dreq(5) && !clk.has_alarm());  // the transfer ran, found the DREQ gone and did not schedule another
     CHECK(dma.set_dreq(5) && clk.has_alarm());  // a rising edge wakes an active channel
@@ -367,7 +376,7 @@ int main() {
     env.on_probe_write = 2;
     env.probe_dreq = 5;
     (void)dma.set_dreq(5);
-    (void)clk.tick(0);
+    (void)clk.tick(8);
     CHECK(reg(0, TRANS_COUNT) == 4 && (reg(0, CTRL_TRIG) & BUSY));
     wr(MULTI_CHAN_TRIGGER, 1);
     CHECK(reg(0, TRANS_COUNT) == 4);
@@ -487,7 +496,7 @@ int main() {
     bus.write32(kRam + 4, 2);
     run(0, kRam, kProbe, 2, ctrl_word(2, true, false, TREQ_PERMANENT, 0));  // the source is RAM, the target the probe
     run(1, kRam + 0x40, kRam + 0x80, 1, ctrl_word(2, true, true, 12, 1));    // channel 1 waits for DREQ 12
-    CHECK((reg(1, CTRL_TRIG) & BUSY) && clk.nanos_to_next_alarm() == 0.0);
+    CHECK((reg(1, CTRL_TRIG) & BUSY) && clk.nanos_to_next_alarm() == 8.0);
     env.on_probe_write = 1;
     env.probe_dreq = 12;
     bus.write32(kRam + 0x40, 0x5EED);

@@ -197,7 +197,12 @@ class Rig:
         elif kind == "reset":
             chip.dma.reset()
         elif kind == "clk":
+            old = chip.clk_sys
             chip.clk_sys = op[1]
+            for listener in list(
+                chip._clock_listeners
+            ):  # what `_set_clk_sys` does: the native DMA keeps its cycle time from this
+                listener(op[1], old)
         else:
             raise ValueError(f"unknown op {op!r}")
         return None

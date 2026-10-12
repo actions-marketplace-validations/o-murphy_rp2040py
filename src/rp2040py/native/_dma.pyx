@@ -218,6 +218,9 @@ cdef class RPDMA:
         host.lines[0] = <uint32_t> int(IRQ.DMA_IRQ0)
         host.lines[1] = <uint32_t> int(IRQ.DMA_IRQ1)
         self._block.init(bus, &(<SimulationClock> clock)._clock, host)
+        # A ready transfer takes one clk_sys cycle: keep that period current without asking Python on every transfer
+        self._block.transfer_ns = 1e9 / <double> rp2040.clk_sys
+        self._unsubscribe_clock = rp2040.add_clock_listener(self._clk_sys_changed)
         self._channels = []
         cdef _Channel view
         for i in range(12):
@@ -228,6 +231,9 @@ cdef class RPDMA:
         cdef _DreqView dreq_view = _DreqView.__new__(_DreqView)
         dreq_view._owner = self
         self._dreq_view = dreq_view
+
+    def _clk_sys_changed(self, clk_sys, old_clk_sys):
+        self._block.transfer_ns = 1e9 / <double> clk_sys
 
     def __dealloc__(self):
         # Safe whichever of this block and its clock the collector frees first: the C++ clock unlinks its alarms when it dies.

@@ -242,7 +242,8 @@ class RPDMAChannel:
 
     def schedule_transfer(self) -> None:
         if self.dma.dreq.get(self._treq_value, False) or self._treq_value == TREQ.PERMANENT:
-            self.transfer_alarm.schedule(0)
+            # "The DMA can perform one read access and one write access, up to 32 bits in size, every clock cycle" (datasheet 2.5): a transfer that is ready takes one clk_sys cycle
+            self.transfer_alarm.schedule(1e9 / self.rp2040.clk_sys)
         else:
             delay = self.dma.get_timer(self._treq_value)
             if delay:

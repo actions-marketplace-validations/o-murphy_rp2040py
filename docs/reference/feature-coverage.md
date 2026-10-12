@@ -22,7 +22,7 @@ One place to see, block by block and datasheet section by section, what is model
 | I2C0/1 | Partial | Yes + second pass | Ported | slave mode, DREQs, `IC_SAR` and friends are stubs |
 | ADC | Partial | Yes + second pass | Ported | `TS_EN` gating, SAR error flag |
 | PWM | Done | Yes | Ported | - |
-| DMA | Partial | Yes + second pass + the datasheet examples | Ported | sniffer, priority/arbitration, error flags, I2C/SSI DREQs, bus-cycle timing |
+| DMA | Partial | Yes + second pass + the datasheet examples | Ported | sniffer, priority/arbitration, error flags, I2C/SSI DREQs; bus contention |
 | PIO0/1 | Partial | Yes + second pass | Ported | `OUT_STICKY`/`INLINE_OUT_EN`/`OUT_EN_SEL`, autopull timing |
 | SSI (XIP flash controller) | Partial | Yes + second pass | Ported | a flash-command model: no own FIFOs, interrupts, `TMOD`; 21 of 28 registers are stubs |
 | CLOCKS | Partial | Yes + second pass | Python only | resus, clock enables / sleep, GPIN, the GPOUT clock outputs; 18 of 48 registers are stubs |
@@ -69,7 +69,8 @@ Follows the datasheet's own table of contents (chapter.section), so a row is som
 | 2.5.5.2 | DMA: CRC sniffer | Missing | `SNIFF_CTRL`, `SNIFF_DATA`; the algorithm's bit order needs a hardware-sourced vector | Go-ahead |
 | 2.5.5.3 | DMA: channel abort | Done | | - |
 | 2.5.5.4 | DMA: debug (`DBG_CTDREQ`) | Missing | | Go-ahead |
-| 2.5 | DMA: `HIGH_PRIORITY` and arbitration, read/write/AHB error flags, bus-cycle timing | Missing | a transfer takes one alarm; MicroPython `rp2_dma` expects 30-80 ms for a large copy and sees 1 ms | Go-ahead |
+| 2.5 | DMA: transfer rate | Done | an unpaced transfer takes one `clk_sys` cycle per word ("one read access and one write access ... every clock cycle"); `rp2_dma` timing case passes (0098) | - |
+| 2.5 | DMA: `HIGH_PRIORITY` and arbitration, read/write/AHB error flags, bus contention | Missing | a transfer never waits for the bus; the flags are stored | Go-ahead |
 | 2.6.1 | ROM | Done | the real boot ROM image | - |
 | 2.6.2 | SRAM | Unchecked | striped / non-striped, per-bank | - |
 | 2.6.3 | Flash and the XIP cache | Stub | XIP_CTRL registers exist, no cache, no streaming | With the XIP_CTRL port |

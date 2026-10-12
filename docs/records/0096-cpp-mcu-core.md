@@ -359,6 +359,7 @@ Also needed when core 1 is built (not now): the bootrom launch handshake over th
 
 ## Progress log
 
+- 2026-10-12: **The DMA transfers at one `clk_sys` cycle per word** (`DmaBlock::transfer_ns`, kept current by the shell through a `clk_sys` listener; 0098): a ready transfer is no longer an alarm at +0 ns.
 - 2026-10-12: **The PIO machine's FIFOs have a runtime size** (`PioFifo::size` 4, 8 or 0, `resize()`): SHIFTCTRL.FJOIN_TX / FJOIN_RX (0098). No host function changed.
 - 2026-10-12: **The SPI has a transmitter time** (0098): `SpiBlock::init` now takes the chip's `Clock`, `SpiHost` gained `bit_ns`, and a word's `DSS + 1` bit clocks are a frame `Alarm`; the block is no longer "without timing of its own". The shell requires the native `SimulationClock` like the UART's.
 - 2026-10-12: **The PPB gained the Cortex-M0+ system-control registers and the MPU, in the reference, the C++ block and the shell together** (`AIRCR` with `PpbHost::system_reset_request` - the only new host function, default a core-only reset -, `SCR`, `CCR`, `SHCSR.SVCALLPENDED`, `MPU_*` as a stored, unenforced bank; reserved bits of `VTOR`/`SHPR2`/`SHPR3` masked). Found by the 0098 conformance tool as the last absent registers of a ported block; details and the mutation results in the [0098 section](0098-datasheet-conformance-audit.md). The shell attribute `on_system_reset_request` follows the `on_watchdog_trigger` precedent.

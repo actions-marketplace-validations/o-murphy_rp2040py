@@ -14,8 +14,8 @@ One place to see, block by block and datasheet section by section, what is model
 |---|---|---|---|---|
 | Cortex-M0+ CPU, NVIC, SysTick, PPB | Partial | n/a (ARMv6-M tests; MicroPython interpreter tests) | Ported | `AIRCR`, `SCR`, `CCR`, `SHCSR` and the MPU are absent; core 1 |
 | SIO | Partial | Yes | Ported | inter-core FIFO; CPUID of core 1 |
-| TIMER | Done | Yes | Ported | - |
-| WATCHDOG | Done | Yes | Ported | - |
+| TIMER | Partial | Yes | Ported | `DBGPAUSE` is stored (no debug halt) |
+| WATCHDOG | Partial | Yes | Ported | `PAUSE_DBG*`/`PAUSE_JTAG` are stored (no debug halt) |
 | RTC | Partial | Yes | Ported | clk_rtc synchroniser latency, dormant wake, GPIN reference |
 | UART0/1 | Partial | Yes + second pass | Ported | receive timing, `UARTRTINTR`, per-entry error flags, flow control, modem lines |
 | SPI0/1 | Partial | Yes + second pass | Ported | transmitter time, slave mode, TI/Microwire, receive timeout |
@@ -24,10 +24,10 @@ One place to see, block by block and datasheet section by section, what is model
 | PWM | Done | Yes | Ported | - |
 | DMA | Partial | Yes + second pass + the datasheet examples | Ported | sniffer, priority/arbitration, error flags, I2C/SSI DREQs, bus-cycle timing |
 | PIO0/1 | Partial | Yes + second pass | Ported | FJOIN, `OUT_STICKY`/`INLINE_OUT_EN`/`OUT_EN_SEL`, autopull timing |
-| SSI (XIP flash controller) | Partial | Yes + second pass | Ported | a flash-command model: no own FIFOs, interrupts, `TMOD`; 15 of 28 registers are stubs |
-| CLOCKS | Partial | Yes + second pass | Python only | resus, clock enables / sleep, GPIN; 10 registers are stubs |
+| SSI (XIP flash controller) | Partial | Yes + second pass | Ported | a flash-command model: no own FIFOs, interrupts, `TMOD`; 21 of 28 registers are stubs |
+| CLOCKS | Partial | Yes + second pass | Python only | resus, clock enables / sleep, GPIN, the GPOUT clock outputs; 18 of 48 registers are stubs |
 | PLL | Partial | Yes | Python only | always locked |
-| XOSC | Partial | Yes | Ported | DORMANT is stored |
+| XOSC | Partial | Yes | Ported | DORMANT, the start-up delay and `COUNT` are stored; `STABLE` is set at once |
 | ROSC | Missing | No | No | the whole block - **Next** |
 | PSM, RESETS, SYSINFO, TBMAN | Done | Yes | Ported | - |
 | SYSCFG | Stub | Yes | Ported | only `PROC0_NMI_MASK` acts |
@@ -96,16 +96,17 @@ Follows the datasheet's own table of contents (chapter.section), so a row is som
 | 2.15.4 | Frequency counter `FC0_*` | Done | 0098 | - |
 | 2.15.5 | Resus | Missing | the `FRCE` slice needs no stopped-clock model; the detection does | Go-ahead |
 | 2.15.6 | Programmer's model: configuring a generator | Done | | - |
-| 2.15.6.3 | A GPIO output clock | Unchecked | | - |
+| 2.15.6.3 | A GPIO output clock (`CLK_GPOUT0-3`) | Stub | CTRL / DIV are stored; nothing is driven onto a pin | Go-ahead |
 | 2.15.6.4, 2.15.6.5, 2.15.6.6 | A GPIO input clock, enabling resus, configuring sleep mode | Missing | | Go-ahead |
-| 2.16.1-2.16.3 | XOSC: overview, usage, start-up delay | Done | 0098 | - |
-| 2.16.4 | XOSC counter | Unchecked | | - |
+| 2.16.1, 2.16.2 | XOSC: overview, usage (enable, `STATUS.STABLE`) | Done | 0098 | - |
+| 2.16.3 | XOSC: start-up delay | Stub | `STARTUP` is stored; `STABLE` is set at once, not after the delay | Go-ahead |
+| 2.16.4 | XOSC counter | Stub | `COUNT` is loaded by a write and never counts down | Go-ahead |
 | 2.16.5 | XOSC DORMANT | Stub | stored, no effect | Go-ahead |
 | 2.17 | **ROSC**: overview, trade-offs, frequency, divider, random number generator, counter, DORMANT | Missing | the whole chapter; `rosc_freq` is an attribute the clock tree reads | **Next** |
 | 2.18 | PLL | Partial | always locked, no start-up time | - |
 | 2.19.2 | GPIO function select | Done | | - |
 | 2.19.3 | GPIO interrupts | Partial | core-0 registers work; **`PROC1_*` and `DORMANT_WAKE_*` absent** (24 register tables); IO_BANK0 never audited | With the IO_BANK0 port |
-| 2.19.4 | Pads | Partial | `PADS_BANK0.SWCLK` / `SWD` absent; never audited | With the IO_BANK0 port |
+| 2.19.4 | Pads | Partial | `PADS_BANK0.SWCLK` / `SWD` absent, `VOLTAGE_SELECT` stored; never audited | With the IO_BANK0 port |
 | 2.20-2.22 | Sysinfo, Syscfg, TBMAN | Done | Syscfg is mostly stored (Stub) | - |
 
 ### Chapter 3 - PIO
@@ -150,15 +151,17 @@ Follows the datasheet's own table of contents (chapter.section), so a row is som
 | 4.4 | SPI: transmitter time | Missing | MicroPython `machine_spi_rate` fails for it | Go-ahead |
 | 4.4 | SPI: slave mode, receive timeout, TI and Microwire frames | Missing | | Go-ahead |
 | 4.5 | PWM: counter, TOP, compare A/B, phase-correct, dividers, B-pin counting modes, `PH_ADV` / `PH_RET`, wrap interrupt | Done | 0098 | - |
-| 4.6 | Timer: 64-bit counter, `TIMEHW` / `TIMELW`, four alarms, `PAUSE`, `DBGPAUSE` | Done | 0098 | - |
+| 4.6 | Timer: 64-bit counter, `TIMEHW` / `TIMELW`, four alarms, `PAUSE` | Done | 0098 | - |
+| 4.6 | Timer: `DBGPAUSE` | Stub | stored: there is no debug halt for the timer to pause on | - |
 | 4.7 | Watchdog: tick generation, counter, scratch registers, `REASON`, reboot | Done | the tick is also the TIMER's and SysTick's reference | - |
+| 4.7 | Watchdog: `PAUSE_DBG0`, `PAUSE_DBG1`, `PAUSE_JTAG` | Stub | stored: there is no debug halt to pause on | - |
 | 4.8 | RTC: storage format, leap years, interrupts, reference clock | Done | 0098 | - |
 | 4.8.4 | RTC: clk_rtc synchroniser latency | Missing | `RTC_ACTIVE`, `MATCH_ACTIVE`, LOAD arrive after 2 clk_rtc periods | Go-ahead |
 | 4.9.1, 4.9.2 | ADC: controller, SAR ADC (one-shot, free-running, round-robin, FIFO, DMA, interrupts) | Done | 0098 | - |
 | 4.9.5 | ADC: temperature sensor as channel 4 | Partial | `CS.TS_EN` does not gate it | Go-ahead |
 | 4.9.3, 4.9.4 | ADC: ENOB, INL / DNL | n/a | silicon characteristics | - |
 | 4.10 | SSI: the flash-command model used by the boot ROM and XIP, `DR` aliases, clear-on-disable | Done | 0098 | - |
-| 4.10.5, 4.10.7, 4.10.8 | SSI: own 16-entry FIFOs, the five interrupts, `TMOD` 00/01/10/11 | Stub | 15 of 28 registers are stubs; requirements in 0098 | Go-ahead |
+| 4.10.5, 4.10.7, 4.10.8 | SSI: own 16-entry FIFOs, the five interrupts, `TMOD` 00/01/10/11 | Stub | 21 of 28 registers are stubs; requirements in 0098 | Go-ahead |
 | 4.10.6 | SSI: 32-bit frame size | Missing | | Go-ahead |
 | 4.10.11 | SSI: DMA interface | Missing | | Go-ahead |
 | 4.10 | SSI: XIP streaming | Missing | read datasheet 2.6 first | With the XIP_CTRL port |

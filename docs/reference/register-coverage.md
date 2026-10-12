@@ -12,14 +12,14 @@
 
 **This is a curated list, not a measurement.** "Answers" is measured (a read at the register's address does not warn "Unimplemented peripheral read"; for a write-only register, a write of 0 does not warn). "Acts" is curated: it means the block was audited and the register is in none of the stub / partial lists of `scripts/audit/register_status.py`, each entry of which carries its evidence. A stub that nobody has listed yet shows as Acts; if you find one, add it there and re-run the script. For what each block does and does not do, see [feature-coverage.md](feature-coverage.md). A table shared by several instances (UART0/UART1, the DMA's per-channel tables) is listed once, as the datasheet gives it.
 
-**474 registers: 297 act, 59 are stubs, 13 partial, 41 exist but are unchecked, 64 are absent.**
+**474 registers: 278 act, 77 are stubs, 15 partial, 40 exist but are unchecked, 64 are absent.**
 
 | Block | Registers | Acts | Stub | Partial | Unchecked | Absent |
 |---|---|---|---|---|---|---|
 | M0PLUS | 29 | 20 | 0 | 0 | 0 | 9 |
 | SIO | 63 | 59 | 0 | 1 | 0 | 3 |
-| TIMER | 17 | 17 | 0 | 0 | 0 | 0 |
-| WATCHDOG | 5 | 5 | 0 | 0 | 0 | 0 |
+| TIMER | 17 | 16 | 1 | 0 | 0 | 0 |
+| WATCHDOG | 5 | 4 | 0 | 1 | 0 | 0 |
 | RTC | 12 | 12 | 0 | 0 | 0 | 0 |
 | UART | 21 | 14 | 1 | 6 | 0 | 0 |
 | SPI | 18 | 16 | 0 | 2 | 0 | 0 |
@@ -28,10 +28,10 @@
 | PWM | 10 | 10 | 0 | 0 | 0 | 0 |
 | DMA | 14 | 12 | 0 | 0 | 0 | 2 |
 | PIO | 24 | 23 | 0 | 1 | 0 | 0 |
-| SSI | 28 | 13 | 15 | 0 | 0 | 0 |
-| CLOCKS | 48 | 36 | 10 | 0 | 0 | 2 |
-| PLL | 4 | 3 | 0 | 1 | 0 | 0 |
-| XOSC | 5 | 4 | 0 | 1 | 0 | 0 |
+| SSI | 28 | 7 | 21 | 0 | 0 | 0 |
+| CLOCKS | 48 | 28 | 18 | 0 | 0 | 2 |
+| PLL | 4 | 2 | 1 | 1 | 0 | 0 |
+| XOSC | 5 | 2 | 1 | 2 | 0 | 0 |
 | ROSC | 9 | 0 | 0 | 0 | 0 | 9 |
 | PSM | 4 | 4 | 0 | 0 | 0 | 0 |
 | RESETS | 3 | 3 | 0 | 0 | 0 | 0 |
@@ -42,7 +42,7 @@
 | BUSCTRL | 9 | 1 | 8 | 0 | 0 | 0 |
 | IO_BANK0 | 40 | 0 | 0 | 0 | 16 | 24 |
 | IO_QSPI | 10 | 0 | 0 | 0 | 0 | 10 |
-| PADS_BANK0 | 4 | 0 | 0 | 0 | 2 | 2 |
+| PADS_BANK0 | 4 | 0 | 1 | 0 | 1 | 2 |
 | PADS_QSPI | 3 | 0 | 0 | 0 | 3 | 0 |
 | USB | 23 | 0 | 0 | 0 | 20 | 3 |
 | XIP | 8 | 0 | 8 | 0 | 0 | 0 |
@@ -151,6 +151,8 @@
 
 ## TIMER
 
+Stubs in this block: DBGPAUSE is stored: there is no debug halt for the timer to pause on (peripherals/_timer.py).
+
 | Offset | Register | Status | Note |
 |---|---|---|---|
 | `0x00` | TIMEHW | Acts |  |
@@ -164,7 +166,7 @@
 | `0x20` | ARMED | Acts |  |
 | `0x24` | TIMERAWH | Acts |  |
 | `0x28` | TIMERAWL | Acts |  |
-| `0x2c` | DBGPAUSE | Acts |  |
+| `0x2c` | DBGPAUSE | Stub |  |
 | `0x30` | PAUSE | Acts |  |
 | `0x34` | INTR | Acts |  |
 | `0x38` | INTE | Acts |  |
@@ -175,7 +177,7 @@
 
 | Offset | Register | Status | Note |
 |---|---|---|---|
-| `0x00` | CTRL | Acts |  |
+| `0x00` | CTRL | Partial | CTRL: PAUSE_DBG0, PAUSE_DBG1, PAUSE_JTAG are stored; there is no debug halt to pause on |
 | `0x04` | LOAD | Acts |  |
 | `0x08` | REASON | Acts |  |
 | `0x0c` | SCRATCH0, SCRATCH1, …, SCRATCH6, SCRATCH7 | Acts |  |
@@ -375,16 +377,16 @@ Stubs in this block: slave mode, the DMA interface, spike suppression and the SD
 
 ## SSI
 
-Stubs in this block: the SSI is a flash-command model: these are stored (`STORED_REGISTERS`) or read 0 (`ZERO_REGISTERS`) in peripherals/_ssi.py.
+Stubs in this block: the SSI is a flash-command model: these are stored (`STORED_REGISTERS`, and CTRLR0, CTRLR1, BAUDR, RX_SAMPLE_DLY, SPI_CTRLR0, TXD_DRIVE_EDGE in their own attributes) or read 0 (`ZERO_REGISTERS`) in peripherals/_ssi.py.
 
 | Offset | Register | Status | Note |
 |---|---|---|---|
-| `0x00` | CTRLR0 | Acts |  |
-| `0x04` | CTRLR1 | Acts |  |
+| `0x00` | CTRLR0 | Stub |  |
+| `0x04` | CTRLR1 | Stub |  |
 | `0x08` | SSIENR | Acts |  |
 | `0x0c` | MWCR | Stub |  |
 | `0x10` | SER | Stub |  |
-| `0x14` | BAUDR | Acts |  |
+| `0x14` | BAUDR | Stub |  |
 | `0x18` | TXFTLR | Stub |  |
 | `0x1c` | RXFTLR | Stub |  |
 | `0x20` | TXFLR | Acts |  |
@@ -404,27 +406,27 @@ Stubs in this block: the SSI is a flash-command model: these are stored (`STORED
 | `0x58` | IDR | Acts |  |
 | `0x5c` | SSI_VERSION_ID | Acts |  |
 | `0x60` | DR0 | Acts |  |
-| `0xf0` | RX_SAMPLE_DLY | Acts |  |
-| `0xf4` | SPI_CTRLR0 | Acts |  |
-| `0xf8` | TXD_DRIVE_EDGE | Acts |  |
+| `0xf0` | RX_SAMPLE_DLY | Stub |  |
+| `0xf4` | SPI_CTRLR0 | Stub |  |
+| `0xf8` | TXD_DRIVE_EDGE | Stub |  |
 
 ## CLOCKS
 
-Stubs in this block: clock gating, the resus and its interrupt are not modelled: `STORED_REGISTERS` in peripherals/clocks.py, and the status reads constant 0.
+Stubs in this block: clock gating, the resus and its interrupt are not modelled (`STORED_REGISTERS` in peripherals/clocks.py, and the status reads constant 0); the four GPOUT clock outputs (CLK_GPOUT0-3 CTRL/DIV) are stored: nothing is driven onto a pin.
 
 | Offset | Register | Status | Note |
 |---|---|---|---|
-| `0x00` | CLK_GPOUT0_CTRL | Acts |  |
-| `0x04` | CLK_GPOUT0_DIV | Acts |  |
+| `0x00` | CLK_GPOUT0_CTRL | Stub |  |
+| `0x04` | CLK_GPOUT0_DIV | Stub |  |
 | `0x08` | CLK_GPOUT0_SELECTED | Acts |  |
-| `0x0c` | CLK_GPOUT1_CTRL | Acts |  |
-| `0x10` | CLK_GPOUT1_DIV | Acts |  |
+| `0x0c` | CLK_GPOUT1_CTRL | Stub |  |
+| `0x10` | CLK_GPOUT1_DIV | Stub |  |
 | `0x14` | CLK_GPOUT1_SELECTED | Acts |  |
-| `0x18` | CLK_GPOUT2_CTRL | Acts |  |
-| `0x1c` | CLK_GPOUT2_DIV | Acts |  |
+| `0x18` | CLK_GPOUT2_CTRL | Stub |  |
+| `0x1c` | CLK_GPOUT2_DIV | Stub |  |
 | `0x20` | CLK_GPOUT2_SELECTED | Acts |  |
-| `0x24` | CLK_GPOUT3_CTRL | Acts |  |
-| `0x28` | CLK_GPOUT3_DIV | Acts |  |
+| `0x24` | CLK_GPOUT3_CTRL | Stub |  |
+| `0x28` | CLK_GPOUT3_DIV | Stub |  |
 | `0x2c` | CLK_GPOUT3_SELECTED | Acts |  |
 | `0x30` | CLK_REF_CTRL | Acts |  |
 | `0x34` | CLK_REF_DIV | Acts |  |
@@ -465,22 +467,26 @@ Stubs in this block: clock gating, the resus and its interrupt are not modelled:
 
 ## PLL
 
+Stubs in this block: PWR (PD, VCOPD, POSTDIVPD, DSMPD) is stored: the PLL is always locked and running (peripherals/pll.py).
+
 | Offset | Register | Status | Note |
 |---|---|---|---|
 | `0x0` | CS | Partial | CS.LOCK is always 1 (no start-up time) |
-| `0x4` | PWR | Acts |  |
+| `0x4` | PWR | Stub |  |
 | `0x8` | FBDIV_INT | Acts |  |
 | `0xc` | PRIM | Acts |  |
 
 ## XOSC
+
+Stubs in this block: COUNT is loaded by a write but never counts down (peripherals/_xosc.py).
 
 | Offset | Register | Status | Note |
 |---|---|---|---|
 | `0x00` | CTRL | Acts |  |
 | `0x04` | STATUS | Acts |  |
 | `0x08` | DORMANT | Partial | DORMANT is stored; the oscillator does not go dormant |
-| `0x0c` | STARTUP | Acts |  |
-| `0x1c` | COUNT | Acts |  |
+| `0x0c` | STARTUP | Partial | STARTUP delay is stored; STABLE is set at once, not after the delay |
+| `0x1c` | COUNT | Stub |  |
 
 ## ROSC
 
@@ -629,9 +635,11 @@ Stubs in this block: BUS_PRIORITY, PERFSEL0-3 are stored and PERFCTR0-3 stay 0: 
 
 ## PADS_BANK0
 
+Stubs in this block: VOLTAGE_SELECT is stored (peripherals/pads.py).
+
 | Offset | Register | Status | Note |
 |---|---|---|---|
-| `0x00` | VOLTAGE_SELECT | Unchecked | the block was never audited |
+| `0x00` | VOLTAGE_SELECT | Stub |  |
 | `0x04` | GPIO0, GPIO1, …, GPIO28, GPIO29 | Unchecked | the block was never audited |
 | `0x7c` | SWCLK | Absent |  |
 | `0x80` | SWD | Absent |  |

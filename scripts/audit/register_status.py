@@ -55,7 +55,8 @@ PARTIAL: dict[str, dict[int, str]] = {
     "I2C": {0x000: "IC_CON: the slave bits (IC_SLAVE_DISABLE, IC_10BITADDR_SLAVE) do nothing: no slave mode"},
     "PLL": {0x000: "CS.LOCK is always 1 (no start-up time)"},
     "SIO": {0x000: "CPUID is always 0 (no core 1)"},
-    "XOSC": {0x008: "DORMANT is stored; the oscillator does not go dormant"},
+    "XOSC": {0x008: "DORMANT is stored; the oscillator does not go dormant", 0x00C: "STARTUP delay is stored; STABLE is set at once, not after the delay"},
+    "WATCHDOG": {0x000: "CTRL: PAUSE_DBG0, PAUSE_DBG1, PAUSE_JTAG are stored; there is no debug halt to pause on"},
 }
 # block -> (offsets that are stubs | ALL, why)
 STUBS: dict[str, tuple[object, str]] = {
@@ -64,12 +65,12 @@ STUBS: dict[str, tuple[object, str]] = {
         "no cache and no streaming is modelled; the registers exist so the boot path's enable/flush/poll works (record 0052, peripherals/xip_ctrl.py)",
     ),
     "SSI": (
-        set(ssi.STORED_REGISTERS) | set(ssi.ZERO_REGISTERS),
-        "the SSI is a flash-command model: these are stored (`STORED_REGISTERS`) or read 0 (`ZERO_REGISTERS`) in peripherals/_ssi.py",
+        set(ssi.STORED_REGISTERS) | set(ssi.ZERO_REGISTERS) | {0x00, 0x04, 0x14, 0xF0, 0xF4, 0xF8},
+        "the SSI is a flash-command model: these are stored (`STORED_REGISTERS`, and CTRLR0, CTRLR1, BAUDR, RX_SAMPLE_DLY, SPI_CTRLR0, TXD_DRIVE_EDGE in their own attributes) or read 0 (`ZERO_REGISTERS`) in peripherals/_ssi.py",
     ),
     "CLOCKS": (
-        set(clocks.STORED_REGISTERS) | {clocks.CLK_SYS_RESUS_STATUS, clocks.INTR, clocks.INTS},
-        "clock gating, the resus and its interrupt are not modelled: `STORED_REGISTERS` in peripherals/clocks.py, and the status reads constant 0",
+        set(clocks.STORED_REGISTERS) | {clocks.CLK_SYS_RESUS_STATUS, clocks.INTR, clocks.INTS} | {0x00, 0x04, 0x0C, 0x10, 0x18, 0x1C, 0x24, 0x28},
+        "clock gating, the resus and its interrupt are not modelled (`STORED_REGISTERS` in peripherals/clocks.py, and the status reads constant 0); the four GPOUT clock outputs (CLK_GPOUT0-3 CTRL/DIV) are stored: nothing is driven onto a pin",
     ),
     "I2C": (
         {
@@ -98,6 +99,10 @@ STUBS: dict[str, tuple[object, str]] = {
         "BUS_PRIORITY, PERFSEL0-3 are stored and PERFCTR0-3 stay 0: there is no arbitration and no bus-fabric events to count (peripherals/_busctrl.py)",
     ),
     "UART": ({0x020}, "UARTILPR (IrDA low-power counter) is stored: there is no IrDA (peripherals/_uart.py)"),
+    "TIMER": ({0x2C}, "DBGPAUSE is stored: there is no debug halt for the timer to pause on (peripherals/_timer.py)"),
+    "PLL": ({0x04}, "PWR (PD, VCOPD, POSTDIVPD, DSMPD) is stored: the PLL is always locked and running (peripherals/pll.py)"),
+    "XOSC": ({0x1C}, "COUNT is loaded by a write but never counts down (peripherals/_xosc.py)"),
+    "PADS_BANK0": ({0x00}, "VOLTAGE_SELECT is stored (peripherals/pads.py)"),
 }
 
 

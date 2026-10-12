@@ -405,6 +405,13 @@ cdef class StateMachine:
         self._m.out_pin_direction = value
 
     @property
+    def held_write(self):
+        """The write `OUT_STICKY` keeps re-asserting, `(is_directions, mask, data)`, or None (the reference's attribute)."""
+        if not self._m.held_write.valid:
+            return None
+        return (bool(self._m.held_write.directions), self._m.held_write.mask, self._m.held_write.data)
+
+    @property
     def waiting(self):
         return bool(self._m.waiting)
 
@@ -731,6 +738,14 @@ cdef class RPPIO:
     @pin_directions.setter
     def pin_directions(self, unsigned int value):
         self._block.pin_directions = value
+
+    @property
+    def resolve_due_fp(self):
+        return self._block.resolve_due_fp
+
+    @property
+    def in_cycle(self):
+        return bool(self._block.in_cycle)
 
     @property
     def old_pin_values(self):

@@ -126,7 +126,7 @@ Follows the datasheet's own table of contents (chapter.section), so a row is som
 | 3.5.3 | FIFO joining (`FJOIN_TX/RX`) | Done | 8-deep joined FIFO, the other reads full and empty (PUSH / PULL stall, TXOVER / RXUNDER, FSTAT, FLEVEL, DREQ, interrupts), both bits make both unavailable, a change flushes (0098) | - |
 | 3.5.4 | Autopush and autopull | Partial | the autopull happens when the next `OUT` starts, not at the `OUT` that reaches the threshold | Go-ahead |
 | 3.5.5 | Clock dividers | Done | | - |
-| 3.5.6 | GPIO mapping | Partial | `OUT_STICKY`, `INLINE_OUT_EN`, `OUT_EN_SEL` and the input synchroniser bypass are stored and ignored; the requirement (per-cycle write arbitration, highest machine wins) is in 0098 | With IO_BANK0 port |
+| 3.5.6 | GPIO mapping | Partial | per-cycle write arbitration (highest machine wins), `OUT_STICKY`, `INLINE_OUT_EN`, `OUT_EN_SEL` done (0098, "PIO pin-write arbitration"; the model's own choices are listed there); the 2-cycle register stage, the input synchronisers and `INPUT_SYNC_BYPASS` are not modelled | Go-ahead |
 | 3.5.7 | Forced and EXEC'd instructions | Done | | - |
 | 3.6 | Examples | Partial | WS2812 is a test; duplex SPI, UART TX/RX, Manchester, BMC, I2C, PWM, addition are Unchecked | - |
 

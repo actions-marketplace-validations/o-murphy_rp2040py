@@ -10,6 +10,9 @@ from typing import TYPE_CHECKING
 
 from rp2040py.peripherals.pio_registers import (
     EXECCTRL_EXEC_STALLED,
+    EXECCTRL_INLINE_OUT_EN,
+    EXECCTRL_OUT_EN_SEL_LSB,
+    EXECCTRL_OUT_STICKY,
     EXECCTRL_SIDE_EN,
     EXECCTRL_SIDE_PINDIR,
     EXECCTRL_STATUS_SEL,
@@ -94,6 +97,11 @@ class StateMachine:
 
         self.out_pin_values = 0
         self.out_pin_direction = 0
+        # The pin-write arbitration (datasheet 3.5.6.1, `RPPIO.collate()`): this cycle's write on the OUT/SET channel and on the side-set channel, each `(is_directions, mask, data)` with the
+        # mask and data already mapped to GPIOs, and the write `OUT_STICKY` keeps re-asserting on every cycle - the most recent OUT/SET (or MOV PINS), `None` while there is none.
+        self.fresh_channel: tuple[bool, int, int] | None = None
+        self.fresh_side: tuple[bool, int, int] | None = None
+        self.held_write: tuple[bool, int, int] | None = None
 
         self.waiting = False
         self.wait_type = WaitType.NONE
@@ -253,7 +261,7 @@ class StateMachine:
     def write_out_value(self, destination: int, value: int, bit_count: int) -> None:
         # PINS
         if destination == 0b000:
-            self.set_out_pins(value)
+            self.set_out_pins(value, self.inline_out_enable(value))
 
         # X (scratch register X)
         elif destination == 0b001:
@@ -269,7 +277,7 @@ class StateMachine:
 
         # PINDIRS
         elif destination == 0b100:
-            self.set_out_pin_dirs(value)
+            self.set_out_pin_dirs(value, self.inline_out_enable(value))
 
         # PC
         elif destination == 0b101:
@@ -336,13 +344,44 @@ class StateMachine:
     def wrap_bottom(self) -> int:
         return (self.exec_ctrl >> 7) & 0x1F
 
-    def set_out_pin_dirs(self, value: int) -> None:
-        self.out_pin_direction = value
-        self.pio.pin_directions_changed(value, self.out_base, self.out_count)
+    def inline_out_enable(self, value: int) -> bool:
+        """`EXECCTRL.INLINE_OUT_EN`: "use a bit of OUT data as an auxiliary write enable", the bit `OUT_EN_SEL` of the data an OUT instruction shifted out. Without the option every OUT
+        write is enabled."""
+        if not self.exec_ctrl & EXECCTRL_INLINE_OUT_EN:
+            return True
+        return bool((value >> ((self.exec_ctrl >> EXECCTRL_OUT_EN_SEL_LSB) & 0x1F)) & 1)
 
-    def set_out_pins(self, value: int) -> None:
+    def write_pins(
+        self, is_directions: bool, value: int, first_pin: int, count: int, *, channel: bool, enable: bool = True
+    ) -> None:
+        """One write of `count` bits at `first_pin` to the pin levels or directions, through the arbitration of datasheet 3.5.6.1. `channel` is the OUT/SET (and MOV PINS) channel -
+        the one `OUT_STICKY` holds; the other is side-set. A write with `enable` False is a write with an empty mask: it asserts nothing, and (sticky) it replaces the held write."""
+        pio = self.pio
+        mask, data = pio.pin_mapping(value, first_pin, count)
+        if not enable:
+            mask = 0
+        if not pio.pin_routing():
+            pio.apply_pin_write(is_directions, mask, data)
+            return
+        write = (is_directions, mask, data)
+        if channel:
+            self.fresh_channel = write
+            if self.exec_ctrl & EXECCTRL_OUT_STICKY:
+                self.held_write = write
+        else:
+            self.fresh_side = write
+        if not pio.in_cycle:  # a write outside a stepped cycle (SMx_INSTR, a woken machine): its own cycle
+            pio.collate()
+            pio.schedule_resolve()
+            pio.recompute_due()
+
+    def set_out_pin_dirs(self, value: int, enable: bool = True) -> None:
+        self.out_pin_direction = value
+        self.write_pins(True, value, self.out_base, self.out_count, channel=True, enable=enable)
+
+    def set_out_pins(self, value: int, enable: bool = True) -> None:
         self.out_pin_values = value
-        self.pio.pin_values_changed(value, self.out_base, self.out_count)
+        self.write_pins(False, value, self.out_base, self.out_count, channel=True, enable=enable)
 
     def out_instruction(self, arg: int) -> None:
         bit_count = arg & 0x1F
@@ -582,16 +621,13 @@ class StateMachine:
             self.next_due_fp += (self.cycles - before) * self.div_fp
 
     def set_set_pin_dirs(self, value: int) -> None:
-        self.pio.pin_directions_changed(value, self.set_base, self.set_count)
+        self.write_pins(True, value, self.set_base, self.set_count, channel=True)
 
     def set_set_pins(self, value: int) -> None:
-        self.pio.pin_values_changed(value, self.set_base, self.set_count)
+        self.write_pins(False, value, self.set_base, self.set_count, channel=True)
 
     def set_sideset(self, value: int, count: int) -> None:
-        if self.exec_ctrl & EXECCTRL_SIDE_PINDIR:
-            self.pio.pin_directions_changed(value, self.sideset_base, count)
-        else:
-            self.pio.pin_values_changed(value, self.sideset_base, count)
+        self.write_pins(bool(self.exec_ctrl & EXECCTRL_SIDE_PINDIR), value, self.sideset_base, count, channel=False)
 
     def transform_mov_value(self, value: int, op: int) -> int:
         if op == 0b00:
@@ -668,6 +704,8 @@ class StateMachine:
         elif absolute_offset == SM0_EXECCTRL:
             # bits 6:5 are reserved and 31 (EXEC_STALLED) is read only
             self.exec_ctrl = ((value & EXECCTRL_WRITE_MASK) | (self.exec_ctrl & 0x80000000)) & 0xFFFFFFFF
+            if not self.exec_ctrl & EXECCTRL_OUT_STICKY:
+                self.held_write = None  # nothing is re-asserted without OUT_STICKY
         elif absolute_offset == SM0_SHIFTCTRL:
             changed = (self.shift_ctrl ^ value) & (SHIFTCTRL_FJOIN_RX | SHIFTCTRL_FJOIN_TX)
             self.shift_ctrl = value & SHIFTCTRL_WRITE_MASK  # 15:0 are reserved
@@ -734,6 +772,7 @@ class StateMachine:
         self._apply_fjoin()  # (the reset SHIFTCTRL joins nothing: both back to 4 deep, empty)
         self.out_pin_values = 0
         self.out_pin_direction = 0
+        self.fresh_channel = self.fresh_side = self.held_write = None
         self.waiting = False
         self.wait_index = 0
         self.wait_polarity = False
@@ -752,7 +791,7 @@ class StateMachine:
         self.exec_ctrl &= (
             ~EXECCTRL_EXEC_STALLED
         )  # "any stalled instruction written to SMx_INSTR or run by OUT/MOV EXEC" is cleared too
-        # TODO any pin write left asserted due to OUT_STICKY.
+        self.held_write = None  # "any pin write left asserted due to OUT_STICKY" (SM_RESTART, datasheet CTRL)
 
     def clk_div_restart(self) -> None:
         """`CTRL.CLKDIV_RESTART`: restarts the clock divider "from an initial phase of 0" (RP2040

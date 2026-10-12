@@ -68,7 +68,6 @@ PARTIAL: dict[str, dict[int, str]] = {
         0x00C: "CH0_CTRL_TRIG: HIGH_PRIORITY and SNIFF_EN are stored; READ_ERROR/WRITE_ERROR/AHB_ERROR are never set"
     },
     "PIO": {
-        0x0CC: "SM0_EXECCTRL: OUT_STICKY, INLINE_OUT_EN, OUT_EN_SEL are stored and ignored",
         0x038: "INPUT_SYNC_BYPASS has no effect",
     },
     "I2C": {0x000: "IC_CON: the slave bits (IC_SLAVE_DISABLE, IC_10BITADDR_SLAVE) do nothing: no slave mode"},

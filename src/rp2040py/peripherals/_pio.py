@@ -11,6 +11,7 @@ from rp2040py.peripherals.pio_registers import (
     DREQ_RX1,
     DREQ_TX0,
     DREQ_TX1,
+    EXECCTRL_OUT_STICKY,
     FDEBUG,
     FLEVEL,
     FSTAT,
@@ -115,6 +116,10 @@ class RPPIO(BasePeripheral):
         self.pin_directions = 0
         self.old_pin_values = 0
         self.old_pin_directions = 0
+        # Pin-write arbitration (datasheet 3.5.6.1): `in_cycle` while `_run_due()` steps the machines (their writes are collected, then collated once); `resolve_due_fp` is the cycle at
+        # which the image falls back to the held (`OUT_STICKY`) writes after a higher-numbered machine overwrote them for one cycle.
+        self.in_cycle = False
+        self.resolve_due_fp = NEVER_DUE
 
         self.irq0_int_enable = 0
         self.irq0_int_force = 0
@@ -355,21 +360,68 @@ class RPPIO(BasePeripheral):
             super().write_uint32(offset, value)
 
     @staticmethod
-    def _pin_write(old: int, value: int, first_pin: int, count: int) -> int:
-        """The result of a write of `count` bits at `first_pin`: "the least-significant bit of OUT data is mapped to PINCTRL_OUT_BASE, and this mapping continues for PINCTRL_OUT_COUNT
+    def pin_mapping(value: int, first_pin: int, count: int) -> tuple[int, int]:
+        """`(mask, data)` of a write of `count` bits at `first_pin`: "the least-significant bit of OUT data is mapped to PINCTRL_OUT_BASE, and this mapping continues for PINCTRL_OUT_COUNT
         bits, wrapping after GPIO31" (datasheet 3.5.6), so the data and the mask are rotated left by `first_pin` within 32 bits, not shifted."""
         value &= 0xFFFFFFFF
         mask = 0xFFFFFFFF if count > 31 else (1 << count) - 1
         if first_pin:
             value = ((value << first_pin) | (value >> (32 - first_pin))) & 0xFFFFFFFF
             mask = ((mask << first_pin) | (mask >> (32 - first_pin))) & 0xFFFFFFFF
-        return ((old & ~mask) | (value & mask)) & 0x3FFFFFFF
+        return mask, value
+
+    def apply_pin_write(self, is_directions: bool, mask: int, data: int) -> None:
+        """Applies a write to the pin levels or directions: the pins in `mask` take `data`, the others keep their value ("If no state machine asserts a write to a GPIO's level or
+        direction, the value does not change")."""
+        if is_directions:
+            self.pin_directions = ((self.pin_directions & ~mask) | (data & mask)) & 0x3FFFFFFF
+        else:
+            self.pin_values = ((self.pin_values & ~mask) | (data & mask)) & 0x3FFFFFFF
 
     def pin_values_changed(self, value: int, first_pin: int, count: int) -> None:
-        self.pin_values = self._pin_write(self.pin_values, value, first_pin, count)
+        self.apply_pin_write(False, *self.pin_mapping(value, first_pin, count))
 
     def pin_directions_changed(self, value: int, first_pin: int, count: int) -> None:
-        self.pin_directions = self._pin_write(self.pin_directions, value, first_pin, count)
+        self.apply_pin_write(True, *self.pin_mapping(value, first_pin, count))
+
+    def pin_routing(self) -> bool:
+        """Do pin writes need the arbitration of `collate()`? Only while some machine has `OUT_STICKY` set or a write held - otherwise applying each write as it happens, in machine
+        order, is the same thing (the highest-numbered machine's write is the last one applied)."""
+        return any(
+            machine.held_write is not None or machine.exec_ctrl & EXECCTRL_OUT_STICKY for machine in self.machines
+        )
+
+    def collate(self) -> None:
+        """One system-clock cycle of pin writes (datasheet 3.5.6.1): "For each GPIO, PIO collates the writes from all four state machines, and applies the write from the highest-numbered
+        state machine. This occurs separately for output levels and output directions." A machine's write of the cycle is what it wrote on that cycle, or - on the OUT/SET channel, with
+        OUT_STICKY - the write it holds; a side-set write comes on top of its own OUT/SET in the overlap ("the side-set takes precedence")."""
+        for machine in self.machines:
+            write = machine.fresh_channel if machine.fresh_channel is not None else machine.held_write
+            if write is not None:
+                self.apply_pin_write(*write)
+            if machine.fresh_side is not None:
+                self.apply_pin_write(*machine.fresh_side)
+            machine.fresh_channel = machine.fresh_side = None
+
+    def held_image(self) -> tuple[int, int]:
+        """The pin levels and directions after one more cycle in which no machine writes anything: every held write re-asserted, in machine order."""
+        values, directions = self.pin_values, self.pin_directions
+        for machine in self.machines:
+            if machine.held_write is not None:
+                is_directions, mask, data = machine.held_write
+                if is_directions:
+                    directions = ((directions & ~mask) | (data & mask)) & 0x3FFFFFFF
+                else:
+                    values = ((values & ~mask) | (data & mask)) & 0x3FFFFFFF
+        return values, directions
+
+    def schedule_resolve(self) -> None:
+        """After a cycle's collation: if a held write was overwritten (by a higher-numbered machine's write, or by its own machine's side-set) the image falls back to the held
+        writes one cycle later - unless something writes again."""
+        if (self.pin_values, self.pin_directions) != self.held_image():
+            self.resolve_due_fp = self.cycle_fp + (1 << 8)
+        else:
+            self.resolve_due_fp = NEVER_DUE
 
     def reset(self) -> None:
         """The whole block back to power-on (0089 Phase 5): instruction memory, the four state
@@ -395,6 +447,8 @@ class RPPIO(BasePeripheral):
         self.pin_directions = 0
         self.old_pin_values = 0
         self.old_pin_directions = 0
+        self.in_cycle = False
+        self.resolve_due_fp = NEVER_DUE
         self.irq0_int_enable = 0
         self.irq0_int_force = 0
         self.irq1_int_enable = 0
@@ -439,7 +493,7 @@ class RPPIO(BasePeripheral):
         for machine in self.machines:
             if machine.enabled and not machine.waiting and machine.next_due_fp < next_due_fp:
                 next_due_fp = machine.next_due_fp
-        self.next_due_fp = next_due_fp
+        self.next_due_fp = min(next_due_fp, self.resolve_due_fp)
 
     def notify_due(self, due_fp: int) -> None:
         """A machine just re-armed itself out of band - i.e. `check_wait()` unstalled it from an
@@ -481,6 +535,24 @@ class RPPIO(BasePeripheral):
 
     def _run_due(self) -> None:
         cycle_fp = self.cycle_fp
+        if self.resolve_due_fp <= cycle_fp:
+            # A held write was overwritten for one cycle and that cycle is over: back to the held image, and the pins hear it before this cycle's writes
+            self.pin_values, self.pin_directions = self.held_image()
+            self.resolve_due_fp = NEVER_DUE
+            self.check_changed_pins()
+        routing = self.pin_routing()
+        self.in_cycle = routing
+        try:
+            self._step_due_machines(cycle_fp)
+        finally:
+            self.in_cycle = False
+        if routing or self.pin_routing():
+            self.collate()
+            self.schedule_resolve()
+        self.recompute_due()
+        self.check_changed_pins()
+
+    def _step_due_machines(self, cycle_fp: int) -> None:
         for machine in self.machines:
             if machine.enabled and not machine.waiting and machine.next_due_fp <= cycle_fp:
                 if cycle_fp - machine.next_due_fp > MAX_ARREARS_FP:
@@ -493,8 +565,6 @@ class RPPIO(BasePeripheral):
                     self.backlog_drops += 1
                     machine.next_due_fp = cycle_fp
                 machine.step()
-        self.recompute_due()
-        self.check_changed_pins()
 
     def step(self) -> None:
         """One system clock. Kept as the no-owning-`Simulator` entry point (`_step_batch()`/

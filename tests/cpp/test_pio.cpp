@@ -636,6 +636,170 @@ static void test_a_sideset_count_above_five_is_clamped_not_undefined() {
     CHECK(r.pio.pin_values == (0x1Fu << 4));  // as a count of 5: all five side-set bits, no delay
 }
 
+// --- pin-write arbitration (datasheet 3.5.6.1, EXECCTRL.OUT_STICKY / INLINE_OUT_EN / OUT_EN_SEL) -----------------------------------------------------
+
+static const uint32_t kOutSticky = 1u << 17, kInlineOutEn = 1u << 18;
+
+// A rig whose machines write GPIO 5 with SET PINS: machine `i` runs the program word `i` (SET PINS, level) at address `i` in a one-instruction loop.
+static void config_set_pin(Rig& r, uint32_t machine, uint32_t level, uint32_t execctrl = 0) {
+    r.pio.instructions[machine] = op(SET, level);  // SET PINS, level
+    r.sm(machine).pin_ctrl = (1u << 26) | (5u << 5);
+    r.sm(machine).exec_ctrl = execctrl | (machine << 12) | (machine << 7);  // wrap top = bottom = machine
+    r.sm(machine).pc = machine;
+    r.sm(machine).enabled = false;
+}
+
+static void enable(Rig& r, uint32_t mask) {
+    for (uint32_t i = 0; i < 4; ++i) {
+        r.sm(i).enabled = (mask >> i) & 1u;
+        r.sm(i).next_due_fp = r.pio.cycle_fp;
+    }
+    r.pio.stopped = 0;
+    r.pio.recompute_due();
+}
+
+static uint32_t level5(Rig& r) { return (r.pio.pin_values >> 5) & 1u; }
+
+static void test_the_highest_numbered_machine_wins_a_cycle() {
+    Rig r;
+    config_set_pin(r, 0, 1);
+    config_set_pin(r, 1, 0);
+    enable(r, 0b11);
+    CHECK(r.pio.advance(1));
+    CHECK(level5(r) == 0);  // machine 1 is the higher
+    CHECK(r.pio.advance(1));
+    CHECK(level5(r) == 0);
+}
+
+static void test_a_sticky_write_comes_back_after_a_higher_machine_overwrote_it() {
+    Rig r;
+    config_set_pin(r, 0, 1, kOutSticky);
+    config_set_pin(r, 1, 0);
+    r.pio.instructions[1] = op(JMP, 1);  // machine 1 first does nothing: a jump to itself
+    enable(r, 0b1);
+    CHECK(r.pio.advance(1) && r.pio.advance(1));
+    CHECK(level5(r) == 1 && r.sm(0).held_write.valid);
+    r.pio.instructions[1] = op(SET, 0);  // now machine 1 writes 0 - once (it then wraps on the same word, so keep it to one cycle)
+    r.sm(1).pc = 1;
+    enable(r, 0b11);
+    CHECK(r.pio.advance(1));
+    CHECK(level5(r) == 0 && r.pio.resolve_due_fp != kPioNeverDue);  // the higher machine's write holds the cycle
+    r.sm(1).enabled = false;
+    CHECK(r.pio.advance(1));
+    CHECK(level5(r) == 1 && r.pio.resolve_due_fp == kPioNeverDue);  // the held write is on the pin again
+}
+
+static void test_the_resolve_is_a_due_time_and_the_pins_hear_both_edges() {
+    Rig r;
+    config_set_pin(r, 0, 1, kOutSticky);
+    enable(r, 0b1);
+    CHECK(r.pio.advance(1));
+    r.sm(0).enabled = false;
+    r.host.count = 0;
+    r.pio.pin_values &= ~(1u << 5);  // something took the pin to 0 under machine 0's held write
+    r.pio.old_pin_values = r.pio.pin_values;
+    r.pio.resolve_due_fp = r.pio.cycle_fp + (int64_t{1} << 8);
+    r.pio.recompute_due();
+    CHECK(r.pio.next_due_fp == r.pio.resolve_due_fp);
+    CHECK(r.pio.advance(1));
+    CHECK(level5(r) == 1 && r.host.has(kPinUpdate, 5, 0));  // the fall back to the held write is announced
+}
+
+static void test_restart_and_turning_sticky_off_drop_the_held_write() {
+    Rig r;
+    config_set_pin(r, 0, 1, kOutSticky);
+    enable(r, 0b1);
+    CHECK(r.pio.advance(1) && r.sm(0).held_write.valid);
+    CHECK(r.sm(0).restart() && !r.sm(0).held_write.valid);
+    CHECK(r.pio.advance(1) && r.sm(0).held_write.valid);
+    CHECK(r.sm(0).write32(SM0_EXECCTRL - SM0_CLKDIV, 0) && !r.sm(0).held_write.valid);
+    CHECK(r.sm(0).reset() && !r.sm(0).held_write.valid);
+}
+
+static void test_inline_out_enable_gates_an_out_write_and_replaces_the_held_one() {
+    Rig r;
+    r.sm().pin_ctrl = (1u << 20) | 5u;  // OUT_COUNT 1, OUT_BASE 5
+    r.sm().exec_ctrl = kInlineOutEn | kOutSticky | (1u << 19) | (0x1Fu << 12);  // OUT_EN_SEL = 1
+    r.sm().output_shift_reg = 0b11;
+    r.sm().shift_ctrl = (1u << 19) | (0b11u << 18);  // shift right
+    r.exec(op(OUT, 2));  // OUT PINS, 2: data 0b11, enable bit 1 is 1 -> bit 0 (1) is written
+    CHECK(level5(r) == 1 && r.sm().held_write.valid && r.sm().held_write.mask == (1u << 5));
+    r.sm().output_shift_reg = 0b01;
+    r.exec(op(OUT, 2));  // enable bit 0: no write, the held write is replaced by an empty one
+    CHECK(level5(r) == 1 && r.sm().held_write.valid && r.sm().held_write.mask == 0);
+    r.sm().output_shift_reg = 0b10;
+    r.exec(op(OUT, 2));  // enable 1, data 0: written
+    CHECK(level5(r) == 0 && r.sm().held_write.mask == (1u << 5));
+    r.sm().exec_ctrl &= ~kInlineOutEn;  // without the option every OUT writes
+    r.sm().output_shift_reg = 0b01;
+    r.exec(op(OUT, 2));
+    CHECK(level5(r) == 1);
+}
+
+static void test_levels_and_directions_are_collated_separately_and_a_forced_write_is_its_own_cycle() {
+    Rig r;
+    r.pio.instructions[0] = op(SET, 1);
+    r.sm(0).pin_ctrl = (1u << 26) | (5u << 5);
+    r.sm(0).exec_ctrl = kOutSticky | (0x1Fu << 12);
+    r.exec(op(SET, 1), 0);  // SET PINS 1 on machine 0 (sticky)
+    r.sm(1).pin_ctrl = (1u << 26) | (5u << 5);
+    r.exec(op(SET, (4 << 5) | 1), 1);  // SET PINDIRS 1 on machine 1: its own write, a different channel of the image
+    CHECK(level5(r) == 1 && ((r.pio.pin_directions >> 5) & 1u) == 1u);
+    r.exec(op(SET, 0), 1);  // a higher machine's SET PINS 0 outside a stepped cycle: it is its own cycle, and a resolve is due
+    CHECK(level5(r) == 0 && r.pio.resolve_due_fp != kPioNeverDue && r.pio.next_due_fp == r.pio.resolve_due_fp);
+}
+
+static void test_side_set_and_mov_pins_and_directions_take_part_in_the_arbitration() {
+    Rig r;
+    // machine 0: sticky; MOV PINS, X holds a level; a side-set of its own comes on top in the overlap and is not held
+    r.sm(0).pin_ctrl = (1u << 20) | 5u | (1u << 29) | (5u << 10);  // OUT_COUNT 1 at 5; SIDESET_COUNT 1 at 5
+    r.sm(0).exec_ctrl = kOutSticky | (0x1Fu << 12);
+    r.sm(0).x = 1;
+    r.exec(op(MOV, (0 << 5) | 1, 0x10));  // MOV PINS, X, with a side-set of 1 (the side-set field is the top bit of the five)
+    CHECK(level5(r) == 1 && r.sm(0).held_write.valid && r.sm(0).held_write.mask == (1u << 5) && !r.sm(0).held_write.directions);
+    r.exec(op(SET, (1 << 5) | 0, 0x10), 0);  // SET X, 0 with a side-set of 1 on pin 5 (SIDESET_COUNT 1, no enable bit)
+    CHECK(level5(r) == 1 && r.sm(0).held_write.valid);
+    // a side-set of 0 on top of the held 1
+    r.exec(op(SET, (1 << 5) | 0, 0x00), 0);
+    CHECK(level5(r) == 0 && r.sm(0).held_write.mask == (1u << 5) && r.sm(0).held_write.data == (1u << 5));  // the held write is still the MOV's
+    CHECK(r.pio.resolve_due_fp != kPioNeverDue);  // ... and comes back one cycle later
+    CHECK(r.pio.advance(1));
+    CHECK(level5(r) == 1);
+    // directions: a held PINDIRS write, re-asserted separately from the level
+    r.sm(1).pin_ctrl = (1u << 26) | (5u << 5);
+    r.sm(1).exec_ctrl = kOutSticky | (0x1Fu << 12);
+    r.exec(op(SET, (4 << 5) | 1), 1);  // SET PINDIRS 1
+    CHECK(((r.pio.pin_directions >> 5) & 1u) == 1u && r.sm(1).held_write.directions);
+    r.pio.pin_directions = 0;
+    uint32_t v, d;
+    r.pio.held_image(&v, &d);
+    CHECK(((d >> 5) & 1u) == 1u && ((v >> 5) & 1u) == 1u);  // both held writes: machine 0's level and machine 1's direction
+}
+
+static void test_the_unarbitrated_wrappers_and_the_mapping() {
+    Rig r;
+    r.pio.pin_values_changed(0b101, 3, 3);
+    r.pio.pin_directions_changed(0b11, 30, 2);  // wraps after GPIO31: pins 30 and 31 - outside the 30-bit image
+    CHECK(r.pio.pin_values == (0b101u << 3) && r.pio.pin_directions == 0);
+    r.pio.pin_directions_changed(0b011, 28, 3);  // GPIO28, GPIO29, GPIO30
+    CHECK(r.pio.pin_directions == (0b11u << 28));
+    uint32_t mask, data;
+    PioBlock::pin_mapping(0b11, 31, 2, &mask, &data);  // GPIO31 and GPIO0
+    CHECK(mask == 0x80000001u && data == 0x80000001u);
+    PioBlock::pin_mapping(0xFFFFFFFFu, 4, 32, &mask, &data);
+    CHECK(mask == 0xFFFFFFFFu);
+}
+
+static void test_a_failing_step_leaves_no_cycle_open() {
+    Rig r;
+    config_set_pin(r, 0, 1, kOutSticky);
+    r.pio.instructions[0] = op(IRQ_OP, 0b0000);  // IRQ set 0: the host's interrupt call can fail
+    enable(r, 0b1);
+    r.host.fail_on_irq_call = r.host.irq_calls;
+    CHECK(!r.pio.advance(1));
+    CHECK(!r.pio.in_cycle);
+}
+
 int main() {
     test_fifo_is_the_python_ring();
     test_construction_publishes_the_dreq_levels_rx_then_tx();
@@ -658,6 +822,15 @@ int main() {
     test_failures_stop_at_once_and_leave_the_state_updated();
     test_reset_and_stop();
     test_a_sideset_count_above_five_is_clamped_not_undefined();
+    test_the_highest_numbered_machine_wins_a_cycle();
+    test_a_sticky_write_comes_back_after_a_higher_machine_overwrote_it();
+    test_the_resolve_is_a_due_time_and_the_pins_hear_both_edges();
+    test_restart_and_turning_sticky_off_drop_the_held_write();
+    test_inline_out_enable_gates_an_out_write_and_replaces_the_held_one();
+    test_levels_and_directions_are_collated_separately_and_a_forced_write_is_its_own_cycle();
+    test_side_set_and_mov_pins_and_directions_take_part_in_the_arbitration();
+    test_the_unarbitrated_wrappers_and_the_mapping();
+    test_a_failing_step_leaves_no_cycle_open();
     if (failures == 0) std::printf("test_pio: all checks passed\n");
     return failures == 0 ? 0 : 1;
 }

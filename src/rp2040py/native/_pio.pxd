@@ -43,6 +43,10 @@ cdef extern from "pio.hpp" namespace "rp2040core":
         uint32_t peek() noexcept
         void reset() noexcept
 
+    cdef cppclass PioPinWrite:
+        cppbool valid, directions
+        uint32_t mask, data
+
     cdef cppclass PioMachine:
         uint32_t index
         cppbool enabled
@@ -57,6 +61,7 @@ cdef extern from "pio.hpp" namespace "rp2040core":
         uint32_t exec_ctrl, shift_ctrl, pin_ctrl
         PioFifo rx, tx
         uint32_t out_pin_values, out_pin_direction
+        PioPinWrite fresh_channel, fresh_side, held_write
         cppbool waiting
         uint32_t wait_type, wait_index
         cppbool wait_polarity
@@ -95,7 +100,8 @@ cdef extern from "pio.hpp" namespace "rp2040core":
         uint32_t pin_values, pin_directions, old_pin_values, old_pin_directions
         uint32_t irq0_int_enable, irq0_int_force, irq1_int_enable, irq1_int_force
         int32_t stopped
-        int64_t cycle_fp, next_due_fp, backlog_drops, raw_write_value
+        cppbool in_cycle
+        int64_t cycle_fp, next_due_fp, backlog_drops, raw_write_value, resolve_due_fp
         cppbool init(const PioHost& host, uint32_t first_irq, uint32_t index) noexcept
         void bind_pin(uint32_t gpio, PinBank* bank, uint32_t slot) noexcept
         uint32_t int_raw() noexcept

@@ -21,6 +21,9 @@ __all__ = (
     "DREQ_TX0",
     "DREQ_TX1",
     "EXECCTRL_EXEC_STALLED",
+    "EXECCTRL_INLINE_OUT_EN",
+    "EXECCTRL_OUT_EN_SEL_LSB",
+    "EXECCTRL_OUT_STICKY",
     "EXECCTRL_SIDE_EN",
     "EXECCTRL_SIDE_PINDIR",
     "EXECCTRL_STATUS_SEL",
@@ -144,6 +147,9 @@ SHIFTCTRL_OUT_SHIFTDIR = 1 << 19  # 1 = shift out of output shift register to ri
 
 # EXECCTRL bits
 EXECCTRL_STATUS_SEL = 1 << 4
+EXECCTRL_OUT_STICKY = 1 << 17  # "Continuously assert the most recent OUT/SET to the pins"
+EXECCTRL_INLINE_OUT_EN = 1 << 18  # "use a bit of OUT data as an auxiliary write enable"
+EXECCTRL_OUT_EN_SEL_LSB = 19  # 23:19 "Which data bit to use for inline OUT enable"
 EXECCTRL_SIDE_PINDIR = 1 << 29
 EXECCTRL_SIDE_EN = 1 << 30
 EXECCTRL_EXEC_STALLED = 1 << 31

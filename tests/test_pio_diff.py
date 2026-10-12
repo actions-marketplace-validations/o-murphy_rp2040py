@@ -7,9 +7,9 @@ and pin traffic) - a green differential that never executed a WAIT would prove n
 """
 
 import pytest
-from utils.pio_diff import Rig, coverage, generate, run_pair
+from utils.pio_diff import MUTANTS, Rig, coverage, generate, mutant_rig, run_pair
 
-STEPS = 6500  # the coverage run (cheap: one chip, no snapshots)
+STEPS = 12000  # the coverage run (cheap: one chip, no snapshots)
 DIFF_STEPS = 3500  # the lockstep runs snapshot everything after every step, which is what costs
 SEEDS = range(1, 7)
 
@@ -60,6 +60,18 @@ def test_a_damaged_candidate_is_caught_where_it_was_damaged(perturb):
     assert divergence.step == 700, divergence
 
 
+MUTANT_SEEDS = range(1, 9)
+
+
+@pytest.mark.parametrize("mutant", MUTANTS)
+def test_a_change_of_the_pin_arbitration_logic_is_caught(mutant):
+    """Every entry of ``MUTATIONS`` is the reference's own source with one expression of the pin-write arbitration changed (datasheet 3.5.6.1)."""
+    for seed in MUTANT_SEEDS:
+        if run_pair(generate(seed, DIFF_STEPS), candidate=lambda: mutant_rig(mutant)) is not None:
+            return
+    pytest.fail(f"{mutant}: {len(MUTANT_SEEDS)} seeds of {DIFF_STEPS} steps did not see it")
+
+
 def test_the_runs_exercise_what_they_claim_to():
     total: dict[str, int] = {}
     for seed in (1, 2, 3, 4, 5, 6):
@@ -80,3 +92,12 @@ def test_the_runs_exercise_what_they_claim_to():
         assert total.get(wait, 0) >= 50, (wait, total)
     for name in ("fjoin.tx", "fjoin.rx", "fjoin.both", "fjoin.tx_deep", "fjoin.rx_deep"):
         assert total.get(name, 0) >= 50, (name, total)
+    for name in (
+        "sticky.on",
+        "sticky.held",
+        "inline.enabled",
+        "inline.gated",
+        "arbitration.cycles",
+        "arbitration.overwritten",
+    ):  # the pin-write arbitration (datasheet 3.5.6.1)
+        assert total.get(name, 0) >= 30, (name, total)

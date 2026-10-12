@@ -111,6 +111,18 @@ struct PioFifo {
 
 class PioBlock;
 
+// One write to the pin levels or directions as the arbitration sees it (datasheet 3.5.6.1): which of the two, and the GPIOs it asserts (`mask`) with their values (`data`), both already mapped.
+struct PioPinWrite {
+    bool valid = false;
+    bool directions = false;
+    uint32_t mask = 0;
+    uint32_t data = 0;
+};
+
+// EXECCTRL bits of the pin-write options (SM0_EXECCTRL).
+constexpr uint32_t kExecOutSticky = 1u << 17, kExecInlineOutEn = 1u << 18;
+constexpr uint32_t kExecOutEnSelLsb = 19;
+
 struct PioMachine {
     PioBlock* block = nullptr;
     uint32_t index = 0;
@@ -129,6 +141,8 @@ struct PioMachine {
     uint32_t exec_ctrl = 0x1Fu << 12, shift_ctrl = 0b11u << 18, pin_ctrl = 0x5u << 26;
     PioFifo rx, tx;
     uint32_t out_pin_values = 0, out_pin_direction = 0;
+    // This cycle's write on the OUT/SET channel and on the side-set channel, and the write `OUT_STICKY` keeps re-asserting (the most recent OUT/SET or MOV PINS): `PioBlock::collate()`.
+    PioPinWrite fresh_channel, fresh_side, held_write;
     bool waiting = false;
     uint32_t wait_type = kPioWaitNone;
     uint32_t wait_index = 0;
@@ -167,6 +181,8 @@ struct PioMachine {
     inline bool execute_instruction(uint32_t opcode) noexcept;
     inline bool step() noexcept;
     inline bool check_wait() noexcept;
+    inline bool inline_out_enable(uint32_t value) const noexcept;
+    inline void write_pins(bool directions, uint32_t value, uint32_t first_pin, uint32_t count, bool channel, bool enable = true) noexcept;
     inline bool restart() noexcept;
     inline void clk_div_restart() noexcept;
     inline bool reset() noexcept;
@@ -236,6 +252,10 @@ public:
     int64_t next_due_fp = kPioNeverDue;
     int64_t backlog_drops = 0;
     int64_t raw_write_value = 0;
+    // Pin-write arbitration (datasheet 3.5.6.1): `in_cycle` while `run_due()` steps the machines (their writes are collected, then collated once); `resolve_due_fp` is the cycle at which
+    // the image falls back to the held (`OUT_STICKY`) writes after a higher-numbered machine overwrote them for one cycle.
+    bool in_cycle = false;
+    int64_t resolve_due_fp = kPioNeverDue;
 
     uint32_t int_raw() const noexcept {
         uint32_t result = (irq & 0xF) << 8;
@@ -286,16 +306,73 @@ public:
 
     // "The least-significant bit of OUT data is mapped to PINCTRL_OUT_BASE, and this mapping continues for PINCTRL_OUT_COUNT bits, wrapping after GPIO31" (datasheet 3.5.6): the data and
     // the mask are rotated left by `first_pin` within 32 bits, not shifted.
-    static uint32_t pin_write(uint32_t old, uint32_t value, uint32_t first_pin, uint32_t count) noexcept {
+    static void pin_mapping(uint32_t value, uint32_t first_pin, uint32_t count, uint32_t* mask_out, uint32_t* data_out) noexcept {
         uint32_t mask = count > 31 ? 0xFFFFFFFFu : ((1u << count) - 1u);
         if (first_pin != 0) {
             value = (value << first_pin) | (value >> (32 - first_pin));
             mask = (mask << first_pin) | (mask >> (32 - first_pin));
         }
-        return ((old & ~mask) | (value & mask)) & 0x3FFFFFFFu;
+        *mask_out = mask;
+        *data_out = value;
     }
-    void pin_values_changed(uint32_t value, uint32_t first_pin, uint32_t count) noexcept { pin_values = pin_write(pin_values, value, first_pin, count); }
-    void pin_directions_changed(uint32_t value, uint32_t first_pin, uint32_t count) noexcept { pin_directions = pin_write(pin_directions, value, first_pin, count); }
+    // The pins in `mask` take `data`, the others keep their value ("If no state machine asserts a write to a GPIO's level or direction, the value does not change").
+    void apply_pin_write(bool directions, uint32_t mask, uint32_t data) noexcept {
+        uint32_t& image = directions ? pin_directions : pin_values;
+        image = ((image & ~mask) | (data & mask)) & 0x3FFFFFFFu;
+    }
+    void pin_values_changed(uint32_t value, uint32_t first_pin, uint32_t count) noexcept {
+        uint32_t mask, data;
+        pin_mapping(value, first_pin, count, &mask, &data);
+        apply_pin_write(false, mask, data);
+    }
+    void pin_directions_changed(uint32_t value, uint32_t first_pin, uint32_t count) noexcept {
+        uint32_t mask, data;
+        pin_mapping(value, first_pin, count, &mask, &data);
+        apply_pin_write(true, mask, data);
+    }
+
+    // Do pin writes need the arbitration of `collate()`? Only while some machine has OUT_STICKY set or a write held - otherwise applying each write as it happens, in machine order, is the
+    // same thing (the highest-numbered machine's write is the last one applied).
+    bool pin_routing() const noexcept {
+        for (uint32_t i = 0; i < kPioMachines; ++i)
+            if (machines[i].held_write.valid || (machines[i].exec_ctrl & kExecOutSticky) != 0) return true;
+        return false;
+    }
+
+    // One system-clock cycle of pin writes: "For each GPIO, PIO collates the writes from all four state machines, and applies the write from the highest-numbered state machine. This occurs
+    // separately for output levels and output directions." A machine's write of the cycle is what it wrote on that cycle or - on the OUT/SET channel, with OUT_STICKY - the write it holds;
+    // a side-set write comes on top of its own OUT/SET in the overlap ("the side-set takes precedence").
+    void collate() noexcept {
+        for (uint32_t i = 0; i < kPioMachines; ++i) {
+            PioMachine& m = machines[i];
+            const PioPinWrite& write = m.fresh_channel.valid ? m.fresh_channel : m.held_write;
+            if (write.valid) apply_pin_write(write.directions, write.mask, write.data);
+            if (m.fresh_side.valid) apply_pin_write(m.fresh_side.directions, m.fresh_side.mask, m.fresh_side.data);
+            m.fresh_channel = PioPinWrite();
+            m.fresh_side = PioPinWrite();
+        }
+    }
+
+    // The pin levels and directions after one more cycle in which no machine writes anything: every held write re-asserted, in machine order.
+    void held_image(uint32_t* values, uint32_t* directions) const noexcept {
+        uint32_t v = pin_values, d = pin_directions;
+        for (uint32_t i = 0; i < kPioMachines; ++i) {
+            const PioPinWrite& w = machines[i].held_write;
+            if (!w.valid) continue;
+            uint32_t& image = w.directions ? d : v;
+            image = ((image & ~w.mask) | (w.data & w.mask)) & 0x3FFFFFFFu;
+        }
+        *values = v;
+        *directions = d;
+    }
+
+    // After a cycle's collation: if a held write was overwritten (by a higher-numbered machine's write, or by its own machine's side-set) the image falls back to the held writes one cycle
+    // later - unless something writes again.
+    void schedule_resolve() noexcept {
+        uint32_t v, d;
+        held_image(&v, &d);
+        resolve_due_fp = (pin_values != v || pin_directions != d) ? cycle_fp + (int64_t{1} << 8) : kPioNeverDue;
+    }
 
     // The set bits of what changed since the last call, each pin told to re-announce itself.
     bool check_changed_pins() noexcept {
@@ -326,7 +403,7 @@ public:
             const PioMachine& m = machines[i];
             if (m.enabled && !m.waiting && m.next_due_fp < next) next = m.next_due_fp;
         }
-        next_due_fp = next;
+        next_due_fp = resolve_due_fp < next ? resolve_due_fp : next;
     }
     void notify_due(int64_t due_fp) noexcept {
         if (due_fp < next_due_fp) next_due_fp = due_fp;
@@ -342,6 +419,14 @@ public:
 
     bool run_due() noexcept {
         const int64_t now = cycle_fp;
+        if (resolve_due_fp <= now) {
+            // A held write was overwritten for one cycle and that cycle is over: back to the held image, and the pins hear it before this cycle's writes
+            held_image(&pin_values, &pin_directions);
+            resolve_due_fp = kPioNeverDue;
+            RP2040PY_PIO_TRY(check_changed_pins());
+        }
+        const bool routing = pin_routing();
+        in_cycle = routing;
         for (uint32_t i = 0; i < kPioMachines; ++i) {
             PioMachine& m = machines[i];
             if (m.enabled && !m.waiting && m.next_due_fp <= now) {
@@ -349,8 +434,16 @@ public:
                     ++backlog_drops;
                     m.next_due_fp = now;
                 }
-                RP2040PY_PIO_TRY(m.step());
+                if (!m.step()) {
+                    in_cycle = false;
+                    return false;
+                }
             }
+        }
+        in_cycle = false;
+        if (routing || pin_routing()) {
+            collate();
+            schedule_resolve();
         }
         recompute_due();
         return check_changed_pins();
@@ -477,6 +570,8 @@ public:
         input_sync_bypass = 0;
         irq = 0;
         pin_values = pin_directions = old_pin_values = old_pin_directions = 0;
+        in_cycle = false;
+        resolve_due_fp = kPioNeverDue;
         irq0_int_enable = irq0_int_force = irq1_int_enable = irq1_int_force = 0;
         return check_interrupts();
     }
@@ -624,14 +719,14 @@ inline bool PioMachine::write_out_value(uint32_t destination, uint32_t value, ui
     switch (destination) {
         case 0b000:  // PINS
             out_pin_values = value;
-            block->pin_values_changed(value, out_base(), out_count());
+            write_pins(false, value, out_base(), out_count(), /*channel=*/true, inline_out_enable(value));
             break;
         case 0b001: x = value; break;
         case 0b010: y = value; break;
         case 0b011: break;  // NULL
         case 0b100:         // PINDIRS
             out_pin_direction = value;
-            block->pin_directions_changed(value, out_base(), out_count());
+            write_pins(true, value, out_base(), out_count(), /*channel=*/true, inline_out_enable(value));
             break;
         case 0b101:  // PC
             pc = value & 0x1F;
@@ -685,9 +780,39 @@ inline void PioMachine::next_pc() noexcept {
     pc = pc == wrap_top() ? wrap_bottom() : ((pc + 1) & 0x1F);
 }
 
+// EXECCTRL.INLINE_OUT_EN: "use a bit of OUT data as an auxiliary write enable", the bit OUT_EN_SEL of the data an OUT instruction shifted out. Without the option every OUT write is enabled.
+inline bool PioMachine::inline_out_enable(uint32_t value) const noexcept {
+    if ((exec_ctrl & kExecInlineOutEn) == 0) return true;
+    return ((value >> ((exec_ctrl >> kExecOutEnSelLsb) & 0x1Fu)) & 1u) != 0;
+}
+
+// One write of `count` bits at `first_pin` to the pin levels or directions, through the arbitration of datasheet 3.5.6.1. `channel` is the OUT/SET (and MOV PINS) channel - the one
+// OUT_STICKY holds; the other is side-set. A write with `enable` false is a write with an empty mask: it asserts nothing, and (sticky) it replaces the held write.
+inline void PioMachine::write_pins(bool directions, uint32_t value, uint32_t first_pin, uint32_t count, bool channel, bool enable) noexcept {
+    PioPinWrite write;
+    write.valid = true;
+    write.directions = directions;
+    PioBlock::pin_mapping(value, first_pin, count, &write.mask, &write.data);
+    if (!enable) write.mask = 0;
+    if (!block->pin_routing()) {
+        block->apply_pin_write(directions, write.mask, write.data);
+        return;
+    }
+    if (channel) {
+        fresh_channel = write;
+        if (exec_ctrl & kExecOutSticky) held_write = write;
+    } else {
+        fresh_side = write;
+    }
+    if (!block->in_cycle) {  // a write outside a stepped cycle (SMx_INSTR, a woken machine): its own cycle
+        block->collate();
+        block->schedule_resolve();
+        block->recompute_due();
+    }
+}
+
 inline bool PioMachine::set_sideset(uint32_t value, uint32_t count) noexcept {
-    if (exec_ctrl & (1u << 29)) block->pin_directions_changed(value, sideset_base(), count);
-    else block->pin_values_changed(value, sideset_base(), count);
+    write_pins((exec_ctrl & (1u << 29)) != 0, value, sideset_base(), count, /*channel=*/false);
     return true;
 }
 
@@ -695,7 +820,7 @@ inline bool PioMachine::set_mov_destination(uint32_t destination, uint32_t value
     switch (destination) {
         case 0b000:
             out_pin_values = value;
-            block->pin_values_changed(value, out_base(), out_count());
+            write_pins(false, value, out_base(), out_count(), /*channel=*/true);
             break;
         case 0b001: x = value; break;
         case 0b010: y = value; break;
@@ -871,10 +996,10 @@ inline bool PioMachine::execute_one(uint32_t opcode) noexcept {
         case 0b111: {  // SET
             const uint32_t data = arg & 0x1F;
             const uint32_t destination = arg >> 5;
-            if (destination == 0b000) pio.pin_values_changed(data, set_base(), set_count());
+            if (destination == 0b000) write_pins(false, data, set_base(), set_count(), /*channel=*/true);
             else if (destination == 0b001) x = data;
             else if (destination == 0b010) y = data;
-            else if (destination == 0b100) pio.pin_directions_changed(data, set_base(), set_count());
+            else if (destination == 0b100) write_pins(true, data, set_base(), set_count(), /*channel=*/true);
             break;
         }
         default: break;  // an opcode wider than 16 bits (MOV EXEC / OUT EXEC of a 32-bit value) matches no instruction, as in the Python
@@ -983,6 +1108,7 @@ inline bool PioMachine::restart() noexcept {
     input_shift_reg = 0;
     waiting = false;
     exec_ctrl &= ~0x80000000u;  // EXEC_STALLED: "any stalled instruction written to SMx_INSTR or run by OUT/MOV EXEC" is cleared too
+    held_write = PioPinWrite();  // "any pin write left asserted due to OUT_STICKY" (SM_RESTART, datasheet CTRL)
     return true;
 }
 
@@ -1007,6 +1133,7 @@ inline bool PioMachine::reset() noexcept {
     pin_ctrl = 0x5u << 26;
     apply_fjoin();  // (the reset SHIFTCTRL joins nothing: both back to 4 deep, empty)
     out_pin_values = out_pin_direction = 0;
+    fresh_channel = fresh_side = held_write = PioPinWrite();
     waiting = false;
     wait_index = 0;
     wait_polarity = false;
@@ -1042,7 +1169,10 @@ inline bool PioMachine::write32(uint32_t offset, uint32_t value) noexcept {
             div_fp = (static_cast<int64_t>(clock_div_int ? clock_div_int : 65536u) << 8) | clock_div_frac;
             block->recompute_due();
             return true;
-        case SM0_EXECCTRL: exec_ctrl = (value & 0x7FFFFF9Fu) | (exec_ctrl & 0x80000000u); return true;  // 6:5 reserved, 31 read only
+        case SM0_EXECCTRL:
+            exec_ctrl = (value & 0x7FFFFF9Fu) | (exec_ctrl & 0x80000000u);  // 6:5 reserved, 31 read only
+            if ((exec_ctrl & kExecOutSticky) == 0) held_write = PioPinWrite();  // nothing is re-asserted without OUT_STICKY
+            return true;
         case SM0_SHIFTCTRL: {
             const uint32_t changed = (shift_ctrl ^ value) & ((1u << 31) | (1u << 30));
             shift_ctrl = value & 0xFFFF0000u;  // 15:0 reserved

@@ -59,6 +59,8 @@ jobs:
 
       - name: Run the suite (report only)
         continue-on-error: true
+        env:
+          PER_TEST_TIMEOUT: "90"  # a CI runner is slower than a workstation: the stochastic basics/class_setname_hazard_rand.py took longer than 45 s there
         run: |
           source .venv/bin/activate
           set -f  # the group's globs are for the script (relative to MicroPython's tests/), not for this shell

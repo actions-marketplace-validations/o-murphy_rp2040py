@@ -1,0 +1,35 @@
+# 0100. An integer time base for the simulation clock
+
+- Status: **Proposed - authorised by the maintainer on 2026-10-12, not started.** A cross-block change; the order below puts it after the XIP_CTRL port and before the USB port.
+- Conceived: 2026-10-12
+- Related: [0096](0096-cpp-mcu-core.md) (the C++ `Clock` and every block that schedules an alarm on it), [0098](0098-datasheet-conformance-audit.md) (the section "A limit found on the way", which found it).
+
+## The problem
+
+The simulation clock counts nanoseconds in a `double` (`Clock::now_`, the Python clocks' `nanos`, every alarm's due time). A `double` is exact for integers only up to 2^53 ns, about **104 days** of simulated time; beyond that its resolution is 16 ns, then 32 ns, ... so `now + 8 ns == now` and every delay shorter than the resolution is silently lost.
+
+It was found through MicroPython's own test `ports/rp2/rp2_dma.py`: it passes alone, in pairs with each earlier file and on a fresh emulator, and fails after the whole `extmod/machine_*` sequence. After those files `clock.nanos` is about `7.8e16` (2.5 years of simulated time: an earlier file leaves a very long idle jump behind), and a diagnostic print showed consecutive DMA transfers with `now == last` - the DMA's one-word-per-cycle schedule (`+8 ns`) collapsed to a single instant. The DMA is right; the time base is not. **Anything with a short delay is exposed**: UART and SPI frame times, the ROSC counter, PWM and TIMER ticks, PIO pacing.
+
+## The decision
+
+An **integer time base**: `int64` ticks in the C++ `Clock` (and the Cython `SimulationClock`) and in the Python clocks (`SimulationClock`, `MockClock`), instead of `double` nanoseconds. Fractional delays (a UART bit time, a pacing period, `1e9 / clk_sys`) are converted to ticks once, at the edge where a block schedules.
+
+**Order (decided 2026-10-12):** ROSC (done) -> IO_BANK0 + PADS_BANK0 -> XIP_CTRL -> **this** -> USB -> the gate review. The first two ports have almost no timers, so doing them on the old clock costs nothing; USB has the most time-driven alarms (SOF, packet delays) and should be ported on the new clock rather than converted afterwards.
+
+## To decide when it starts (not decided here)
+
+- **The unit.** It must hold years without overflow and represent the common periods exactly. `int64` picoseconds overflow after ~106 days (no better than the problem); 1/16 ns (62.5 ps) lasts ~18 years and makes a 125 MHz cycle exactly 128 ticks, but not 12 MHz; whole nanoseconds last 292 years but lose the sub-nanosecond periods (a 125 MHz cycle is 8 ns, a 48 MHz cycle 20.83 ns). Possibly nanoseconds in `int64` plus a sub-nanosecond remainder per alarm user. To be chosen by measuring what the blocks need.
+- **The public surface.** `clock.nanos`, `tick(delta)`, `schedule(alarm, delta)`, `nanos_to_next_alarm` are read by tests, oracles and every block; whether they keep their names (as floats, derived) or change.
+- **Rounding** of the fractional periods, and keeping the two implementations (Python reference and C++) identical to the last tick, since the oracles compare time.
+
+## Scope
+
+The C++ `Clock` and alarm list, `SimulationClock` (Cython) and the Python clocks; every `schedule()` caller (UART, SPI, ADC, DMA's `transfer_ns`, ROSC's COUNT, PWM, TIMER, WATCHDOG, RTC, PIO pacing, the batch loop's `delta_nanos`); the oracles' time snapshots; the benchmark (an A/B against the commit before - the clock is on the hot path).
+
+## Done when
+
+`ports/rp2/rp2_dma.py` passes in the full official-suite sequence; a test advances the clock past 2^53 ns and still resolves an 8 ns step; the oracles and the C++ checks pass on both builds; the benchmark is not slower beyond noise.
+
+## Progress log
+
+- 2026-10-12: proposed; authorised by the maintainer; ordered after XIP_CTRL and before USB. Nothing built.

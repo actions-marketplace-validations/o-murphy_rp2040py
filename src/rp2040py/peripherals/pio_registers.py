@@ -53,6 +53,8 @@ __all__ = (
     "RXF3",
     "SHIFTCTRL_AUTOPULL",
     "SHIFTCTRL_AUTOPUSH",
+    "SHIFTCTRL_FJOIN_RX",
+    "SHIFTCTRL_FJOIN_TX",
     "SHIFTCTRL_IN_SHIFTDIR",
     "SHIFTCTRL_OUT_SHIFTDIR",
     "SM0_ADDR",
@@ -136,6 +138,8 @@ FDEBUG_RXSTALL = 1 << 0
 SHIFTCTRL_AUTOPUSH = 1 << 16
 SHIFTCTRL_AUTOPULL = 1 << 17
 SHIFTCTRL_IN_SHIFTDIR = 1 << 18  # 1 = shift input shift register to right (data enters from left). 0 = to left
+SHIFTCTRL_FJOIN_TX = 1 << 30  # TX FIFO steals the RX FIFO's storage: 8 deep, the RX FIFO is disabled
+SHIFTCTRL_FJOIN_RX = 1 << 31  # RX FIFO steals the TX FIFO's storage: 8 deep, the TX FIFO is disabled
 SHIFTCTRL_OUT_SHIFTDIR = 1 << 19  # 1 = shift out of output shift register to right. 0 = to left
 
 # EXECCTRL bits

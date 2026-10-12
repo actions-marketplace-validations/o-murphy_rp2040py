@@ -75,31 +75,38 @@ struct PioHost {
         if (!(expr)) return false; \
     } while (0)
 
-// `utils/fifo.FIFO(4)` exactly: a ring whose start index survives reset() (reset clears only the count), push masks to 32 bits and is ignored when full,
-// pull on an empty FIFO returns 0.
+// `utils/fifo.FIFO(size)` exactly: a ring whose start index survives reset() (reset clears only the count), push masks to 32 bits and is ignored when full,
+// pull on an empty FIFO returns 0. The size is 4, or - with SHIFTCTRL.FJOIN (datasheet 3.5.3) - 8 for the FIFO that took the other's storage and 0 for the one that
+// gave it up (always both full and empty); `resize()` is what the reference's "replace the FIFO" is, a new empty ring.
 struct PioFifo {
-    static constexpr uint32_t kSize = 4;
-    uint32_t buffer[kSize] = {0, 0, 0, 0};
+    static constexpr uint32_t kMaxSize = 8;
+    uint32_t buffer[kMaxSize] = {0, 0, 0, 0, 0, 0, 0, 0};
+    uint32_t size = 4;
     uint32_t start = 0;
     uint32_t used = 0;
 
     bool empty() const noexcept { return used == 0; }
-    bool full() const noexcept { return used == kSize; }
+    bool full() const noexcept { return used == size; }
     void push(uint32_t value) noexcept {
-        if (used < kSize) {
-            buffer[(start + used) % kSize] = value;
+        if (used < size) {
+            buffer[(start + used) % size] = value;
             ++used;
         }
     }
     uint32_t pull() noexcept {
         if (used == 0) return 0;
         const uint32_t value = buffer[start];
-        start = (start + 1) % kSize;
+        start = (start + 1) % size;
         --used;
         return value;
     }
     uint32_t peek() const noexcept { return used != 0 ? buffer[start] : 0; }
     void reset() noexcept { used = 0; }
+    void resize(uint32_t new_size) noexcept {
+        size = new_size;
+        start = used = 0;
+        for (uint32_t i = 0; i < kMaxSize; ++i) buffer[i] = 0;
+    }
 };
 
 class PioBlock;
@@ -152,6 +159,7 @@ struct PioMachine {
     }
 
     // --- behaviour (defined after PioBlock, which they use) ---
+    inline void apply_fjoin() noexcept;
     inline bool update_dma_tx() noexcept;
     inline bool update_dma_rx() noexcept;
     inline bool write_fifo(uint32_t value) noexcept;
@@ -523,6 +531,12 @@ inline bool PioMachine::update_dma_tx() noexcept {
 inline bool PioMachine::update_dma_rx() noexcept {
     const PioHost& h = block->host();
     return h.dreq == nullptr || h.dreq(h.ctx, dreq_rx, !rx.empty());
+}
+
+inline void PioMachine::apply_fjoin() noexcept {
+    const bool join_rx = (shift_ctrl & (1u << 31)) != 0, join_tx = (shift_ctrl & (1u << 30)) != 0;
+    rx.resize(join_tx ? 0u : join_rx ? 8u : 4u);
+    tx.resize(join_rx ? 0u : join_tx ? 8u : 4u);
 }
 
 inline bool PioMachine::write_fifo(uint32_t value) noexcept {
@@ -988,8 +1002,7 @@ inline bool PioMachine::reset() noexcept {
     exec_ctrl = 0x1Fu << 12;
     shift_ctrl = 0b11u << 18;
     pin_ctrl = 0x5u << 26;
-    rx.reset();
-    tx.reset();
+    apply_fjoin();  // (the reset SHIFTCTRL joins nothing: both back to 4 deep, empty)
     out_pin_values = out_pin_direction = 0;
     waiting = false;
     wait_index = 0;
@@ -1027,7 +1040,18 @@ inline bool PioMachine::write32(uint32_t offset, uint32_t value) noexcept {
             block->recompute_due();
             return true;
         case SM0_EXECCTRL: exec_ctrl = (value & 0x7FFFFF9Fu) | (exec_ctrl & 0x80000000u); return true;  // 6:5 reserved, 31 read only
-        case SM0_SHIFTCTRL: shift_ctrl = value & 0xFFFF0000u; return true;  // 15:0 reserved
+        case SM0_SHIFTCTRL: {
+            const uint32_t changed = (shift_ctrl ^ value) & ((1u << 31) | (1u << 30));
+            shift_ctrl = value & 0xFFFF0000u;  // 15:0 reserved
+            if (changed) {  // FJOIN_RX / FJOIN_TX: "FIFOs are flushed when this bit is changed"
+                apply_fjoin();
+                RP2040PY_PIO_TRY(update_dma_rx());
+                RP2040PY_PIO_TRY(update_dma_tx());
+                RP2040PY_PIO_TRY(check_wait());  // a stalled PUSH / PULL may find its FIFO different
+                RP2040PY_PIO_TRY(block->check_interrupts());
+            }
+            return true;
+        }
         case SM0_ADDR: return true;  // read-only
         case SM0_INSTR:
             RP2040PY_PIO_TRY(execute_instruction(value & 0xFFFF));

@@ -491,7 +491,7 @@ Read: the instruction set (3.4.2-3.4.10: every encoding and operation), 3.5.1 (s
 - **A reset state machine had an OSR shift count of 0 (full);** "At reset, or upon CTRL_SM_RESTART assertion, ISR shift counter is set to 0 ..., and OSR to 32 (nothing left to be shifted out)". `restart()` already did; construction and `reset()` did not (pico-sdk's `pio_sm_init` restarts every machine, which hid it).
 - **`CTRL.SM_RESTART` left EXEC_STALLED set** ("any stalled instruction written to SMx_INSTR or run by OUT/MOV EXEC" is cleared).
 - **Reserved bits stuck:** SMx_EXECCTRL 6:5 and SMx_SHIFTCTRL 15:0 were stored (now 0x7FFFFF9F and 0xFFFF0000; EXEC_STALLED stays read only).
-- **Not implemented, in the backlog (features, not corrections):** **`SHIFTCTRL_FJOIN_TX` / `FJOIN_RX`** (the joined 8-deep FIFO; MicroPython's `PIO.JOIN_TX` / `JOIN_RX` need it - the bits are stored and ignored today), **`EXECCTRL_OUT_STICKY`, `INLINE_OUT_EN`, `OUT_EN_SEL`** (the existing TODO), the input synchroniser bypass effect.
+- **Not implemented, in the backlog (features, not corrections):** **`SHIFTCTRL_FJOIN_TX` / `FJOIN_RX`** (done 2026-10-12, see the section below), **`EXECCTRL_OUT_STICKY`, `INLINE_OUT_EN`, `OUT_EN_SEL`** (the existing TODO), the input synchroniser bypass effect.
 - **Left, deliberately:** autopull is done when the next OUT starts, not right after the OUT that reaches the threshold or "at any point between two OUTs when data arrives" (3.5.4.2), so the TX FIFO drains later than on silicon by up to one OUT; an OUT that finds the OSR exhausted pulls and shifts in the same cycle, where the datasheet stalls that cycle ("it cannot fill an empty OSR and OUT it on the same cycle"). The cycle counts of streaming programs are the same, FIFO levels read slightly high, and a change needs a design of its own (the pacing of `due` times, 0063).
 - Tests: `tests/test_pio_datasheet.py` (five cases on both implementations), `tests/cpp/test_pio.cpp` (one directed test, the register-mask checks updated). The PIO oracle has no logic mutants (it compares the two implementations only), so there are none to add.
 
@@ -617,7 +617,6 @@ None of these is a correction of the reference; each is missing behaviour, left 
 
 | Block | Missing | Why it matters |
 |---|---|---|
-| PIO | `SHIFTCTRL_FJOIN_TX` / `FJOIN_RX` (the bits are stored and ignored) | MicroPython's `PIO.JOIN_TX` / `JOIN_RX`; FSTAT/FLEVEL and the DREQs of the joined FIFO |
 | PIO | `EXECCTRL_OUT_STICKY`, `INLINE_OUT_EN`, `OUT_EN_SEL` (the existing TODO) | programs that rely on a sticky OUT or an inline output enable |
 | PIO | autopull at the OUT that reaches the threshold and between OUTs (3.5.4.2); today it happens when the next OUT starts | TX FIFO levels and DREQ timing read slightly high |
 | DMA | the sniffer (`SNIFF_CTRL`, `SNIFF_DATA`, `CTRL.SNIFF_EN`), `HIGH_PRIORITY` and arbitration, the error flags, the `DBG_CTDREQ` counter | CRC over a transfer; contention timing |
@@ -706,6 +705,14 @@ A word written to `SSPDR` used to be on the wire for no time: the device answere
 - **Not modelled, by the "never guess" rule:** the gap between words in the `SPH = 0` formats, where `SSPFSSOUT` is pulsed high between words (4.4.3.10: "must be pulsed HIGH between each data word transfer") - the datasheet gives its length only in a figure whose text could not be read - and the abort of a word in flight when `SSE` is cleared. Both are listed in `feature-coverage.md`.
 - The native SPI now needs the native `SimulationClock` (as the UART and ADC do); the oracle (`tests/utils/spi_diff.py`) gained a `tick` op, the frame state and the clock's alarms in its snapshot, and ten mutants of the frame logic, all caught.
 
+### PIO FIFO joining (3.5.3, SHIFTCTRL.FJOIN_TX / FJOIN_RX; done 2026-10-12, second of the two backlog features the maintainer released)
+
+The bits were stored and ignored, so MicroPython's `PIO.JOIN_TX` / `JOIN_RX` and every program that deepens one FIFO behaved as if it had four entries. Now, in the reference (`_state_machine.py`), the C++ machine (`PioFifo` got a runtime `size` and `resize()`) and the shell together:
+
+- `FJOIN_TX`: the TX FIFO is 8 deep and the RX FIFO is "disabled as a result (always reads as both full and empty)"; `FJOIN_RX` the mirror image; both bits make both unavailable. An unavailable FIFO is a FIFO of size 0, so everything else follows from the existing logic rather than from special cases: a `PUSH` / `PULL` that needs it stalls (and `NOBLOCK` drops), a TXF write is `TXOVER`, an RXF read is `RXUNDER`, `FSTAT` shows both flags, the DREQ is down, `TXNFULL` / `RXNEMPTY` are 0, and `FLEVEL` reads up to 8 for the deep one.
+- **"FIFOs are flushed when this bit is changed"**: a write that changes either FJOIN bit replaces both FIFOs with new empty ones, republishes the two DREQs, lets a stalled `PUSH` / `PULL` re-check its FIFO (a machine stalled on RX that is joined to RX goes on) and re-announces the interrupts. A write that leaves the bits as they were (AUTOPUSH changing, say) flushes nothing. A reset puts both back to four.
+- Verification: the PIO oracle now drives joins (random configuration writes and a scenario that joins, fills past four entries from both sides with `PUSH NOBLOCK` through `SMx_INSTR` and TXF writes, and drains), with coverage counts for each join kind and for FIFOs holding more than four; the C++ checks (`tests/cpp/test_pio.cpp`) and the chip-level `tests/test_pio_fjoin.py` run on both builds. The PIO oracle has no logic mutants; the C++ mutation pass over the new lines leaves only pre-existing unrelated survivors.
+
 ### Requirements of the features the model does not have (read 2026-10-12; **nothing implemented**)
 
 The chapters below describe behaviour the emulator has no model for, so there was no code to compare with. Reading them produced the list of what each would have to do; each is a backlog feature (CLAUDE.md: documenting is not implementing) and starts only on an explicit go-ahead.
@@ -732,3 +739,4 @@ The chapters below describe behaviour the emulator has no model for, so there wa
 - 2026-10-12: **Requirements recorded for the features the model does not have** (SSI FIFOs/interrupts/transfer modes outside XIP, I2C slave mode, bus clear, CLOCKS resus and clock enables): read against the datasheet, written down, nothing implemented; bus clear turned out to have no registers on this chip. This closes item 1 of "Not audited yet" except the SSI XIP streaming (with the XIP_CTRL port). Next: ROSC (0096).
 - 2026-10-12: **Cortex-M0+ system control and MPU registers** (`AIRCR` with the `SYSRESETREQ` hook, `SCR`, `CCR`, `SHCSR.SVCALLPENDED`, `MPU_*`; reserved bits of `VTOR`/`SHPR2`/`SHPR3`): see the section above. `SCR` and the MPU are stubs, listed as such.
 - 2026-10-12: **SPI transmitter time** (a word's `DSS + 1` bit clocks on the wire, the device's reply held to the frame's end; the `SPH = 0` inter-frame gap not modelled): see the section above.
+- 2026-10-12: **PIO FIFO joining** (`FJOIN_TX` / `FJOIN_RX`): see the section above. `OUT_STICKY`, `INLINE_OUT_EN`, `OUT_EN_SEL` are still open.

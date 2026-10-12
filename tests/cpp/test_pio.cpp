@@ -115,6 +115,18 @@ static void test_fifo_is_the_python_ring() {
     CHECK(f.empty() && f.start == 2);
     f.push(9);
     CHECK(f.buffer[2] == 9 && f.pull() == 9);
+    PioFifo h;  // resize() is "a new FIFO": empty, start 0, storage zero, the size as asked (0 stores nothing, 8 stores eight)
+    for (uint32_t i = 1; i <= 4; ++i) h.push(0xA0 + i);
+    h.pull();
+    h.resize(8);
+    CHECK(h.size == 8 && h.empty() && h.start == 0);
+    for (uint32_t i = 0; i < 8; ++i) CHECK(h.buffer[i] == 0);
+    for (uint32_t i = 1; i <= 9; ++i) h.push(i);
+    CHECK(h.full() && h.used == 8 && h.pull() == 1);
+    h.resize(0);
+    CHECK(h.size == 0 && h.empty() && h.full());
+    h.push(1);
+    CHECK(h.used == 0 && h.pull() == 0);
     PioFifo g;  // draining a FIFO completely does not move the start back to 0
     g.push(1);
     CHECK(g.pull() == 1 && g.start == 1 && g.empty());
@@ -502,6 +514,86 @@ static void test_fifo_registers_dreq_and_interrupts() {
     CHECK(r.pio.read(INTR) == (0x10u << 0 | 0x20 | 0x40 | 0x80) - 0x10);  // TX0 full, RX empty: only the other TX flags
 }
 
+static const uint32_t kFjoinTx = 1u << 30, kFjoinRx = 1u << 31;
+
+// SHIFTCTRL.FJOIN (datasheet 3.5.3): one FIFO takes the other's storage (8 deep), the other reads as both full and empty; changing the bits flushes both.
+static void test_fjoin_tx_makes_the_tx_fifo_eight_deep_and_the_rx_fifo_unavailable() {
+    Rig r;
+    CHECK(r.pio.write_atomic(SM0_SHIFTCTRL, kFjoinTx, kAtomicNormal));
+    CHECK(r.sm().tx.size == 8 && r.sm().rx.size == 0);
+    const uint32_t fstat = r.pio.read(FSTAT);
+    CHECK((fstat & (1u << 8)) && (fstat & 1u));  // RXEMPTY and RXFULL
+    CHECK((fstat & (1u << 24)) && !(fstat & (1u << 16)));  // TX empty, not full
+    for (uint32_t i = 0; i < 8; ++i) CHECK(r.pio.write_atomic(TXF0, 0x100 + i, kAtomicNormal));
+    CHECK(r.sm().tx.used == 8 && (r.pio.read(FSTAT) & (1u << 16)) && !(r.pio.fdebug & (1u << 16)));
+    CHECK((r.pio.read(FLEVEL) & 0xF) == 8);
+    r.host.count = 0;
+    CHECK(r.pio.write_atomic(TXF0, 0x999, kAtomicNormal));  // the ninth: TXOVER
+    CHECK(r.sm().tx.used == 8 && (r.pio.fdebug & (1u << 16)));
+    CHECK(r.pio.read(RXF0) == 0 && (r.pio.fdebug & (1u << 8)) && (r.pio.read(FLEVEL) & 0xF0) == 0);  // RXUNDER, always
+    r.exec(op(PUSHPULL, 0x00));                                  // PUSH NOBLOCK: nowhere to go
+    CHECK(r.sm().rx.used == 0 && !r.sm().waiting);
+    r.exec(op(PUSHPULL, 0x20));                                  // PUSH BLOCK: stalls for good
+    CHECK(r.sm().waiting);
+    for (uint32_t i = 0; i < 8; ++i) CHECK(r.pio.read(RXF0) == 0);
+    CHECK(r.sm().waiting);
+}
+
+static void test_fjoin_rx_makes_the_rx_fifo_eight_deep_and_the_tx_fifo_unavailable() {
+    Rig r;
+    CHECK(r.pio.write_atomic(SM0_SHIFTCTRL, kFjoinRx, kAtomicNormal));
+    CHECK(r.sm().rx.size == 8 && r.sm().tx.size == 0);
+    const uint32_t fstat = r.pio.read(FSTAT);
+    CHECK((fstat & (1u << 24)) && (fstat & (1u << 16)));  // TXEMPTY and TXFULL
+    CHECK((fstat & (1u << 8)) && !(fstat & 1u));          // RX empty, not full
+    CHECK(r.pio.write_atomic(TXF0, 0x55, kAtomicNormal) && r.sm().tx.used == 0 && (r.pio.fdebug & (1u << 16)));  // TXOVER: the FIFO is "full"
+    for (uint32_t i = 0; i < 8; ++i) r.exec(op(PUSHPULL, 0x00));
+    CHECK(r.sm().rx.used == 8 && (r.pio.read(FSTAT) & 1u) && ((r.pio.read(FLEVEL) >> 4) & 0xF) == 8);
+    r.exec(op(PUSHPULL, 0xA0));                                  // PULL BLOCK: the TX FIFO is empty for good
+    CHECK(r.sm().waiting);
+}
+
+static void test_fjoin_both_leaves_neither_fifo() {
+    Rig r;
+    CHECK(r.pio.write_atomic(SM0_SHIFTCTRL, kFjoinTx | kFjoinRx, kAtomicNormal));
+    CHECK(r.sm().tx.size == 0 && r.sm().rx.size == 0);
+    const uint32_t fstat = r.pio.read(FSTAT);
+    CHECK((fstat & 0x01010101u) == 0x01010101u);  // TXEMPTY | TXFULL | RXEMPTY | RXFULL of SM0
+}
+
+static void test_changing_fjoin_flushes_the_fifos_and_republishes_what_follows_from_them() {
+    Rig r;
+    r.pio.irq0_int_enable = 0xFFF;
+    for (uint32_t i = 0; i < 3; ++i) CHECK(r.pio.write_atomic(TXF0, i + 1, kAtomicNormal));
+    r.sm().rx.push(7);
+    r.host.count = 0;
+    CHECK(r.pio.write_atomic(SM0_SHIFTCTRL, kFjoinTx, kAtomicNormal));
+    CHECK(r.sm().tx.used == 0 && r.sm().rx.used == 0);          // both flushed
+    CHECK(r.host.has(kDreq, 0, 1) && r.host.has(kDreq, 4, 0));  // TX not full, the RX request down
+    CHECK(r.host.count_of(kIrq) >= 1);
+    CHECK(r.pio.write_atomic(TXF0, 9, kAtomicNormal));
+    CHECK(r.pio.write_atomic(SM0_SHIFTCTRL, kFjoinTx | (1u << 16), kAtomicNormal));  // the same FJOIN bits (AUTOPUSH changed): not a change, nothing flushed
+    CHECK(r.sm().tx.used == 1 && r.sm().tx.size == 8);
+    CHECK(r.pio.write_atomic(SM0_SHIFTCTRL, 0, kAtomicNormal));  // un-join: 4 deep again, flushed
+    CHECK(r.sm().tx.size == 4 && r.sm().rx.size == 4 && r.sm().tx.used == 0);
+}
+
+static void test_a_stalled_push_goes_on_when_its_fifo_appears() {
+    Rig r;
+    CHECK(r.pio.write_atomic(SM0_SHIFTCTRL, kFjoinTx, kAtomicNormal));
+    r.exec(op(PUSHPULL, 0x20));  // PUSH BLOCK on the unavailable RX FIFO
+    CHECK(r.sm().waiting);
+    CHECK(r.pio.write_atomic(SM0_SHIFTCTRL, kFjoinRx, kAtomicNormal));  // RX takes the storage: the push finds room
+    CHECK(!r.sm().waiting && r.sm().rx.used == 1);
+}
+
+static void test_reset_puts_the_fifos_back_to_four_deep() {
+    Rig r;
+    CHECK(r.pio.write_atomic(SM0_SHIFTCTRL, kFjoinRx, kAtomicNormal));
+    CHECK(r.sm().reset());
+    CHECK(r.sm().rx.size == 4 && r.sm().tx.size == 4 && r.sm().shift_ctrl == (0b11u << 18));
+}
+
 static void test_failures_stop_at_once_and_leave_the_state_updated() {
     Rig r;
     r.host.fail_on_dreq_call = r.host.dreq_calls;  // the next DREQ call fails
@@ -557,6 +649,12 @@ int main() {
     test_pacing_enable_restart_arrears();
     test_registers_aliases_and_warnings();
     test_fifo_registers_dreq_and_interrupts();
+    test_fjoin_tx_makes_the_tx_fifo_eight_deep_and_the_rx_fifo_unavailable();
+    test_fjoin_rx_makes_the_rx_fifo_eight_deep_and_the_tx_fifo_unavailable();
+    test_fjoin_both_leaves_neither_fifo();
+    test_changing_fjoin_flushes_the_fifos_and_republishes_what_follows_from_them();
+    test_a_stalled_push_goes_on_when_its_fifo_appears();
+    test_reset_puts_the_fifos_back_to_four_deep();
     test_failures_stop_at_once_and_leave_the_state_updated();
     test_reset_and_stop();
     test_a_sideset_count_above_five_is_clamped_not_undefined();

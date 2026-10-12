@@ -23,6 +23,8 @@ from rp2040py.peripherals.pio_registers import (
     FSTAT_TXFULL,
     SHIFTCTRL_AUTOPULL,
     SHIFTCTRL_AUTOPUSH,
+    SHIFTCTRL_FJOIN_RX,
+    SHIFTCTRL_FJOIN_TX,
     SHIFTCTRL_IN_SHIFTDIR,
     SHIFTCTRL_OUT_SHIFTDIR,
     SM0_ADDR,
@@ -104,6 +106,14 @@ class StateMachine:
 
         self._update_dma_rx()
         self._update_dma_tx()
+
+    def _apply_fjoin(self) -> None:
+        """SHIFTCTRL.FJOIN_RX / FJOIN_TX (datasheet 3.5.3): one FIFO steals the other's storage and becomes 8 deep, the other is "disabled as a result (always reads as both full and
+        empty)" - a FIFO of size 0 is exactly that, and the stalls, TXOVER / RXUNDER, FSTAT, the DREQs and the interrupts all follow from it. Setting both makes both unavailable.
+        "FIFOs are flushed when this bit is changed": both are replaced and what they held is gone."""
+        join_rx, join_tx = bool(self.shift_ctrl & SHIFTCTRL_FJOIN_RX), bool(self.shift_ctrl & SHIFTCTRL_FJOIN_TX)
+        self.rx_fifo = FIFO(0 if join_tx else 8 if join_rx else 4)
+        self.tx_fifo = FIFO(0 if join_rx else 8 if join_tx else 4)
 
     def _update_dma_tx(self) -> None:
         if self.tx_fifo.full:
@@ -659,7 +669,14 @@ class StateMachine:
             # bits 6:5 are reserved and 31 (EXEC_STALLED) is read only
             self.exec_ctrl = ((value & EXECCTRL_WRITE_MASK) | (self.exec_ctrl & 0x80000000)) & 0xFFFFFFFF
         elif absolute_offset == SM0_SHIFTCTRL:
+            changed = (self.shift_ctrl ^ value) & (SHIFTCTRL_FJOIN_RX | SHIFTCTRL_FJOIN_TX)
             self.shift_ctrl = value & SHIFTCTRL_WRITE_MASK  # 15:0 are reserved
+            if changed:
+                self._apply_fjoin()
+                self._update_dma_rx()
+                self._update_dma_tx()
+                self.check_wait()  # a stalled PUSH / PULL may find its FIFO different
+                self.pio.check_interrupts()  # the FIFO flags the interrupts follow
         elif absolute_offset == SM0_ADDR:
             pass  # read-only
         elif absolute_offset == SM0_INSTR:
@@ -714,8 +731,7 @@ class StateMachine:
         self.exec_ctrl = 0x1F << 12
         self.shift_ctrl = 0b11 << 18
         self.pin_ctrl = 0x5 << 26
-        self.rx_fifo.reset()
-        self.tx_fifo.reset()
+        self._apply_fjoin()  # (the reset SHIFTCTRL joins nothing: both back to 4 deep, empty)
         self.out_pin_values = 0
         self.out_pin_direction = 0
         self.waiting = False

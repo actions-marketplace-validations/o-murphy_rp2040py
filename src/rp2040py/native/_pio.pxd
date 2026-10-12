@@ -32,7 +32,8 @@ cdef extern from "pio.hpp" namespace "rp2040core":
         void* ctx
 
     cdef cppclass PioFifo:
-        uint32_t buffer[4]
+        uint32_t buffer[8]
+        uint32_t size
         uint32_t start
         uint32_t used
         cppbool empty() noexcept

@@ -217,6 +217,9 @@ def _machine_config(r: random.Random, pio: int, machine: int) -> list[tuple]:
         ops.append(("write", pio, R.SM0_EXECCTRL + base, execctrl, 0))
     elif which == 2:
         shiftctrl = (r.getrandbits(4) << 16) | (r.randrange(32) << 20) | (r.randrange(32) << 25)
+        shiftctrl |= r.choice(
+            (0,) * 16 + (1 << 30, 1 << 31, 3 << 30)
+        )  # FJOIN_TX / FJOIN_RX / both: the FIFOs change size and are flushed
         ops.append(("write", pio, R.SM0_SHIFTCTRL + base, shiftctrl, 0))
     else:
         pinctrl = (
@@ -224,6 +227,23 @@ def _machine_config(r: random.Random, pio: int, machine: int) -> list[tuple]:
             | (r.randrange(32) << 10) | (r.randrange(32) << 5) | r.randrange(30)
         )  # fmt: skip
         ops.append(("write", pio, R.SM0_PINCTRL + base, pinctrl, 0))
+    return ops
+
+
+def _fjoin_scenario(r: random.Random, pio: int, machine: int) -> list[tuple]:
+    """Joins (or un-joins) a machine's FIFOs, fills them past four entries from both sides - PUSH NOBLOCK executed through SMx_INSTR for RX, TXF writes for TX - and drains them with PULL
+    NOBLOCK and RXF reads, so that the 8-deep FIFOs and the disabled ones (TXOVER, RXUNDER, both full and empty) are all met."""
+    base = SM_STRIDE * machine
+    join = r.choice((1 << 30, 1 << 31, 1 << 30, 1 << 31, 3 << 30, 0))
+    ops: list[tuple] = [("write", pio, R.SM0_SHIFTCTRL + base, join | (r.getrandbits(4) << 16), 0)]
+    for _ in range(r.choice((5, 6, 9, 10))):
+        ops.append(("write", pio, R.SM0_INSTR + base, 0x8000, 0))  # PUSH NOBLOCK
+        ops.append(("write", pio, R.TXF0 + 4 * machine, r.getrandbits(32), 0))
+    ops.append(("read", pio, R.FSTAT))
+    ops.append(("read", pio, R.FLEVEL))
+    for _ in range(r.choice((5, 9))):
+        ops.append(("read", pio, R.RXF0 + 4 * machine))
+        ops.append(("write", pio, R.SM0_INSTR + base, 0x8080, 0))  # PULL NOBLOCK
     return ops
 
 
@@ -243,8 +263,10 @@ def generate(seed: int, steps: int) -> list[tuple]:
         if roll < 0.40:
             n = r.choice((1, 1, 1, 1, 2, 3, 4, 8, 16, 100, 2000, 600000))
             ops.append(("advance", pio, n))
-        elif roll < 0.48:
+        elif roll < 0.44:
             ops.extend(_machine_config(r, pio, machine))
+        elif roll < 0.48:
+            ops.extend(_fjoin_scenario(r, pio, machine))
         elif roll < 0.55:
             enable = r.getrandbits(4) if r.random() < 0.7 else 0xF
             restart = (r.getrandbits(4) << 4) if r.random() < 0.25 else 0
@@ -409,6 +431,12 @@ def coverage(ops: list[tuple]) -> dict[str, int]:
                     count("wait_pin", int(machine.waiting and int(machine.wait_type) == 1))
                     count("wait_irq", int(machine.waiting and int(machine.wait_type) == 4))
                     count("wait_fifo", int(machine.waiting and int(machine.wait_type) in (2, 3, 5)))
+                    join = (machine.shift_ctrl >> 30) & 3
+                    count("fjoin.tx", int(join == 1))
+                    count("fjoin.rx", int(join == 2))
+                    count("fjoin.both", int(join == 3))
+                    count("fjoin.tx_deep", int(machine.tx_fifo.item_count > 4))
+                    count("fjoin.rx_deep", int(machine.rx_fifo.item_count > 4))
     finally:
         _state_machine.StateMachine.execute_instruction = original  # type: ignore[method-assign]
     return counts

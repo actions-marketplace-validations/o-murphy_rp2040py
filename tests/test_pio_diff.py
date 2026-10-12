@@ -9,7 +9,7 @@ and pin traffic) - a green differential that never executed a WAIT would prove n
 import pytest
 from utils.pio_diff import Rig, coverage, generate, run_pair
 
-STEPS = 5000  # the coverage run (cheap: one chip, no snapshots)
+STEPS = 6500  # the coverage run (cheap: one chip, no snapshots)
 DIFF_STEPS = 3500  # the lockstep runs snapshot everything after every step, which is what costs
 SEEDS = range(1, 7)
 
@@ -62,7 +62,7 @@ def test_a_damaged_candidate_is_caught_where_it_was_damaged(perturb):
 
 def test_the_runs_exercise_what_they_claim_to():
     total: dict[str, int] = {}
-    for seed in (1, 2, 3, 4):
+    for seed in (1, 2, 3, 4, 5, 6):
         for name, count in coverage(generate(seed, STEPS)).items():
             total[name] = total.get(name, 0) + count
     for kind in range(8):
@@ -78,3 +78,5 @@ def test_the_runs_exercise_what_they_claim_to():
     assert total.get("log", 0) >= 50, total  # the warnings of unimplemented registers
     for wait in ("wait_pin", "wait_irq", "wait_fifo"):
         assert total.get(wait, 0) >= 50, (wait, total)
+    for name in ("fjoin.tx", "fjoin.rx", "fjoin.both", "fjoin.tx_deep", "fjoin.rx_deep"):
+        assert total.get(name, 0) >= 50, (name, total)

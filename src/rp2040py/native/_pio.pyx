@@ -123,7 +123,7 @@ cdef cppbool _started_trampoline(void* ctx) noexcept:
 # --- views of the C++ state -------------------------------------------------------------------------------------------------
 
 cdef class _FifoView:
-    """`utils/fifo.FIFO`'s interface over one C++ 4-entry FIFO."""
+    """`utils/fifo.FIFO`'s interface over one C++ FIFO (4 entries, or 8 / 0 with SHIFTCTRL.FJOIN)."""
     cdef PioFifo* _fifo
 
     def push(self, value):
@@ -140,7 +140,7 @@ cdef class _FifoView:
 
     @property
     def size(self):
-        return 4
+        return self._fifo.size
 
     @property
     def item_count(self):
@@ -156,11 +156,11 @@ cdef class _FifoView:
 
     @property
     def buffer(self):
-        return [self._fifo.buffer[i] for i in range(4)]
+        return [self._fifo.buffer[i] for i in range(self._fifo.size)]
 
     @property
     def items(self):
-        return [self._fifo.buffer[(self._fifo.start + i) % 4] for i in range(self._fifo.used)]
+        return [self._fifo.buffer[(self._fifo.start + i) % self._fifo.size] for i in range(self._fifo.used)]
 
 
 cdef _FifoView _fifo_view(PioFifo* fifo):

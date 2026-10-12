@@ -23,7 +23,7 @@ One place to see, block by block and datasheet section by section, what is model
 | ADC | Partial | Yes + second pass | Ported | `TS_EN` gating, SAR error flag |
 | PWM | Done | Yes | Ported | - |
 | DMA | Partial | Yes + second pass + the datasheet examples | Ported | sniffer, priority/arbitration, error flags, I2C/SSI DREQs, bus-cycle timing |
-| PIO0/1 | Partial | Yes + second pass | Ported | FJOIN, `OUT_STICKY`/`INLINE_OUT_EN`/`OUT_EN_SEL`, autopull timing |
+| PIO0/1 | Partial | Yes + second pass | Ported | `OUT_STICKY`/`INLINE_OUT_EN`/`OUT_EN_SEL`, autopull timing |
 | SSI (XIP flash controller) | Partial | Yes + second pass | Ported | a flash-command model: no own FIFOs, interrupts, `TMOD`; 21 of 28 registers are stubs |
 | CLOCKS | Partial | Yes + second pass | Python only | resus, clock enables / sleep, GPIN, the GPOUT clock outputs; 18 of 48 registers are stubs |
 | PLL | Partial | Yes | Python only | always locked |
@@ -117,7 +117,7 @@ Follows the datasheet's own table of contents (chapter.section), so a row is som
 | 3.3 | PIO assembler (`pioasm`) | n/a | an off-chip tool; the emulator runs assembled programs | - |
 | 3.4 | Instruction set (JMP, WAIT, IN, OUT, PUSH, PULL, MOV, IRQ, SET) | Done | | - |
 | 3.5.1, 3.5.2 | Side-set, program wrapping | Done | | - |
-| 3.5.3 | FIFO joining (`FJOIN_TX/RX`) | Missing | MicroPython `PIO.JOIN_TX` / `JOIN_RX`; the bits are stored and ignored | Go-ahead |
+| 3.5.3 | FIFO joining (`FJOIN_TX/RX`) | Done | 8-deep joined FIFO, the other reads full and empty (PUSH / PULL stall, TXOVER / RXUNDER, FSTAT, FLEVEL, DREQ, interrupts), both bits make both unavailable, a change flushes (0098) | - |
 | 3.5.4 | Autopush and autopull | Partial | the autopull happens when the next `OUT` starts, not at the `OUT` that reaches the threshold | Go-ahead |
 | 3.5.5 | Clock dividers | Done | | - |
 | 3.5.6 | GPIO mapping | Partial | `OUT_STICKY`, `INLINE_OUT_EN`, `OUT_EN_SEL` and the input synchroniser bypass are stored and ignored | Go-ahead |

@@ -50,7 +50,6 @@ PARTIAL: dict[str, dict[int, str]] = {
     },
     "PIO": {
         0x0CC: "SM0_EXECCTRL: OUT_STICKY, INLINE_OUT_EN, OUT_EN_SEL are stored and ignored",
-        0x0D0: "SM0_SHIFTCTRL: FJOIN_TX/FJOIN_RX are stored and ignored (no 8-deep joined FIFO)",
         0x038: "INPUT_SYNC_BYPASS has no effect",
     },
     "I2C": {0x000: "IC_CON: the slave bits (IC_SLAVE_DISABLE, IC_10BITADDR_SLAVE) do nothing: no slave mode"},

@@ -123,7 +123,7 @@ cdef class RPSSI:
         self._block.init(<uint8_t*> <size_t> flash_address, <uint32_t> flash_size, host)
         if isinstance(self._cs_pin, GPIOPin):
             pin = <GPIOPin> self._cs_pin
-            if not self._block.bind_cs(pin.bank_ptr()):
+            if not self._block.bind_cs(pin.bank_ptr(), pin._slot):
                 raise_if_pending()
             self._cs_native = True
             self._cs_listening = True

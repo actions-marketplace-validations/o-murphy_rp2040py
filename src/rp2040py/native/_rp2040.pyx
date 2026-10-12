@@ -36,6 +36,9 @@ from rp2040py.native._simulation_clock cimport SimulationClock
 
 from rp2040py.clock.clock import IClock
 from rp2040py.gpio_pin import GPIOPin
+from rp2040py.native._gpio_pin import GPIOPin as _NativeGPIOPin
+from rp2040py.native._gpio_pin import GPIOPinBank
+from rp2040py.native._pin_wiring import bind_pin_sources
 from rp2040py.irq import IRQ
 from rp2040py.memory_map import (
     APB_START_ADDRESS,
@@ -353,15 +356,25 @@ cdef class RP2040:
         self.pwm = RPPWM(self, "PWM_BASE")
         self.adc = RPADC(self, "ADC")
 
-        self.gpio = [GPIOPin(self, i) for i in range(30)]
+        # The chip's native pins share two C++ banks (30 GPIO pins, 6 QSPI pins): the IO_BANK0 / IO_QSPI / PADS windows work on them directly. The facade hands out the
+        # pure-Python pins instead when the native ones are switched off (RP2040PY_SKIP_CYTHON=1): those stand alone and the pure-Python windows go with them.
+        if GPIOPin is _NativeGPIOPin:
+            self._gpio_bank = GPIOPinBank(self, 30)
+            self._qspi_bank = GPIOPinBank(self, 6, True)
+            gpio_kwargs = {"bank": self._gpio_bank}
+            qspi_kwargs = {"bank": self._qspi_bank}
+        else:
+            gpio_kwargs = {}
+            qspi_kwargs = {"always_output_enabled": True}
+        self.gpio = [GPIOPin(self, i, **gpio_kwargs) for i in range(30)]
 
         self.qspi = [
-            GPIOPin(self, 0, "SCLK", always_output_enabled=True),
-            GPIOPin(self, 1, "SS", always_output_enabled=True),
-            GPIOPin(self, 2, "SD0", always_output_enabled=True),
-            GPIOPin(self, 3, "SD1", always_output_enabled=True),
-            GPIOPin(self, 4, "SD2", always_output_enabled=True),
-            GPIOPin(self, 5, "SD3", always_output_enabled=True),
+            GPIOPin(self, 0, "SCLK", **qspi_kwargs),
+            GPIOPin(self, 1, "SS", **qspi_kwargs),
+            GPIOPin(self, 2, "SD0", **qspi_kwargs),
+            GPIOPin(self, 3, "SD1", **qspi_kwargs),
+            GPIOPin(self, 4, "SD2", **qspi_kwargs),
+            GPIOPin(self, 5, "SD3", **qspi_kwargs),
         ]
         # GPIOPin's own constructor default is PADS_BANK0's reset value, which is wrong for this
         # bank: PADS_QSPI resets each pad differently (RP2040 datasheet 2.19.6.3), and the
@@ -447,6 +460,9 @@ cdef class RP2040:
             0x50200: self.pio[0],
             0x50300: self.pio[1],
         }
+
+        # The pins read the native SIO / PIO / PWM registers directly (no Python call per level evaluation)
+        self._bind_pin_sources()
 
         # Debugging
         self.on_break = self._default_on_break
@@ -734,6 +750,13 @@ cdef class RP2040:
         raise_if_pending()
         return word
 
+    def _bind_pin_sources(self):
+        """Points the chip's native pin banks at the registers of the native SIO / PIO / PWM blocks, where there are such (core/pin.hpp's direct sources); callable again whenever one is replaced."""
+        bank = getattr(self, "_gpio_bank", None)
+        if bank is not None:
+            bind_pin_sources(bank, self)
+            bind_pin_sources(self._qspi_bank, self)
+
     @property
     def sio(self):
         return self._sio
@@ -742,6 +765,7 @@ cdef class RP2040:
     def sio(self, value) -> None:
         self._sio = value
         self._bus.set_sio(self._direct_handler(value, True))
+        self._bind_pin_sources()
 
     @property
     def ppb(self):

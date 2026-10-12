@@ -69,8 +69,8 @@ cdef tuple _STATES = (
 # --- the C++ pin's host: what only Python can answer ----------------------------------------------------------------------
 
 cdef cppbool _source_trampoline(void* ctx, uint32_t source, uint32_t* out) noexcept:
-    cdef GPIOPin pin = <GPIOPin> ctx
-    cdef object rp = pin.rp2040
+    cdef GPIOPinBank owner = <GPIOPinBank> ctx
+    cdef object rp = owner.rp2040
     try:
         if source == kSrcSioOe:
             out[0] = <unsigned int> rp.sio.gpio_output_enable
@@ -99,8 +99,10 @@ cdef cppbool _source_trampoline(void* ctx, uint32_t source, uint32_t* out) noexc
 
 
 cdef cppbool _change_trampoline(void* ctx, uint32_t pin_index, int new_state, int old_state) noexcept:
-    cdef GPIOPin pin = <GPIOPin> ctx
+    cdef GPIOPinBank owner = <GPIOPinBank> ctx
+    cdef GPIOPin pin
     try:
+        pin = <GPIOPin> owner.shells[pin_index - owner.first]
         value = _STATES[new_state]
         last_value = _STATES[old_state]
         for listener in pin._listeners:
@@ -112,9 +114,9 @@ cdef cppbool _change_trampoline(void* ctx, uint32_t pin_index, int new_state, in
 
 
 cdef cppbool _io_interrupt_trampoline(void* ctx) noexcept:
-    cdef GPIOPin pin = <GPIOPin> ctx
+    cdef GPIOPinBank owner = <GPIOPinBank> ctx
     try:
-        pin.rp2040.update_io_interrupt()
+        owner.rp2040.update_io_interrupt()
     except BaseException as error:
         park_error(error)
         return False
@@ -122,8 +124,8 @@ cdef cppbool _io_interrupt_trampoline(void* ctx) noexcept:
 
 
 cdef cppbool _input_trampoline(void* ctx, uint32_t pin_index, cppbool function_is_pwm) noexcept:
-    cdef GPIOPin pin = <GPIOPin> ctx
-    cdef object rp = pin.rp2040
+    cdef GPIOPinBank owner = <GPIOPinBank> ctx
+    cdef object rp = owner.rp2040
     try:
         if function_is_pwm:
             rp.pwm.gpio_on_input(pin_index)
@@ -142,29 +144,82 @@ cdef cppbool _input_trampoline(void* ctx, uint32_t pin_index, cppbool function_i
     return True
 
 
-cdef class GPIOPin:
-    # Fields are declared in _gpio_pin.pxd (so native/_pio.pyx can cimport this class).
+cdef class GPIOPinBank:
+    """The C++ `PinBank` that a chip's pins share (30 GPIO pins, or the 6 QSPI pins): the pin state of all of them lives in one array, which the C++ IO_BANK0 / IO_QSPI / PADS
+    windows (`native/_io.pyx`, `native/_pads.pyx`) work on directly. Each `GPIOPin` is a view onto one slot of it. A `GPIOPin` built without a bank gets a private bank of one pin, so
+    a pin on its own (tests, a stand-in chip) behaves exactly as before.
+
+    The bank is the host of its pins: it answers for the sources of the level (`rp2040.sio`, `rp2040.pio[i]`, `rp2040.pwm` registers), the IO interrupt line and the PWM/PIO reactions
+    to an input change, and hands a pin's listeners their calls. It keeps the pin objects (`shells`) and whatever objects a C++ consumer's raw pointers point into (`_direct_refs`)
+    alive, as one reference cycle with them."""
 
     def __cinit__(self, *args, **kwargs):
-        self._pin = self._bank.pin_ptr(0)
+        self.shells = []
         self._direct_refs = []
 
-    def __init__(self, rp2040, unsigned int index, name=None, bint always_output_enabled=False):
+    def __init__(self, rp2040, unsigned int count, always_output_enabled=False, unsigned int first=0):
         cdef PinHost host
-        cdef cppbool always = always_output_enabled
+        cdef cppbool always[32]
+        cdef unsigned int i
+        if count < 1 or count > 32:
+            raise ValueError(f"a pin bank holds 1 to 32 pins, not {count}")
         self.rp2040 = rp2040
-        self.name = name if name is not None else str(index)
-        self._listeners = set()
-
+        self.first = first
+        self.shells = [None] * count
+        for i in range(count):
+            always[i] = bool(always_output_enabled)
         host.source = _source_trampoline
         host.on_change = _change_trampoline
         host.io_interrupt = _io_interrupt_trampoline
         host.input_changed = _input_trampoline
         host.ctx = <void*> self
-        # Mirrors the Python constructor's field-initializer ordering: the pin's `_last_state` is captured with ctrl = 0 and
+        # Mirrors the Python constructor's field-initializer ordering: each pin's `_last_state` is captured with ctrl = 0 and
         # pad_value = 0 *before* the real defaults are written (core/pin.hpp's init does exactly that).
-        if not self._bank.init(1, host, &always, index):
+        if not self._bank.init(count, host, always, first):
             raise_if_pending()
+
+    def __len__(self):
+        return self._bank.count()
+
+    def input_values(self):
+        """One bit per pin: what SIO's GPIO_IN returns."""
+        return self._bank.input_values()
+
+    def any_irq_value(self):
+        """Is any pin's IRQ value set: the level of the IO interrupt line."""
+        return bool(self._bank.any_irq_value())
+
+
+cdef class GPIOPin:
+    # Fields are declared in _gpio_pin.pxd (so native/_pio.pyx can cimport this class).
+
+    def __cinit__(self, *args, **kwargs):
+        self._direct_refs = []
+
+    def __init__(self, rp2040, unsigned int index, name=None, bint always_output_enabled=False, bank=None):
+        """`bank` is the shared `GPIOPinBank` this pin is a slot of (slot = `index` less the bank's first pin; the bank decides `always_output_enabled`); without one the pin gets a
+        private bank of its own."""
+        cdef GPIOPinBank owner
+        cdef unsigned int slot
+        if bank is None:
+            owner = GPIOPinBank(rp2040, 1, always_output_enabled, index)
+            slot = 0
+        else:
+            owner = <GPIOPinBank?> bank
+            if index < owner.first or index - owner.first >= len(owner.shells):
+                raise ValueError(f"pin {index} is not in the bank (pins {owner.first}..{owner.first + len(owner.shells) - 1})")
+            slot = index - owner.first
+            if owner.shells[slot] is not None:
+                raise ValueError(f"pin {index} of the bank already has an object")
+        self.rp2040 = rp2040
+        self.name = name if name is not None else str(index)
+        self._listeners = set()
+        self._owner = owner
+        self._bankp = &owner._bank
+        self._slot = slot
+        self._pin = owner._bank.pin_ptr(slot)
+        self._direct_refs = owner._direct_refs
+        owner.shells[slot] = self
 
     def reset(self, io=True, pads=True, pad_reset=0x56):
         """Return this pin's *registers* to their power-on values - `IO_BANK0.GPIOn_CTRL`,
@@ -188,21 +243,21 @@ cdef class GPIOPin:
         QSPI pads are the one exception this method cannot handle alone: `PADS_QSPI` has different
         per-pad reset values (record 0050), applied by `RP2040.__init__`/`RP2040.reset()` right
         after this call, the same way construction does it."""
-        if not self._bank.reset(0, bool(io), bool(pads), <unsigned int> pad_reset):
+        if not self._bankp.reset(self._slot, bool(io), bool(pads), <unsigned int> pad_reset):
             raise_if_pending()
 
     cdef bint add_direct_listener(self, PinChangeFn fn, void* ctx):
-        return self._bank.add_direct_listener(0, fn, ctx)
+        return self._bankp.add_direct_listener(self._slot, fn, ctx)
 
     cdef bint remove_direct_listener(self, PinChangeFn fn, void* ctx):
-        return self._bank.remove_direct_listener(0, fn, ctx)
+        return self._bankp.remove_direct_listener(self._slot, fn, ctx)
 
     cdef PinBank* bank_ptr(self):
-        return &self._bank
+        return self._bankp
 
     cpdef check_for_updates(self):
         # Announces a change of the pin's state to the listeners - once, recording it first (core/pin.hpp).
-        if not self._bank.check_for_updates(0):
+        if not self._bankp.check_for_updates(self._slot):
             raise_if_pending()
 
     # --- the pin's own fields, as properties over the C++ pin ----------------------------------------------------------------
@@ -291,7 +346,7 @@ cdef class GPIOPin:
 
     @property
     def raw_interrupt(self):
-        return bool(self._bank.raw_interrupt(0))
+        return bool(self._bankp.raw_interrupt(self._slot))
 
     @property
     def is_slew_fast(self):
@@ -344,83 +399,83 @@ cdef class GPIOPin:
     @property
     def raw_output_enable(self):
         cdef cppbool out = False
-        if not self._bank.raw_output_enable(0, self._pin.ctrl & 0x1F, &out):
+        if not self._bankp.raw_output_enable(self._slot, self._pin.ctrl & 0x1F, &out):
             raise_if_pending()
         return bool(out)
 
     @property
     def raw_output_value(self):
         cdef cppbool out = False
-        if not self._bank.raw_output_value(0, self._pin.ctrl & 0x1F, &out):
+        if not self._bankp.raw_output_value(self._slot, self._pin.ctrl & 0x1F, &out):
             raise_if_pending()
         return bool(out)
 
     @property
     def _effective_raw_input_value(self):
-        return bool(self._bank.eff_raw_input(0))
+        return bool(self._bankp.eff_raw_input(self._slot))
 
     @property
     def input_value(self):
-        return bool(self._bank.input_value(0))
+        return bool(self._bankp.input_value(self._slot))
 
     @property
     def irq_value(self):
-        return bool(self._bank.irq_value(0))
+        return bool(self._bankp.irq_value(self._slot))
 
     @property
     def output_enable(self):
         cdef cppbool out = False
-        if not self._bank.raw_output_enable(0, self._pin.ctrl & 0x1F, &out):
+        if not self._bankp.raw_output_enable(self._slot, self._pin.ctrl & 0x1F, &out):
             raise_if_pending()
         return bool(apply_override(out, (self._pin.ctrl >> 12) & 0x3))
 
     @property
     def output_value(self):
         cdef cppbool out = False
-        if not self._bank.raw_output_value(0, self._pin.ctrl & 0x1F, &out):
+        if not self._bankp.raw_output_value(self._slot, self._pin.ctrl & 0x1F, &out):
             raise_if_pending()
         return bool(apply_override(out, (self._pin.ctrl >> 8) & 0x3))
 
     @property
     def status(self):
         cdef uint32_t out = 0
-        if not self._bank.status(0, &out):
+        if not self._bankp.status(self._slot, &out):
             raise_if_pending()
         return out
 
     @property
     def value(self):
         cdef int code = 0
-        if not self._bank.state_code(0, &code):
+        if not self._bankp.state_code(self._slot, &code):
             raise_if_pending()
         return _STATES[code]
 
     # --- methods ----------------------------------------------------------------------------------------------------------
 
     def set_input_value(self, value):
-        if not self._bank.set_input_value(0, bool(value)):
+        if not self._bankp.set_input_value(self._slot, bool(value)):
             raise_if_pending()
 
     def release_input(self):
         """Mirrors _gpio_pin.py's own release_input() - hand the pad back to its pull resistor."""
-        if not self._bank.release_input(0):
+        if not self._bankp.release_input(self._slot):
             raise_if_pending()
 
     def _apply_input_value(self, value):
-        if not self._bank.apply_input_value(0, bool(value)):
+        if not self._bankp.apply_input_value(self._slot, bool(value)):
             raise_if_pending()
 
     def refresh_input(self):
-        if not self._bank.refresh_input(0):
+        if not self._bankp.refresh_input(self._slot):
             raise_if_pending()
 
     def pad_changed(self):
         """The pad register was written: if that moved the level the interrupt logic sees (IE, or a pull on a floating pin), it is an input change."""
-        if not self._bank.pad_changed(0):
+        if not self._bankp.pad_changed(self._slot):
             raise_if_pending()
 
     def update_irq_value(self, value):
-        if not self._bank.update_irq_value(0, <unsigned int> value):
+        if not self._bankp.update_irq_value(self._slot, <unsigned int> value):
             raise_if_pending()
 
     def add_listener(self, callback):

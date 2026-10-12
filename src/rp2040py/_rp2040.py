@@ -21,6 +21,8 @@ from rp2040py.peripherals._dma import (  # the pure chip's own DMA: the native o
     DREQChannel,
 )
 from rp2040py.peripherals._i2c import RPI2C  # the pure chip's own I2C: the native one is the native chip's
+from rp2040py.peripherals._io import RPIO
+from rp2040py.peripherals._pads import RPPADS
 from rp2040py.peripherals._ppb import RPPPB  # the pure chip's own PPB: the native one is the native chip's
 from rp2040py.peripherals._psm import (
     PSM_BITS_MASK,
@@ -77,8 +79,6 @@ from rp2040py.peripherals._vreg_and_chip_reset import RPVREGAndChipReset
 from rp2040py.peripherals._watchdog import RPWatchdog
 from rp2040py.peripherals._xosc import RPXOSC
 from rp2040py.peripherals.clocks import RPClocks, reset_clock_tree, update_clocks
-from rp2040py.peripherals.io import RPIO
-from rp2040py.peripherals.pads import RPPADS
 from rp2040py.peripherals.peripheral import Peripheral
 from rp2040py.peripherals.pio import RPPIO
 from rp2040py.peripherals.pll import RPPLL

@@ -213,8 +213,10 @@ public:
     }
 
     // A pin the block reads and updates directly (a C++ pin bank); a pin left unbound goes through the host.
-    void bind_pin(uint32_t gpio, PinBank* bank) noexcept {
-        if (gpio < kPioGpio) pins_[gpio] = bank;
+    void bind_pin(uint32_t gpio, PinBank* bank, uint32_t slot = 0) noexcept {
+        if (gpio >= kPioGpio) return;
+        pins_[gpio] = bank;
+        pin_slots_[gpio] = slot;
     }
 
     const PioHost& host() const noexcept { return host_; }
@@ -263,7 +265,7 @@ public:
             return true;
         }
         if (pins_[gpio] != nullptr) {
-            *level = pins_[gpio]->input_value(0);
+            *level = pins_[gpio]->input_value(pin_slots_[gpio]);
             return true;
         }
         *level = false;
@@ -307,7 +309,7 @@ public:
             while (((remaining >> gpio) & 1u) == 0) ++gpio;
             if (gpio < kPioGpio) {
                 if (pins_[gpio] != nullptr) {
-                    RP2040PY_PIO_TRY(pins_[gpio]->check_for_updates(0));
+                    RP2040PY_PIO_TRY(pins_[gpio]->check_for_updates(pin_slots_[gpio]));
                 } else if (host_.pin_update != nullptr) {
                     RP2040PY_PIO_TRY(host_.pin_update(host_.ctx, gpio));
                 }
@@ -490,7 +492,7 @@ public:
     // Used by the machines.
     bool update_pin(uint32_t gpio) noexcept {
         if (gpio >= kPioGpio) return true;
-        if (pins_[gpio] != nullptr) return pins_[gpio]->check_for_updates(0);
+        if (pins_[gpio] != nullptr) return pins_[gpio]->check_for_updates(pin_slots_[gpio]);
         return host_.pin_update == nullptr || host_.pin_update(host_.ctx, gpio);
     }
 
@@ -519,6 +521,7 @@ private:
     uint32_t first_irq_ = 0;
     uint32_t index_ = 0;
     PinBank* pins_[kPioGpio] = {};
+    uint32_t pin_slots_[kPioGpio] = {};  // each pin's position in its bank
 };
 
 // ======================================================================================================================================

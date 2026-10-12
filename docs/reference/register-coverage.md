@@ -637,7 +637,7 @@ Stubs in this block: BUS_PRIORITY, PERFSEL0-3 are stored and PERFCTR0-3 stay 0: 
 
 ## PADS_BANK0
 
-Stubs in this block: VOLTAGE_SELECT, SWCLK and SWD are stored (peripherals/pads.py): the voltage thresholds and the debug pads have no electrical model.
+Stubs in this block: VOLTAGE_SELECT, SWCLK and SWD are stored (core/pads.hpp): the voltage thresholds and the debug pads have no electrical model.
 
 | Offset | Register | Status | Note |
 |---|---|---|---|
@@ -648,7 +648,7 @@ Stubs in this block: VOLTAGE_SELECT, SWCLK and SWD are stored (peripherals/pads.
 
 ## PADS_QSPI
 
-Stubs in this block: VOLTAGE_SELECT is stored (peripherals/pads.py).
+Stubs in this block: VOLTAGE_SELECT is stored (core/pads.hpp).
 
 | Offset | Register | Status | Note |
 |---|---|---|---|

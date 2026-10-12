@@ -24,7 +24,7 @@ cdef extern from "ssi.hpp" namespace "rp2040core":
     cdef cppclass SsiBlock:
         SsiBlock() noexcept
         void init(uint8_t* flash, uint32_t flash_size, const SsiHost& host) noexcept
-        cppbool bind_cs(PinBank* bank) noexcept
+        cppbool bind_cs(PinBank* bank, uint32_t slot) noexcept
         void detach() noexcept
         void on_cs_change(cppbool low) noexcept
         cppbool reset() noexcept

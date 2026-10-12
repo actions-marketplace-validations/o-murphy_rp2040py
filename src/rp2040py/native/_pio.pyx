@@ -586,7 +586,7 @@ cdef class RPPIO:
             for i in range(30):
                 if isinstance(gpio[i], GPIOPin):
                     pin = <GPIOPin> gpio[i]
-                    self._block.bind_pin(i, pin.bank_ptr())
+                    self._block.bind_pin(i, pin.bank_ptr(), pin._slot)
                     self._pin_refs.append(pin)
         if not self._block.init(host, first_irq, index):
             raise_if_pending()

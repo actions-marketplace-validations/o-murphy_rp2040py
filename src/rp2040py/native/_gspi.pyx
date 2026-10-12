@@ -81,7 +81,7 @@ cdef class GspiShifter:
         host.on_word = _word_trampoline
         host.on_cs = _cs_trampoline
         host.ctx = <void*> self
-        if not self._core.attach(clk.bank_ptr(), data.bank_ptr(), cs.bank_ptr(), host):
+        if not self._core.attach(clk.bank_ptr(), data.bank_ptr(), cs.bank_ptr(), host, clk._slot, data._slot, cs._slot):
             raise RuntimeError("the CLK/CS pin has no room for another direct listener")
         self._attached = True
         # The pins call into this object by raw pointer: they keep it alive (and it keeps them alive - an ordinary reference cycle).

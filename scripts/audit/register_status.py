@@ -138,9 +138,9 @@ STUBS: dict[str, tuple[object, str]] = {
     "XOSC": ({0x1C}, "COUNT is loaded by a write but never counts down (peripherals/_xosc.py)"),
     "PADS_BANK0": (
         {0x00, 0x7C, 0x80},
-        "VOLTAGE_SELECT, SWCLK and SWD are stored (peripherals/pads.py): the voltage thresholds and the debug pads have no electrical model",
+        "VOLTAGE_SELECT, SWCLK and SWD are stored (core/pads.hpp): the voltage thresholds and the debug pads have no electrical model",
     ),
-    "PADS_QSPI": ({0x00}, "VOLTAGE_SELECT is stored (peripherals/pads.py)"),
+    "PADS_QSPI": ({0x00}, "VOLTAGE_SELECT is stored (core/pads.hpp)"),
     "USB": (
         {0x60, 0x64, 0x68, 0x6C, 0x70, 0x78},
         "EP_ABORT, EP_ABORT_DONE, EP_STALL_ARM, NAK_POLL, EP_STATUS_STALL_NAK and USB_PWR are stored in peripherals/usb.py and nothing reads them back for behaviour (found by a static scan; the block itself is not audited)",

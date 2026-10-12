@@ -33,8 +33,8 @@ One place to see, block by block and datasheet section by section, what is model
 | SYSCFG | Stub | Yes | Ported | only `PROC0_NMI_MASK` acts |
 | VREG_AND_CHIP_RESET | Partial | Yes | Ported | `VREG`, `BOD` are stored; `CHIP_RESET` acts |
 | BUSCTRL | Stub | Yes | Ported | no arbitration, no performance counters |
-| IO_BANK0 | Partial | Yes (phase 0 of the port) | Pins in C++, the register window in Python | `PROC1_*` / `DORMANT_WAKE_*` are stored and raise nothing (no core 1, no dormant); the pin bank is not shared yet (#29) |
-| PADS_BANK0 / PADS_QSPI / IO_QSPI | Partial | Yes (phase 0 of the port) | Python only | `VOLTAGE_SELECT` and `SWCLK` / `SWD` are stored; pad drive, slew and Schmitt have no electrical model |
+| IO_BANK0 | Partial | Yes | C++ (`core/io.hpp`) over the shared pin bank; also IO_QSPI, PADS_BANK0, PADS_QSPI (`core/pads.hpp`) | `PROC1_*` / `DORMANT_WAKE_*` are stored and raise nothing (no core 1, no dormant); the pad electrical model (drive, slew, Schmitt, `VOLTAGE_SELECT`) is absent; PIO pin-write arbitration (`OUT_STICKY`...) is not done |
+| PADS_BANK0 / PADS_QSPI / IO_QSPI | Partial | Yes | C++ (with IO_BANK0, above) | `VOLTAGE_SELECT` and `SWCLK` / `SWD` are stored; pad drive, slew and Schmitt have no electrical model |
 | XIP_CTRL | Stub | No | Python only | no cache, no streaming (record 0052); **Next** after IO_BANK0 |
 | USB controller + CDC host | Partial | No | Python only | host mode works; `USB_MUXING`, `USBPHY_*` absent; device mode unchecked |
 

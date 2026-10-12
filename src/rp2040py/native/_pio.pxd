@@ -97,7 +97,7 @@ cdef extern from "pio.hpp" namespace "rp2040core":
         int32_t stopped
         int64_t cycle_fp, next_due_fp, backlog_drops, raw_write_value
         cppbool init(const PioHost& host, uint32_t first_irq, uint32_t index) noexcept
-        void bind_pin(uint32_t gpio, PinBank* bank) noexcept
+        void bind_pin(uint32_t gpio, PinBank* bank, uint32_t slot) noexcept
         uint32_t int_raw() noexcept
         uint32_t irq0_int_status() noexcept
         uint32_t irq1_int_status() noexcept

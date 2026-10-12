@@ -79,6 +79,11 @@ class Rig:
         new = factory(chip, "PWM_BASE")
         chip.pwm = new
         chip.peripherals[PWM_BASE >> 12] = new
+        rebind = getattr(
+            chip, "_bind_pin_sources", None
+        )  # the native chip's pins read the blocks they were wired to at construction
+        if rebind is not None:
+            rebind()
         new.reset()
 
     def _tap(self) -> None:

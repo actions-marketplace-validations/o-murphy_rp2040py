@@ -89,11 +89,12 @@ public:
         host_ = host;
     }
 
-    // Binds the block to the chip-select pin (position 0 of its bank) and syncs the chip-select flag from the pin's level now. False if the listener table is
+    // Binds the block to the chip-select pin (at `slot` of its bank) and syncs the chip-select flag from the pin's level now. False if the listener table is
     // full or the level could not be read.
-    bool bind_cs(PinBank* bank) noexcept {
+    bool bind_cs(PinBank* bank, uint32_t slot = 0) noexcept {
         bank_ = bank;
-        if (!bank_->add_direct_listener(0, &SsiBlock::cs_listener, this, &SsiBlock::on_bank_gone)) {
+        slot_ = slot;
+        if (!bank_->add_direct_listener(slot_, &SsiBlock::cs_listener, this, &SsiBlock::on_bank_gone)) {
             bank_ = nullptr;
             return false;
         }
@@ -102,7 +103,7 @@ public:
 
     // Unregisters from the pin; the owner calls it before the block (or the pin) goes away.
     void detach() noexcept {
-        if (bank_ != nullptr) bank_->remove_direct_listener(0, &SsiBlock::cs_listener, this);
+        if (bank_ != nullptr) bank_->remove_direct_listener(slot_, &SsiBlock::cs_listener, this);
         bank_ = nullptr;
     }
 
@@ -230,7 +231,7 @@ private:
     bool resync_cs() noexcept {
         if (bank_ != nullptr) {
             int code = 0;
-            if (!bank_->state_code(0, &code)) return false;
+            if (!bank_->state_code(slot_, &code)) return false;
             cs_asserted_ = code == kPinLow;
         } else if (host_.cs_low != nullptr) {
             bool low = false;
@@ -326,6 +327,7 @@ private:
     uint32_t flash_size_ = 0;
     SsiHost host_;
     PinBank* bank_ = nullptr;
+    uint32_t slot_ = 0;  // the chip-select pin's position in its bank
     uint32_t ctrlr0_ = 0, ctrlr1_ = 0, ssienr_ = 0, baudr_ = 0, txflr_ = 0, spictrl0_ = ssi_regs::SPI_CTRLR0_RESET, rxsampdly_ = 0, txddriveedge_ = 0;
     uint32_t stored_[ssi_regs::kStoredCount] = {};
     bool write_enabled_ = false;

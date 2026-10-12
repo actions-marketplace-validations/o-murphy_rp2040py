@@ -50,7 +50,8 @@ UNIMPLEMENTED = (
     (PADS_BANK0, 0x100),
     (PADS_QSPI, 0x1C),
     (PADS_QSPI, 0x7C),
-)  # (PADS_QSPI, 0x7C) is bank0's SWCLK: not a QSPI pad
+    (PADS_QSPI, 0x80),
+)  # (PADS_QSPI, 0x7C) and 0x80 are bank0's SWCLK and SWD: not QSPI pads
 BLOCKS = (
     (IO_BANK0, IO0_OFFSETS, GPIO_PINS),
     (IO_QSPI, IOQ_OFFSETS, QSPI_PINS),
@@ -83,7 +84,9 @@ class _PioProbe:
 class Rig:
     """One chip plus the timestamped log of everything that left its pins."""
 
-    def __init__(self, kind: str, factory: "Callable[..., Any] | None" = None) -> None:
+    def __init__(
+        self, kind: str, factory: "Callable[..., Any] | None" = None, windows: "tuple[Any, Any] | None" = None
+    ) -> None:
         self.kind = kind
         self.chip = RP2040()
         self.log: list[tuple] = []
@@ -93,10 +96,15 @@ class Rig:
         if kind in ("pure", "mutant"):
             pin_class = G.GPIOPin if kind == "pure" else factory
             assert pin_class is not None
-            self._replace_the_pins(pin_class)
+            self._replace_the_pins(pin_class, windows)
+        else:
+            # the PWM and the PIOs just became probes: the native pins must read those, not the blocks they were wired to at construction
+            rebind = getattr(chip, "_bind_pin_sources", None)
+            if rebind is not None:
+                rebind()
         self._tap()
 
-    def _replace_the_pins(self, pin_class: Callable[..., Any]) -> None:
+    def _replace_the_pins(self, pin_class: Callable[..., Any], windows: "tuple[Any, Any] | None" = None) -> None:
         """Both banks' pins, as the chip builds them (the QSPI pins always output-enabled, with the pad resets of record 0050)."""
         from rp2040py.qspi_pads import QSPI_PAD_RESET_VALUES
 
@@ -107,6 +115,21 @@ class Rig:
             pin = pin_class(chip, index, name=chip.qspi[index].name, always_output_enabled=True)
             pin.reset(io=False, pad_reset=QSPI_PAD_RESET_VALUES[index])
             chip.qspi[index] = pin
+        # ... and the pure-Python register windows over them: the facade's would be the native ones, which work on the native pin bank
+        from rp2040py.peripherals import _io, _pads
+
+        if windows is not None:  # the modules of a mutant of the reference windows
+            _io, _pads = windows
+
+        for attribute, base, window in (
+            ("io_bank0", 0x40014000, lambda: _io.RPIO(chip, "IO_BANK0_BASE")),
+            ("io_qspi", 0x40018000, lambda: _io.RPIO(chip, "IO_QSPI_BASE", pins=chip.qspi)),
+            ("pads_bank0", 0x4001C000, lambda: _pads.RPPADS(chip, "PADS_BANK0_BASE", "bank0")),
+            ("pads_qspi", 0x40020000, lambda: _pads.RPPADS(chip, "PADS_QSPI_BASE", "qspi")),
+        ):
+            new = window()
+            setattr(chip, attribute, new)
+            chip.peripherals[base >> 12] = new
 
     def _tap(self) -> None:
         chip, log = self.chip, self.log
@@ -159,6 +182,8 @@ class Rig:
             self._pins(op[1])[op[2]].reset(io=bool(op[3]), pads=bool(op[4]))
         elif kind == "io_reset":
             (chip.io_bank0 if op[1] == 0 else chip.io_qspi).reset()
+        elif kind == "pads_reset":
+            (chip.pads_bank0 if op[1] == 0 else chip.pads_qspi).reset()
         else:
             raise ValueError(f"unknown op {op!r}")
         return None
@@ -191,6 +216,8 @@ class Rig:
         out: dict[str, Any] = {}
         for bank, pins in (("gpio", chip.gpio), ("qspi", chip.qspi)):
             out[bank] = tuple(self._pin_state(pin) for pin in pins)
+        for pads in (chip.pads_bank0, chip.pads_qspi):
+            out[f"pads.{pads.name}"] = (int(pads.voltage_select), int(pads.swclk), int(pads.swd))
         for block in (chip.io_bank0, chip.io_qspi):
             out[f"extra.{block.name}"] = tuple(tuple(masks) for dest in (1, 2) for masks in block._extra[dest])
         for base, offsets, _count in BLOCKS:
@@ -262,7 +289,52 @@ MUTATIONS: dict[str, tuple[str, str, int]] = {
     "update_irq_edge_low_silent": ("            self.irq_status &= ~IRQ_EDGE_LOW\n            self.rp2040.update_io_interrupt()\n", "            self.irq_status &= ~IRQ_EDGE_LOW\n", 1),
 }  # fmt: skip
 
-MUTANTS = tuple(MUTATIONS)
+# The reference's register windows (`peripherals/_io.py`, `_pads.py`) the same way: name -> (module, exact text, replacement, count).
+WINDOW_MUTATIONS: dict[str, tuple[str, str, str, int]] = {
+    "io_ctrl_mask_wider": ("io", "CTRL_MASK = 0x3003331F", "CTRL_MASK = 0x3003337F", 1),
+    "io_ctrl_write_silent": ("io", "                gpio.ctrl = value & CTRL_MASK\n                gpio.check_for_updates()\n", "                gpio.ctrl = value & CTRL_MASK\n", 1),
+    "io_status_write_reaches_ctrl": ("io", "            if is_ctrl:\n                gpio.ctrl = value & CTRL_MASK\n                gpio.check_for_updates()\n            return", "            gpio.ctrl = value & CTRL_MASK\n            gpio.check_for_updates()\n            return", 1),
+    "io_ctrl_status_swapped": ("io", "return gpio.ctrl if is_ctrl else gpio.status", "return gpio.status if is_ctrl else gpio.ctrl", 1),
+    "io_ctrl_flag_inverted": ("io", "return self.pins[gpio_index], bool(offset & 0x4)", "return self.pins[gpio_index], not offset & 0x4", 1),
+    "io_bank0_intr_moved": ("io", '("intr", None, 0x0F0)', '("intr", None, 0x0F4)', 1),
+    "io_bank0_ints_moved": ("io", '("ints", 0, 0x120)', '("ints", 0, 0x124)', 1),
+    "io_bank0_dormant_inte_moved": ("io", '("inte", 2, 0x160)', '("inte", 2, 0x168)', 1),
+    "io_qspi_intr_moved": ("io", '("intr", None, 0x30)', '("intr", None, 0x34)', 1),
+    "io_qspi_proc1_intf_moved": ("io", '("intf", 1, 0x44)', '("intf", 1, 0x48)', 1),
+    "io_qspi_dormant_ints_moved": ("io", '("ints", 2, 0x54)', '("ints", 2, 0x50)', 1),
+    "io_words_rounded_down": ("io", "(len(self.pins) + PINS_PER_WORD - 1) // PINS_PER_WORD", "len(self.pins) // PINS_PER_WORD", 1),
+    "io_ints_without_force": ("io", "(pin.irq_status & enable) | force", "pin.irq_status & enable", 1),
+    "io_ints_without_enable": ("io", "(pin.irq_status & enable) | force", "pin.irq_status | force", 1),
+    "io_intr_written_by_the_nibble": ("io", "(self.raw_write_value >> (slot * 4)) & 0xF", "nibble", 1),
+    "io_ints_writable": ("io", '            elif kind == "ints":\n                continue  # read only\n', "", 1),
+    "io_inte_silent": ("io", "                    pin.irq_enable_mask = nibble\n                    self.rp2040.update_io_interrupt()\n", "                    pin.irq_enable_mask = nibble\n", 1),
+    "io_intf_silent": ("io", "                    pin.irq_force_mask = nibble\n                    self.rp2040.update_io_interrupt()\n", "                    pin.irq_force_mask = nibble\n", 1),
+    "io_inte_always_announces": ("io", 'if kind == "inte" and pin.irq_enable_mask != nibble:', 'if kind == "inte":', 1),
+    "io_intf_always_announces": ("io", 'elif kind == "intf" and pin.irq_force_mask != nibble:', 'elif kind == "intf":', 1),
+    "io_extra_enable_force_swapped": ("io", '[0 if kind == "inte" else 1][index] = nibble', '[1 if kind == "inte" else 0][index] = nibble', 1),
+    "io_extra_dormant_is_proc1": ("io", "self._extra[dest][", "self._extra[1][", 1),
+    "io_reset_keeps_force": ("io", "enable[index] = force[index] = 0", "enable[index] = 0", 1),
+    "io_reset_keeps_enable": ("io", "enable[index] = force[index] = 0", "force[index] = 0", 1),
+    "io_word_overruns": ("io", "if index >= len(self.pins):\n                break\n            pin = self.pins[index]\n            if kind", "if index >= len(self.pins) + 1:\n                break\n            pin = self.pins[index % len(self.pins)]\n            if kind", 1),
+    "io_unaligned_group_access": ("io", "located = self._locate(offset) if not offset & 3 else None\n        if located is None:\n            return super().read_uint32(offset)", "located = self._locate(offset)\n        if located is None:\n            return super().read_uint32(offset)", 1),
+    "pads_mask_wider": ("pads", "PAD_MASK = 0xFF", "PAD_MASK = 0x1FF", 1),
+    "pads_write_silent": ("pads", "            gpio.check_for_updates()\n            gpio.pad_changed()", "            gpio.pad_changed()", 1),
+    "pads_write_never_moves_the_level": ("pads", "            gpio.check_for_updates()\n            gpio.pad_changed()", "            gpio.check_for_updates()", 1),
+    "pads_qspi_in_pin_order": ("pads", "_QSPI_PAD_TO_PIN = (0, 2, 3, 4, 5, 1)", "_QSPI_PAD_TO_PIN = (0, 1, 2, 3, 4, 5)", 1),
+    "pads_voltage_select_unmasked": ("pads", "self.voltage_select = value & 1", "self.voltage_select = value", 1),
+    "pads_swclk_reset_wrong": ("pads", "SWCLK_RESET = 0xDA", "SWCLK_RESET = 0x5A", 1),
+    "pads_swd_reset_wrong": ("pads", "SWD_RESET = 0x5A", "SWD_RESET = 0xDA", 1),
+    "pads_reset_keeps_swd": ("pads", "        self.swd = SWD_RESET\n\n    def get_pin", "\n    def get_pin", 1),
+    "pads_reset_keeps_swclk": ("pads", "        self.swclk = SWCLK_RESET\n        self.swd = SWD_RESET\n\n    def get_pin", "        self.swd = SWD_RESET\n\n    def get_pin", 1),
+    "pads_reset_keeps_voltage_select": ("pads", "        self.voltage_select = 0\n        self.swclk = SWCLK_RESET\n        self.swd = SWD_RESET\n\n    def get_pin", "        self.swclk = SWCLK_RESET\n        self.swd = SWD_RESET\n\n    def get_pin", 1),
+    "pads_last_gpio_pad_lost": ("pads", "GPIO_LAST = 0x78", "GPIO_LAST = 0x74", 1),
+    "pads_last_qspi_pad_lost": ("pads", "QSPI_LAST = 0x18", "QSPI_LAST = 0x14", 1),
+    "pads_debug_pads_in_qspi": ("pads", 'self.bank == "bank0" and offset == SWCLK', "offset == SWCLK", 2),
+    "pads_debug_pad_swd_in_qspi": ("pads", 'self.bank == "bank0" and offset == SWD', "offset == SWD", 2),
+    "pads_read_gives_another_pad": ("pads", "            gpio = self.get_pin_from_offset(offset)\n            return gpio.pad_value", "            gpio = self.get_pin_from_offset(offset + 4)\n            return gpio.pad_value", 1),
+}  # fmt: skip
+
+MUTANTS = tuple(MUTATIONS) + tuple(WINDOW_MUTATIONS)
 
 
 def _mutant_module(name: str) -> types.ModuleType:
@@ -276,8 +348,25 @@ def _mutant_module(name: str) -> types.ModuleType:
     return module
 
 
+def _window_modules(name: str) -> "tuple[types.ModuleType, types.ModuleType]":
+    """`_io` and `_pads` with one expression of the named mutant changed (the other module as it is)."""
+    from rp2040py.peripherals import _io, _pads
+
+    which, old, new, count = WINDOW_MUTATIONS[name]
+    original = _io if which == "io" else _pads
+    source = inspect.getsource(original)
+    assert source.count(old) == count, (
+        f"{name}: {old!r} occurs {source.count(old)} times in _{which}.py, expected {count}"
+    )
+    module = types.ModuleType(f"rp2040py.peripherals._{which}_mutant_{name}")
+    exec(compile(source.replace(old, new), f"<_{which} mutant {name}>", "exec"), module.__dict__)  # noqa: S102 - the point of the exercise
+    return (module, _pads) if which == "io" else (_io, module)
+
+
 def mutant_rig(name: str) -> Rig:
-    """A rig whose pins are the pure-Python ones with one expression changed, to prove the comparison sees a change of *logic*."""
+    """A rig whose pins (or register windows) are the pure-Python ones with one expression changed, to prove the comparison sees a change of *logic*."""
+    if name in WINDOW_MUTATIONS:
+        return Rig("mutant", G.GPIOPin, windows=_window_modules(name))
     return Rig("mutant", _mutant_module(name).GPIOPin)
 
 
@@ -390,7 +479,7 @@ def generate(seed: int, steps: int) -> list[tuple]:
                 )
             )
         else:
-            ops.append(("io_reset", r.randrange(2)))
+            ops.append((r.choice(("io_reset", "pads_reset")), r.randrange(2)))
     return ops[:steps]
 
 

@@ -5,10 +5,18 @@
 # check_for_updates() as a direct C call (once per changed pin, millions of times during a CYW43
 # boot) instead of an object-typed method dispatch.
 #
-# The pin's own state lives in a C++ `PinBank` of one pin (core/pin.hpp); everything below the two
-# public objects is that bank and a pointer to its only pin.
+# The pins' state lives in a C++ `PinBank` (core/pin.hpp), shared by a chip's pins (`GPIOPinBank`); a pin on its own gets a bank of one. Each
+# `GPIOPin` is a view onto one slot of it (the bank, its slot and a pointer to the C++ pin).
 
 from rp2040py.native._pin cimport Pin, PinBank, PinChangeFn
+
+cdef class GPIOPinBank:
+    cdef PinBank _bank
+    cdef public object rp2040
+    cdef public list shells
+    cdef public list _direct_refs
+    cdef public unsigned int first
+
 
 cdef class GPIOPin:
     cdef public object rp2040
@@ -17,7 +25,9 @@ cdef class GPIOPin:
     # Python objects a C++ consumer registered on this pin points into (the shifter itself, the PIO/SIO objects whose registers it reads
     # directly): the pin keeps them alive for as long as it can call them.
     cdef public list _direct_refs
-    cdef PinBank _bank
+    cdef GPIOPinBank _owner
+    cdef PinBank* _bankp
+    cdef public unsigned int _slot
     cdef Pin* _pin
 
     cpdef check_for_updates(self)

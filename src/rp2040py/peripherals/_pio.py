@@ -322,7 +322,20 @@ class RPPIO(BasePeripheral):
             self.irq |= value & 0xFF  # IRQ_FORCE and IRQ have eight bits (3.7: 7:0, the rest reserved)
             self.irq_updated()
 
-        elif offset in (FSTAT, FLEVEL, RXF0, RXF1, RXF2, RXF3, DBG_PADOUT, DBG_PADOE, DBG_CFGINFO, INTR, IRQ0_INTS, IRQ1_INTS):
+        elif offset in (
+            FSTAT,
+            FLEVEL,
+            RXF0,
+            RXF1,
+            RXF2,
+            RXF3,
+            DBG_PADOUT,
+            DBG_PADOE,
+            DBG_CFGINFO,
+            INTR,
+            IRQ0_INTS,
+            IRQ1_INTS,
+        ):
             return  # read only (tables 371-387): a write is ignored, silently, as for the other read-only registers
 
         elif offset == IRQ0_INTE:

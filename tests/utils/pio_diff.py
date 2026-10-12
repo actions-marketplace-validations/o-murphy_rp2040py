@@ -257,7 +257,9 @@ def generate(seed: int, steps: int) -> list[tuple]:
         elif roll < 0.75:
             ops.append(("write", pio, R.IRQ, r.getrandbits(8), r.choice(ALIASES)))
         elif roll < 0.78:
-            ops.append(("write", pio, R.IRQ_FORCE, r.getrandbits(8 if r.random() < 0.6 else 32), 0))  # the reserved bits 31:8 included
+            ops.append(
+                ("write", pio, R.IRQ_FORCE, r.getrandbits(8 if r.random() < 0.6 else 32), 0)
+            )  # the reserved bits 31:8 included
         elif roll < 0.81:
             ops.append(
                 (
@@ -285,7 +287,21 @@ def generate(seed: int, steps: int) -> list[tuple]:
                 (
                     "write",
                     pio,
-                    r.choice((0x1F0, 0x2F0, R.DBG_PADOUT, R.DBG_PADOE, R.DBG_CFGINFO, R.FSTAT, R.FLEVEL, R.INTR, R.IRQ0_INTS, R.IRQ1_INTS, R.RXF0 + 4 * machine)),
+                    r.choice(
+                        (
+                            0x1F0,
+                            0x2F0,
+                            R.DBG_PADOUT,
+                            R.DBG_PADOE,
+                            R.DBG_CFGINFO,
+                            R.FSTAT,
+                            R.FLEVEL,
+                            R.INTR,
+                            R.IRQ0_INTS,
+                            R.IRQ1_INTS,
+                            R.RXF0 + 4 * machine,
+                        )
+                    ),
                     r.getrandbits(32),
                     r.choice(ALIASES),
                 )

@@ -219,7 +219,7 @@ class RP2040RTC(BasePeripheral):
 
     def check_interrupts(self) -> None:
         raw = self.raw_interrupt
-        self.rp2040.set_interrupt(IRQ.RTC, bool((((int(raw) & self.inte) | self.intf)) & INT_RTC))
+        self.rp2040.set_interrupt(IRQ.RTC, bool(((int(raw) & self.inte) | self.intf) & INT_RTC))
 
     def reset(self) -> None:
         """`RESETS_RESET_RTC` (0089 Phase 5). pico-sdk's own `rtc_init()` starts with `reset_block(RESETS_RESET_RTC_BITS)`, so firmware re-initialises this block after a reset rather than

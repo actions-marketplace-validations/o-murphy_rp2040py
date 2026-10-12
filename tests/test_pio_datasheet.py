@@ -115,7 +115,10 @@ def test_irq_force_has_eight_bits_and_the_read_only_registers_ignore_writes_sile
     assert chip.read_uint32(pio + 0x30) == 0xFF  # IRQ: eight flags
     chip.write_uint32(pio + 0x30, 0xFFFFFFFF)  # write 1 to clear
     assert chip.read_uint32(pio + 0x30) == 0
-    before = {offset: chip.read_uint32(pio + offset) for offset in (0x04, 0x0C, 0x20, 0x24, 0x28, 0x2C, 0x3C, 0x40, 0x44, 0x128, 0x134, 0x140)}
+    before = {
+        offset: chip.read_uint32(pio + offset)
+        for offset in (0x04, 0x0C, 0x20, 0x24, 0x28, 0x2C, 0x3C, 0x40, 0x44, 0x128, 0x134, 0x140)
+    }
     for offset in before:
         chip.write_uint32(pio + offset, 0xFFFFFFFF)
     assert {offset: chip.read_uint32(pio + offset) for offset in before} == before

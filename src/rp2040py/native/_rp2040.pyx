@@ -259,6 +259,18 @@ class _PeripheralTable(dict):
         return self
 
 
+class _PinSourceList(list):
+    """`RP2040.pio`: a list that tells the chip when one of its blocks is replaced, so the pins' direct sources follow (`RP2040._bind_pin_sources`)."""
+
+    def __init__(self, items, owner):
+        super().__init__(items)
+        self._owner = owner
+
+    def __setitem__(self, index, value):
+        super().__setitem__(index, value)
+        self._owner._bind_pin_sources()
+
+
 cdef class RP2040:
     def __cinit__(self):
         # Buffer-backed memoryview fields are allocated here, not __init__: __cinit__ is
@@ -756,6 +768,25 @@ cdef class RP2040:
         if bank is not None:
             bind_pin_sources(bank, self)
             bind_pin_sources(self._qspi_bank, self)
+
+    # The pins read the registers of these three blocks directly (see `_bind_pin_sources`), so replacing one has to re-point them: every way of replacing is a property or a list that does it.
+    @property
+    def pwm(self):
+        return self._pwm_block
+
+    @pwm.setter
+    def pwm(self, value) -> None:
+        self._pwm_block = value
+        self._bind_pin_sources()
+
+    @property
+    def pio(self):
+        return self._pio_blocks
+
+    @pio.setter
+    def pio(self, value) -> None:
+        self._pio_blocks = _PinSourceList(value, self)
+        self._bind_pin_sources()
 
     @property
     def sio(self):

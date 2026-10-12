@@ -757,7 +757,7 @@ The audit that opens the port of the IO / PADS windows and the shared pin bank (
 - **`core/io.hpp` and `core/pads.hpp`** are the windows, `native/_io.pyx` / `_pads.pyx` their shells; both work on the `PinBank` the chip's pins share. A pin object is a view of one bank slot. SIO, PIO and PWM registers are bound as direct pin sources; the pin tells its listeners and the IO interrupt line through the bank's host.
 - **C++ checks:** `tests/cpp/test_io_pads.cpp`, with the textual mutation pass over `io.hpp` / `pads.hpp` (105 and 68 mutants; the survivors are equivalent for the two bank sizes that exist - the word-count rounding for 30 and 6 pins, the reset repeated in `init`, the deleted copy operators, the sentinel-less group loop - or compile-time only).
 - **Kept as it was, said once:** a pin's first announcement comes from the state it was built in (INPUT, a quirk of `GPIOPin.__init__` that the Cython and C++ keep); an input change on QSPI pin *n* reaches GPIO *n*'s PWM / PIO reactions.
-- **A rule for blocks that are replaced:** the direct sources are bound at construction; code that swaps SIO, a PIO or the PWM on a native chip (the oracles do) calls `chip._bind_pin_sources()` afterwards, or the pins keep reading the old block.
+- **Replacing a block re-points the pins by itself:** the direct sources are bound at construction, and `RP2040.sio`, `RP2040.pwm`, `RP2040.pio` (and an element assigned in that list) are properties / a list that bind again, so a chip whose block was swapped (the oracles do) never reads the old one. `tests/test_pin_bank.py` pins it.
 
 ### Requirements of the features the model does not have (read 2026-10-12; **nothing implemented**)
 

@@ -94,11 +94,6 @@ class Rig:
                 self.chip.peripherals[PIO_BASES[index] >> 12] = pio
         finally:
             _pio.StateMachine = original
-        rebind = getattr(
-            self.chip, "_bind_pin_sources", None
-        )  # the native chip's pins read the blocks they were wired to at construction
-        if rebind is not None:
-            rebind()
 
     def _tap(self) -> None:
         chip, log = self.chip, self.log

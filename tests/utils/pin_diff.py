@@ -97,11 +97,6 @@ class Rig:
             pin_class = G.GPIOPin if kind == "pure" else factory
             assert pin_class is not None
             self._replace_the_pins(pin_class, windows)
-        else:
-            # the PWM and the PIOs just became probes: the native pins must read those, not the blocks they were wired to at construction
-            rebind = getattr(chip, "_bind_pin_sources", None)
-            if rebind is not None:
-                rebind()
         self._tap()
 
     def _replace_the_pins(self, pin_class: Callable[..., Any], windows: "tuple[Any, Any] | None" = None) -> None:

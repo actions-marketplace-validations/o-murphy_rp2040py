@@ -45,6 +45,8 @@ cdef class RP2040:
     # SIO sits outside the window table (0xD0000000+). `sio` is a property: a block that lends a native handler
     # (`_native_window`, looked up on its type) is called through it directly; anything else goes through Python.
     cdef object _sio
+    cdef object _pwm_block
+    cdef object _pio_blocks
     cdef object _ppb
     cdef object _sio_owner  # the trampoline context of a Python SIO/PPB (a native block is its own context)
     cdef object _ppb_owner

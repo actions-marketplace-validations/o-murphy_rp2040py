@@ -53,7 +53,7 @@ rp2040py = "rp2040py.__main__:main"
 
 [tool.pytest.ini_options]
 minversion = "9"
-addopts = "-rf"
+addopts = "-rf -n auto"
 testpaths = ["tests"]
 
 [tool.ruff]
@@ -167,4 +167,5 @@ dev = [
     "pytest-cov>=7.1.0",
     "littlefs-python>=0.18.0",
     "cython>=3.2.9",
+    "pytest-xdist>=3.8.0",
 ]

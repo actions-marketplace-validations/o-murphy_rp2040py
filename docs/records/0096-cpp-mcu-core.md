@@ -323,6 +323,16 @@ Written down before the rest of Phase 4 multiplies the glue, and for the wasm ho
 
 **What this does not settle** (still open, recorded in Risks): the contract for *devices* (the fast, Python-free callback + context level B and the pin-event ring), who owns the small fixed buffers, and the measured cost of a Python-level listener across the wasm boundary.
 
+## Dual-core seams to keep open in the single-core C++ API (design note, 2026-10-12 - **not started**, to be implemented only on an explicit go-ahead)
+
+The C++ core ships single-core first (record [0053](0053-core1-and-inter-core-fifo.md) stays proposed; rp2040js is single-core as well). Adding core 1 later should be additive, not an API break, so three seams are to be kept in the interface *before* the first intermediate release - cheap now, expensive once a standalone header-only repo has users:
+
+1. **An initiator id on bus accesses.** SIO and the PPB are the only blocks whose result depends on *who* accesses them (`CPUID`, the two inter-core FIFOs, the per-core interpolators and divider, the banked NVIC/SysTick/SCB). The bus entry points and `BlockWindow` handlers need a core id (always 0 for now), or per-core SIO/PPB windows, so no handler has to change signature when core 1 appears.
+2. **IRQ line -> mask of cores.** Today a peripheral raises one line into one NVIC. Every peripheral line goes to both cores' NVICs on the chip, and IO_BANK0 already has separate `PROC0`/`PROC1` INTE/INTF/INTS sets plus `SIO_IRQ_PROC0/1`. The IRQ sink should take (line, level) and fan out through a per-line core mask (0b01 for now), so IO_BANK0 can register its PROC1 registers during its port without a later rewiring.
+3. **CPU state grouped in one per-core struct** (registers, NVIC, SysTick, SCB, event register/sleep state), owned by the core object and not scattered across the Simulator, so a second instance is a second struct and the batch loop interleaves two against the one `Clock`.
+
+Also needed when core 1 is built (not now): the bootrom launch handshake over the FIFO (`0, 0, 1, vector_table, sp, pc`) or a high-level emulation of it, the scheduling rule for two cores in `_execute_batch`, and the speed cost (the 1.34x real time measured here is for one busy core). Until then `multicore_launch_core1` should fail loudly (a diagnostic or an explicit refusal) instead of hanging silently. An intermediate single-core release is possible once the gate review passes; it should be a 0.x with this limitation in its notes.
+
 ## Risks and open questions
 
 - **Re-entrancy.** A Python window handler may call back into the core (`set_irq`, pin writes, scheduling an alarm) mid-`run()`.

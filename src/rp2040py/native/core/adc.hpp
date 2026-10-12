@@ -189,7 +189,7 @@ public:
         }
 
         // Multi-shot conversions
-        if (cs & CS_START_MANY) {
+        if ((cs & CS_START_MANY) && (cs & CS_EN)) {
             const double sample_ticks = kClockMhz * sample_time;
             const double div = divider();
             if (div > sample_ticks) {
@@ -220,6 +220,7 @@ public:
                 }
                 const uint32_t value = fifo.pull();
                 (void)update_dma();
+                (void)check_interrupts();  // draining below FCS.THRESH takes the interrupt line down (4.9.2.6)
                 return value;
             }
             case DIV: return clock_div;
@@ -292,7 +293,7 @@ private:
 
     static bool on_multi_shot_alarm(void* ctx) noexcept {
         AdcBlock* block = static_cast<AdcBlock*>(ctx);
-        if (block->cs & adc_regs::CS_START_MANY) return block->start_adc_read();
+        if ((block->cs & adc_regs::CS_START_MANY) && (block->cs & adc_regs::CS_EN)) return block->start_adc_read();  // clearing EN halts free-running
         return true;
     }
 

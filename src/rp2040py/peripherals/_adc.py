@@ -149,7 +149,9 @@ class RPADC(BasePeripheral):
         self.complete_adc_read(self.channel_values[self.current_channel], False)
 
     def _on_multi_shot_alarm(self) -> None:
-        if self.cs & CS_START_MANY:
+        if (
+            self.cs & CS_START_MANY and self.cs & CS_EN
+        ):  # clearing EN halts the free-running capture (4.9.2: "disabled again at any time by clearing CS.EN")
             self.start_adc_read()
 
     @property
@@ -233,7 +235,7 @@ class RPADC(BasePeripheral):
             self._active_channel = channel
 
         # Multi-shot conversions
-        if self.cs & CS_START_MANY:
+        if self.cs & CS_START_MANY and self.cs & CS_EN:
             clock_mhz = 48
             sample_ticks = clock_mhz * self.sample_time
             if self.divider > sample_ticks:
@@ -263,6 +265,7 @@ class RPADC(BasePeripheral):
                 return 0
             value = self.fifo.pull()
             self._update_dma()
+            self.check_interrupts()  # "The interrupt is cleared by draining the FIFO to a level lower than FCS.THRESH" (4.9.2.6): the line follows the level down
             return value
         if offset == DIV:
             return self.clock_div

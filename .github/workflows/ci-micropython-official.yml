@@ -19,7 +19,7 @@ concurrency:
 
 jobs:
   official-tests:
-    name: MicroPython ${{ matrix.micropython_tag }} official tests (report only)
+    name: MicroPython ${{ matrix.micropython_tag }} official tests - ${{ matrix.group.name }} (report only)
     runs-on: ubuntu-latest
     continue-on-error: true
     timeout-minutes: 60
@@ -27,6 +27,17 @@ jobs:
       fail-fast: false
       matrix:
         micropython_tag: ["1.29.0"]
+        # Groups of MicroPython's own test files (globs relative to its tests/). The CPU groups run the interpreter itself on the emulated Cortex-M0+ (Thumb inline assembly,
+        # soft-float, the language tests); the peripheral group is ports/rp2 and the machine module. basics is split in two to stay well inside the job limit.
+        group:
+          - name: peripherals (ports/rp2, machine)
+            globs: "ports/rp2/*.py extmod/machine_*.py"
+          - name: CPU - float, inline assembly
+            globs: "float/*.py inlineasm/thumb/*.py"
+          - name: CPU - basics a-l
+            globs: "basics/[a-l]*.py"
+          - name: CPU - basics m-z
+            globs: "basics/[m-z]*.py"
 
     steps:
       - uses: actions/checkout@v7
@@ -50,13 +61,14 @@ jobs:
         continue-on-error: true
         run: |
           source .venv/bin/activate
-          bash tests/micropython_official/run_suite.sh "$RUNNER_TEMP/micropython" ${{ matrix.micropython_tag }} "$RUNNER_TEMP/official-tests.md"
+          set -f  # the group's globs are for the script (relative to MicroPython's tests/), not for this shell
+          GROUP_TITLE="${{ matrix.group.name }}" bash tests/micropython_official/run_suite.sh "$RUNNER_TEMP/micropython" ${{ matrix.micropython_tag }} "$RUNNER_TEMP/official-tests.md" ${{ matrix.group.globs }}
 
       - name: Upload the report
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: micropython-official-${{ matrix.micropython_tag }}
+          name: micropython-official-${{ matrix.micropython_tag }}-${{ strategy.job-index }}
           path: |
             ${{ runner.temp }}/official-tests.md
             ${{ runner.temp }}/official-tests-full.md

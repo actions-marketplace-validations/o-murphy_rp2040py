@@ -662,3 +662,25 @@ MicroPython's `tests/run-tests.py -t <pty>` drives the emulated board through th
 
 `.github/workflows/ci-micropython-official.yml` (with `tests/micropython_official/run_suite.sh`) repeats this on every push and pull request as a **report only** job: `continue-on-error`, the script always exits 0, the table goes to the job summary and an artifact. It does not gate anything.
 
+### The interpreter tests on the emulated Cortex-M0+ (first scan, 2026-10-12, v1.29.0, native build)
+
+The same bridge, one file at a time (45 s limit, the emulator restarted after a hang), on the directories that exercise the *interpreter* rather than a peripheral - a test of the CPU model from the outside, by thousands of Python and Thumb-assembly programs the C++ core was never written against:
+
+| directory | files | pass | skip | fail / hang |
+|---|---|---|---|---|
+| `float` | 69 | 64 | 5 (double precision, `divmod` ... : the port is single-precision) | 0 |
+| `basics` | 576 | 543 | 31 (features this build leaves out: `fun_code`, `exception_chain`, ...) | 0 (2 "ERROR": `unittest` was not on the board; the CI script installs it) |
+| `inlineasm/thumb` | 19 | 8 | 11 (instructions of the M4/VFP the M0+ lacks) | 0 |
+
+**No failure and no hang in 664 files.** The `rv32` and `xtensa` directories of `inlineasm` are for other chips and were not run. (The first report of this scan said `inlineasm` was done before it had been scanned: the glob missed the `thumb/` subdirectory. Corrected here.) Not yet scanned: `extmod` beyond `machine_*`, `micropython`, `import`, `misc`, `io`, `thread` (needs core 1), `stress`, `cmdline`.
+
+`.github/workflows/ci-micropython-official.yml` now runs four groups as separate report-only jobs: the peripherals (`ports/rp2`, `extmod/machine_*`), `float` + `inlineasm/thumb`, `basics` a-l and `basics` m-z. The run summary lists only the files that did not pass, with the counts.
+
+### DMA second pass: the example chapters (2.5.6), 2026-10-12
+
+Read: 2.5.6.1 (reconfigure a channel from its completion interrupt, `dma/channel_irq`) and 2.5.6.2 (control blocks, `dma/control_blocks`). Both are now **tests that run the examples as the datasheet writes them** (`tests/test_dma_datasheet_examples.py`, both builds): the register values the SDK's helpers produce for the two channels, the real UART as the paced peripheral.
+
+- **`control_blocks`:** a control channel (32-bit, both addresses increment, a write ring of `1 << 3` bytes, count 2) loads seven `{length, address}` pairs into the data channel's **alias 3** (`TRANS_COUNT`, then the `READ_ADDR` trigger), the data channel (8-bit, UART TX paced, `CHAIN_TO` the control channel, `IRQ_QUIET`) chains back, and the null block ends the list. Result: `Transferring one word at a time.\n` out of the UART, in order, and the data channel's raw interrupt is raised **only** for the null trigger at the end (`INTR` is exactly that channel's bit). Consistent with the datasheet; no change to the DMA.
+- **`channel_irq`:** a paced channel writes the same word three times (read address fixed), raises IRQ 0 at the end of the block, and the handler (`ints0` clear, then `READ_ADDR_TRIG`) gives it the next word - four blocks, `AAABBBCCCDDD`, the NVIC line up at each completion. (The example paces with a PIO TX FIFO; the UART's stands in, the DREQ mechanism being the same.)
+- **The sniffer** (the CRC section, 2.5.5.2) stays in the backlog; the decision recorded in the DMA sniffer note above is unchanged.
+

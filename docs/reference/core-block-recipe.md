@@ -84,3 +84,4 @@ Check what the differential says the first time it runs reference against native
 Differential over many more seeds than CI runs; live boots (MicroPython, CircuitPython, Kaluma, Pico SDK as far as the block is
 touched) and the one scenario that exercises it; an A/B against the commit before if the block is on a hot path; full
 `uv run pre-commit run --all-files` on both builds; a progress-log entry in the record and the tracker row.
+And the living checklist: update the block's rows in [feature-coverage.md](feature-coverage.md) in the same commit (tick what the pass implemented, add what it found missing with its *when*), and regenerate [register-coverage.md](register-coverage.md) (`scripts/audit/register_coverage.py`, see its docstring) when registers were added.

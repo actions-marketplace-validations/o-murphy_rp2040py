@@ -611,6 +611,8 @@ Everything ported on the 0096 branch has a section above. What has **not** been 
 
 ## Open features found by the audit (backlog)
 
+> The living checklist of what is implemented and what is not, with *when* each item is to be done, is [docs/reference/feature-coverage.md](../reference/feature-coverage.md); the table below is the audit's own record of what it found missing.
+
 None of these is a correction of the reference; each is missing behaviour, left for its own decision (CLAUDE.md: documenting is not implementing).
 
 | Block | Missing | Why it matters |

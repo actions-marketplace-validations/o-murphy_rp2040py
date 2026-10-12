@@ -26,8 +26,10 @@ start_emulator() {
 
 stop_emulator() { [ -n "$EMU_PID" ] && kill "$EMU_PID" 2>/dev/null; wait "$EMU_PID" 2>/dev/null; true; }
 
-ROWS=$WORK/rows.md
+ROWS=$WORK/rows.md      # every file
+BAD=$WORK/bad.md        # only the files that did not pass: this is what the run summary shows
 : >"$ROWS"
+: >"$BAD"
 
 start_emulator
 cd "$MP_DIR/tests" || exit 0
@@ -37,7 +39,9 @@ for t in ports/rp2/*.py extmod/machine_*.py; do
   # `_thread` starts the second core (multicore_launch_core1 waits for the bootrom FIFO handshake): the emulator has no core 1 yet (record 0096, dual-core seams), so
   # the file would only hang until the timeout and cost an emulator restart
   if grep -q "_thread" "$t"; then
-    echo "| $t | :fast_forward: SKIP (needs core 1) |" >>"$ROWS"; echo "$t: SKIP (needs core 1)"; skip=$((skip + 1)); continue
+    echo "| $t | :fast_forward: SKIP (needs core 1) |" >>"$ROWS"
+    echo "| $t | :fast_forward: SKIP (needs core 1) |" >>"$BAD"
+    echo "$t: SKIP (needs core 1)"; skip=$((skip + 1)); continue
   fi
   timeout "$PER_TEST_TIMEOUT" "$VIRTUAL_ENV/bin/python" run-tests.py -t "$DEV" -r "$WORK/res" "$t" >"$log" 2>&1
   rc=$?
@@ -48,6 +52,7 @@ for t in ports/rp2/*.py extmod/machine_*.py; do
   elif grep -qi "^skip" "$log"; then r=":fast_forward: SKIP"; skip=$((skip + 1))
   else r=":warning: ERROR (see the job log)"; fail=$((fail + 1)); fi
   echo "| $t | $r |" >>"$ROWS"
+  case "$r" in *PASS*) ;; *) echo "| $t | $r |" >>"$BAD" ;; esac
   echo "$t: $r"
 done
 stop_emulator
@@ -56,12 +61,25 @@ stop_emulator
   echo
   echo "**:white_check_mark: $pass passed, :x: $fail failed, :fast_forward: $skip skipped, :hourglass: $hang hung** - report only, nothing here gates the build."
   echo
+  if [ -s "$BAD" ]; then
+    echo "Not passing:"
+    echo
+    echo "| test | result |"
+    echo "|---|---|"
+    cat "$BAD"
+  else
+    echo "Every file passed."
+  fi
+  echo
+  echo "Why the failures happen: see \`docs/records/0098-datasheet-conformance-audit.md\` (section on MicroPython's own test suite). The full per-file list is in the job's artifact."
+} >"$OUT"
+{
+  echo "## All files"
+  echo
   echo "| test | result |"
   echo "|---|---|"
   cat "$ROWS"
-  echo
-  echo "Why the failures happen: see \`docs/records/0098-datasheet-conformance-audit.md\` (section on MicroPython's own test suite)."
-} >"$OUT"
+} >"${OUT%.md}-full.md"
 cat "$OUT"
 # straight into the run's summary page as well, so it shows even if a later step fails
 [ -n "${GITHUB_STEP_SUMMARY:-}" ] && cat "$OUT" >>"$GITHUB_STEP_SUMMARY"

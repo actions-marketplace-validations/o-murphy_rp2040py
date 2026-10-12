@@ -13,6 +13,8 @@ cdef extern from "pin.hpp" namespace "rp2040core":
     cdef const uint32_t kSrcPio1Value
     cdef const uint32_t kSrcPwmDirection
     cdef const uint32_t kSrcPwmValue
+    cdef const uint32_t kSrcSioQspiOe
+    cdef const uint32_t kSrcSioQspiValue
 
     ctypedef bool (*PinSourceFn)(void* ctx, uint32_t source, uint32_t* out)
     ctypedef bool (*PinChangeFn)(void* ctx, uint32_t pin, int new_state, int old_state)
@@ -38,6 +40,7 @@ cdef extern from "pin.hpp" namespace "rp2040core":
         bool raw_input_value
         bool driven
         bool always_output_enabled
+        bool seen
 
     bool apply_override(bool value, uint32_t override_type) noexcept
 
@@ -60,6 +63,8 @@ cdef extern from "pin.hpp" namespace "rp2040core":
         bool set_input_value(uint32_t i, bool value) noexcept
         bool release_input(uint32_t i) noexcept
         bool refresh_input(uint32_t i) noexcept
+        bool pad_changed(uint32_t i) noexcept
+        bool seen_level(uint32_t i) noexcept
         bool apply_input_value(uint32_t i, bool value) noexcept
         bool update_irq_value(uint32_t i, uint32_t value) noexcept
-        bool reset(uint32_t i, bool io, bool pads) noexcept
+        bool reset(uint32_t i, bool io, bool pads, uint32_t pad_reset) noexcept

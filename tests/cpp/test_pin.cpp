@@ -95,12 +95,17 @@ static bool ref_source_bit(const uint32_t* src, uint32_t fsel, bool want_value, 
 }
 
 static bool ref_oe(const RefPin& p, const uint32_t* src, uint32_t index) {
-    if (p.always_oe) return true;
+    if (p.always_oe) return (p.ctrl & 0x1F) == 5 ? ((src[kSrcSioQspiOe] >> index) & 1u) != 0 : true;  // a QSPI pin: SIO drives it through GPIO_HI_OE
     return ref_source_bit(src, p.ctrl & 0x1F, false, index);
 }
 
+static bool ref_val(const RefPin& p, const uint32_t* src, uint32_t index) {
+    if (p.always_oe) return (p.ctrl & 0x1F) == 5 ? ((src[kSrcSioQspiValue] >> index) & 1u) != 0 : false;  // ... and its level through GPIO_HI_OUT
+    return ref_source_bit(src, p.ctrl & 0x1F, true, index);
+}
+
 static int ref_state(const RefPin& p, const uint32_t* src, uint32_t index) {
-    if (ov(ref_oe(p, src, index), (p.ctrl >> 12) & 3)) return ov(ref_source_bit(src, p.ctrl & 0x1F, true, index), (p.ctrl >> 8) & 3) ? 1 : 0;
+    if (ov(ref_oe(p, src, index), (p.ctrl >> 12) & 3)) return ov(ref_val(p, src, index), (p.ctrl >> 8) & 3) ? 1 : 0;
     const bool pd = p.pad & 4, pu = p.pad & 8;
     if (pd && pu) return 5;
     if (pd) return 4;
@@ -122,7 +127,7 @@ static uint32_t ref_status(const RefPin& p, const uint32_t* src, uint32_t index)
     const bool in_v = ov(eff_in && (p.pad & 0x40), (p.ctrl >> 16) & 3);
     const bool roe = ref_oe(p, src, index);
     const bool oe = ov(roe, (p.ctrl >> 12) & 3);
-    const bool rov = ref_source_bit(src, p.ctrl & 0x1F, true, index);
+    const bool rov = ref_val(p, src, index);
     const bool o = ov(rov, (p.ctrl >> 8) & 3);
     uint32_t s = 0;
     if (irq_v) s |= 1u << 26;
@@ -151,14 +156,15 @@ static void test_defaults_and_last_state() {
     PinBank bank;
     const bool always[3] = {false, true, false};
     CHECK(bank.init(3, host_for(&r), always));
-    CHECK(bank.pin(0).ctrl == 0x1F && bank.pin(0).pad_value == 0b0110110);
+    CHECK(bank.pin(0).ctrl == 0x1F && bank.pin(0).pad_value == 0x56);  // PADS_BANK0.GPIOn's reset: OD 0, IE 1, 4 mA, PDE 1, SCHMITT 1
+    CHECK(bank.pin(0).irq_status == pin_bits::kIrqLevelLow && !bank.pin(0).seen);  // pulled down and read through IE: LEVEL_LOW from the start
     // last_state is computed with ctrl = 0 / pad = 0 before the defaults: INPUT for an ordinary pin, LOW for an always-output one.
     CHECK(bank.pin(0).last_state == kPinInput);
     CHECK(bank.pin(1).last_state == kPinLow);
     CHECK(bank.check_for_updates(0));  // an untouched pin's first check announces INPUT -> PULL_DOWN
     CHECK(r.changes == 1 && r.change_new[0] == kPinPullDown && r.change_old[0] == kPinInput);
     int s = -1;
-    // The default pad word 0b0110110 has the pull-down bit (bit 2) set, so once the defaults are in the level is PULL_DOWN even though
+    // The default pad word 0x56 has the pull-down bit (bit 2) set, so once the defaults are in the level is PULL_DOWN even though
     // `last_state` was captured as INPUT: the first check_for_updates() of an untouched pin announces INPUT -> PULL_DOWN (as the Cython does).
     CHECK(bank.state_code(0, &s) && s == kPinPullDown);
     CHECK(bank.state_code(1, &s) && s == kPinLow);    // always output enabled, FUNCSEL 0x1F connects no value source -> LOW
@@ -335,16 +341,20 @@ static void test_level_bits_follow_the_input_and_the_interrupt_only_when_it_chan
     bank.pin(0).pad_value = pin_bits::kPadInputEnable;  // no pulls
     // No interrupt enabled: input changes alter irq_status but never the pin's irq value, so the IO interrupt is not re-evaluated.
     CHECK(bank.set_input_value(0, false));
-    CHECK(bank.pin(0).irq_status == (pin_bits::kIrqEdgeLow | pin_bits::kIrqLevelLow));
+    CHECK(bank.pin(0).irq_status == pin_bits::kIrqLevelLow);  // still low: no transition, no edge
     CHECK(bank.set_input_value(0, true));
-    CHECK(bank.pin(0).irq_status == (pin_bits::kIrqEdgeLow | pin_bits::kIrqEdgeHigh | pin_bits::kIrqLevelHigh));  // LEVEL_LOW cleared, edges latch
+    CHECK(bank.pin(0).irq_status == (pin_bits::kIrqEdgeHigh | pin_bits::kIrqLevelHigh));  // LEVEL_LOW cleared, the rising edge latches
+    CHECK(bank.set_input_value(0, true));
+    CHECK(bank.pin(0).irq_status == (pin_bits::kIrqEdgeHigh | pin_bits::kIrqLevelHigh));  // high again: not an edge
     CHECK(bank.set_input_value(0, false));
-    CHECK(bank.pin(0).irq_status == (pin_bits::kIrqEdgeLow | pin_bits::kIrqEdgeHigh | pin_bits::kIrqLevelLow));   // LEVEL_HIGH cleared
-    CHECK(r.io_irqs == 0 && r.inputs == 3);
+    CHECK(bank.pin(0).irq_status == (pin_bits::kIrqEdgeLow | pin_bits::kIrqEdgeHigh | pin_bits::kIrqLevelLow));   // LEVEL_HIGH cleared, the falling edge latches
+    CHECK(r.io_irqs == 0 && r.inputs == 4);
     // A pad with input disabled treats a high level as low.
     bank.pin(1).pad_value = 0;
+    bank.pin(1).driven = false;
+    CHECK(bank.pad_changed(1));  // IE went off while the pin read low behind its pull-down: the seen level did not move
     CHECK(bank.set_input_value(1, true));
-    CHECK(bank.pin(1).irq_status == (pin_bits::kIrqEdgeLow | pin_bits::kIrqLevelLow));
+    CHECK(bank.pin(1).irq_status == pin_bits::kIrqLevelLow);  // the high level is not seen with the input buffer off
 }
 
 static void test_a_pwm_pin_reports_it_to_the_host() {
@@ -372,7 +382,7 @@ static void test_reset_keeps_what_is_wired_and_recomputes_last_state() {
     CHECK(bank.check_for_updates(0));
     CHECK(r.changes == 1);
     CHECK(bank.reset(0, /*io=*/true, /*pads=*/false));
-    CHECK(bank.pin(0).ctrl == 0x1F && bank.pin(0).irq_enable_mask == 0 && bank.pin(0).irq_force_mask == 0 && bank.pin(0).irq_status == 0);
+    CHECK(bank.pin(0).ctrl == 0x1F && bank.pin(0).irq_enable_mask == 0 && bank.pin(0).irq_force_mask == 0 && bank.pin(0).irq_status == pin_bits::kIrqLevelHigh);  // masks back; the level bits follow the pin (pull-up read through IE), no edge
     CHECK(bank.pin(0).pad_value == (0b1000 | pin_bits::kPadInputEnable));  // pads half untouched
     CHECK(bank.pin(0).raw_input_value && bank.pin(0).driven);                // what is wired survives
     CHECK(bank.pin(0).last_state == kPinPullUp);                            // recomputed after the registers came back

@@ -39,6 +39,8 @@ from rp2040py.native._pin cimport (
     kSrcPwmDirection,
     kSrcPwmValue,
     kSrcSioOe,
+    kSrcSioQspiOe,
+    kSrcSioQspiValue,
     kSrcSioValue,
 )
 
@@ -82,6 +84,10 @@ cdef cppbool _source_trampoline(void* ctx, uint32_t source, uint32_t* out) noexc
             out[0] = <unsigned int> rp.pio[1].pin_directions
         elif source == kSrcPio1Value:
             out[0] = <unsigned int> rp.pio[1].pin_values
+        elif source == kSrcSioQspiOe:
+            out[0] = <unsigned int> rp.sio.qspi_gpio_output_enable
+        elif source == kSrcSioQspiValue:
+            out[0] = <unsigned int> rp.sio.qspi_gpio_value
         elif source == kSrcPwmDirection:
             out[0] = <unsigned int> rp.pwm.gpio_direction
         else:  # kSrcPwmValue
@@ -160,7 +166,7 @@ cdef class GPIOPin:
         if not self._bank.init(1, host, &always, index):
             raise_if_pending()
 
-    def reset(self, io=True, pads=True):
+    def reset(self, io=True, pads=True, pad_reset=0x56):
         """Return this pin's *registers* to their power-on values - `IO_BANK0.GPIOn_CTRL`,
         `PADS_BANK0.GPIOn` and the three IRQ masks - leaving everything about what is wired to the
         pin alone (docs/records/0089-one-reset-for-every-trigger.md Phase 5).
@@ -182,7 +188,7 @@ cdef class GPIOPin:
         QSPI pads are the one exception this method cannot handle alone: `PADS_QSPI` has different
         per-pad reset values (record 0050), applied by `RP2040.__init__`/`RP2040.reset()` right
         after this call, the same way construction does it."""
-        if not self._bank.reset(0, bool(io), bool(pads)):
+        if not self._bank.reset(0, bool(io), bool(pads), <unsigned int> pad_reset):
             raise_if_pending()
 
     cdef bint add_direct_listener(self, PinChangeFn fn, void* ctx):
@@ -264,6 +270,14 @@ cdef class GPIOPin:
     @_driven.setter
     def _driven(self, bint value):
         self._pin.driven = value
+
+    @property
+    def _seen(self):
+        return self._pin.seen
+
+    @_seen.setter
+    def _seen(self, bint value):
+        self._pin.seen = value
 
     @property
     def _always_output_enabled(self):
@@ -398,6 +412,11 @@ cdef class GPIOPin:
 
     def refresh_input(self):
         if not self._bank.refresh_input(0):
+            raise_if_pending()
+
+    def pad_changed(self):
+        """The pad register was written: if that moved the level the interrupt logic sees (IE, or a pull on a floating pin), it is an input change."""
+        if not self._bank.pad_changed(0):
             raise_if_pending()
 
     def update_irq_value(self, value):

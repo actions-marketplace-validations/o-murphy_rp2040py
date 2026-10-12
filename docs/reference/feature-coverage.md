@@ -33,8 +33,8 @@ One place to see, block by block and datasheet section by section, what is model
 | SYSCFG | Stub | Yes | Ported | only `PROC0_NMI_MASK` acts |
 | VREG_AND_CHIP_RESET | Partial | Yes | Ported | `VREG`, `BOD` are stored; `CHIP_RESET` acts |
 | BUSCTRL | Stub | Yes | Ported | no arbitration, no performance counters |
-| IO_BANK0 | Partial | No | Python only | `PROC1_*` and `DORMANT_WAKE_*` absent; not audited |
-| PADS_BANK0 / PADS_QSPI / IO_QSPI | Unchecked | No | Python only | not audited; `PADS_BANK0.SWCLK/SWD` and all of IO_QSPI absent |
+| IO_BANK0 | Partial | Yes (phase 0 of the port) | Pins in C++, the register window in Python | `PROC1_*` / `DORMANT_WAKE_*` are stored and raise nothing (no core 1, no dormant); the pin bank is not shared yet (#29) |
+| PADS_BANK0 / PADS_QSPI / IO_QSPI | Partial | Yes (phase 0 of the port) | Python only | `VOLTAGE_SELECT` and `SWCLK` / `SWD` are stored; pad drive, slew and Schmitt have no electrical model |
 | XIP_CTRL | Stub | No | Python only | no cache, no streaming (record 0052); **Next** after IO_BANK0 |
 | USB controller + CDC host | Partial | No | Python only | host mode works; `USB_MUXING`, `USBPHY_*` absent; device mode unchecked |
 
@@ -110,8 +110,8 @@ Follows the datasheet's own table of contents (chapter.section), so a row is som
 | 2.17.7 | ROSC DORMANT | Stub | the register is stored; nothing goes dormant (see 2.11.3) | Go-ahead |
 | 2.18 | PLL | Partial | always locked, no start-up time | - |
 | 2.19.2 | GPIO function select | Done | | - |
-| 2.19.3 | GPIO interrupts | Partial | core-0 registers work; **`PROC1_*` and `DORMANT_WAKE_*` absent** (24 register tables); IO_BANK0 never audited | With the IO_BANK0 port |
-| 2.19.4 | Pads | Partial | `PADS_BANK0.SWCLK` / `SWD` absent, `VOLTAGE_SELECT` stored; never audited | With the IO_BANK0 port |
+| 2.19.3 | GPIO interrupts | Partial | `INTR` level bits live, edges latch on a transition, `INTE` / `INTF` / `INTS` for proc 0; proc 1 and dormant wake are registers only (no line) | - |
+| 2.19.4 | Pads | Partial | reset `0x56`, reserved bits, SWCLK / SWD, PADS_QSPI order; drive / slew / Schmitt / `VOLTAGE_SELECT` are stored (no electrical model) | - |
 | 2.20-2.22 | Sysinfo, Syscfg, TBMAN | Done | Syscfg is mostly stored (Stub) | - |
 
 ### Chapter 3 - PIO

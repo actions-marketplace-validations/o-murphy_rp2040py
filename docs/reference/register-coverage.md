@@ -12,7 +12,7 @@
 
 **This is a curated list, not a measurement.** "Answers" is measured (a read at the register's address does not warn "Unimplemented peripheral read"; for a write-only register, a write of 0 does not warn). "Acts" is curated: it means the block was audited and the register is in none of the stub / partial lists of `scripts/audit/register_status.py`, each entry of which carries its evidence. A stub that nobody has listed yet shows as Acts; if you find one, add it there and re-run the script. For what each block does and does not do, see [feature-coverage.md](feature-coverage.md). A table shared by several instances (UART0/UART1, the DMA's per-channel tables) is listed once, as the datasheet gives it.
 
-**474 registers: 285 act, 88 are stubs, 22 partial, 33 exist but are unchecked, 46 are absent.**
+**474 registers: 308 act, 91 are stubs, 52 partial, 13 exist but are unchecked, 10 are absent.**
 
 | Block | Registers | Acts | Stub | Partial | Unchecked | Absent |
 |---|---|---|---|---|---|---|
@@ -40,10 +40,10 @@
 | TBMAN | 1 | 1 | 0 | 0 | 0 | 0 |
 | VREG_AND_CHIP_RESET | 3 | 1 | 2 | 0 | 0 | 0 |
 | BUSCTRL | 9 | 1 | 8 | 0 | 0 | 0 |
-| IO_BANK0 | 40 | 0 | 0 | 0 | 16 | 24 |
-| IO_QSPI | 10 | 0 | 0 | 0 | 0 | 10 |
-| PADS_BANK0 | 4 | 0 | 1 | 0 | 1 | 2 |
-| PADS_QSPI | 3 | 0 | 0 | 0 | 3 | 0 |
+| IO_BANK0 | 40 | 16 | 0 | 24 | 0 | 0 |
+| IO_QSPI | 10 | 4 | 0 | 6 | 0 | 0 |
+| PADS_BANK0 | 4 | 1 | 3 | 0 | 0 | 0 |
+| PADS_QSPI | 3 | 2 | 1 | 0 | 0 | 0 |
 | USB | 23 | 0 | 6 | 1 | 13 | 3 |
 | XIP | 8 | 0 | 8 | 0 | 0 | 0 |
 
@@ -579,80 +579,82 @@ Stubs in this block: BUS_PRIORITY, PERFSEL0-3 are stored and PERFCTR0-3 stay 0: 
 
 | Offset | Register | Status | Note |
 |---|---|---|---|
-| `0x0f0` | INTR0 | Unchecked | the block was never audited |
-| `0x0f4` | INTR1 | Unchecked | the block was never audited |
-| `0x0f8` | INTR2 | Unchecked | the block was never audited |
-| `0x0fc` | INTR3 | Unchecked | the block was never audited |
-| `0x100` | PROC0_INTE0 | Unchecked | the block was never audited |
-| `0x104` | PROC0_INTE1 | Unchecked | the block was never audited |
-| `0x108` | PROC0_INTE2 | Unchecked | the block was never audited |
-| `0x10c` | PROC0_INTE3 | Unchecked | the block was never audited |
-| `0x110` | PROC0_INTF0 | Unchecked | the block was never audited |
-| `0x114` | PROC0_INTF1 | Unchecked | the block was never audited |
-| `0x118` | PROC0_INTF2 | Unchecked | the block was never audited |
-| `0x11c` | PROC0_INTF3 | Unchecked | the block was never audited |
-| `0x120` | PROC0_INTS0 | Unchecked | the block was never audited |
-| `0x124` | PROC0_INTS1 | Unchecked | the block was never audited |
-| `0x128` | PROC0_INTS2 | Unchecked | the block was never audited |
-| `0x12c` | PROC0_INTS3 | Unchecked | the block was never audited |
-| `0x130` | PROC1_INTE0 | Absent |  |
-| `0x134` | PROC1_INTE1 | Absent |  |
-| `0x138` | PROC1_INTE2 | Absent |  |
-| `0x13c` | PROC1_INTE3 | Absent |  |
-| `0x140` | PROC1_INTF0 | Absent |  |
-| `0x144` | PROC1_INTF1 | Absent |  |
-| `0x148` | PROC1_INTF2 | Absent |  |
-| `0x14c` | PROC1_INTF3 | Absent |  |
-| `0x150` | PROC1_INTS0 | Absent |  |
-| `0x154` | PROC1_INTS1 | Absent |  |
-| `0x158` | PROC1_INTS2 | Absent |  |
-| `0x15c` | PROC1_INTS3 | Absent |  |
-| `0x160` | DORMANT_WAKE_INTE0 | Absent |  |
-| `0x164` | DORMANT_WAKE_INTE1 | Absent |  |
-| `0x168` | DORMANT_WAKE_INTE2 | Absent |  |
-| `0x16c` | DORMANT_WAKE_INTE3 | Absent |  |
-| `0x170` | DORMANT_WAKE_INTF0 | Absent |  |
-| `0x174` | DORMANT_WAKE_INTF1 | Absent |  |
-| `0x178` | DORMANT_WAKE_INTF2 | Absent |  |
-| `0x17c` | DORMANT_WAKE_INTF3 | Absent |  |
-| `0x180` | DORMANT_WAKE_INTS0 | Absent |  |
-| `0x184` | DORMANT_WAKE_INTS1 | Absent |  |
-| `0x188` | DORMANT_WAKE_INTS2 | Absent |  |
-| `0x18c` | DORMANT_WAKE_INTS3 | Absent |  |
+| `0x0f0` | INTR0 | Acts |  |
+| `0x0f4` | INTR1 | Acts |  |
+| `0x0f8` | INTR2 | Acts |  |
+| `0x0fc` | INTR3 | Acts |  |
+| `0x100` | PROC0_INTE0 | Acts |  |
+| `0x104` | PROC0_INTE1 | Acts |  |
+| `0x108` | PROC0_INTE2 | Acts |  |
+| `0x10c` | PROC0_INTE3 | Acts |  |
+| `0x110` | PROC0_INTF0 | Acts |  |
+| `0x114` | PROC0_INTF1 | Acts |  |
+| `0x118` | PROC0_INTF2 | Acts |  |
+| `0x11c` | PROC0_INTF3 | Acts |  |
+| `0x120` | PROC0_INTS0 | Acts |  |
+| `0x124` | PROC0_INTS1 | Acts |  |
+| `0x128` | PROC0_INTS2 | Acts |  |
+| `0x12c` | PROC0_INTS3 | Acts |  |
+| `0x130` | PROC1_INTE0 | Partial | PROC1 / DORMANT_WAKE: stored; there is no second core and no dormant mode to raise a line |
+| `0x134` | PROC1_INTE1 | Partial | PROC1 / DORMANT_WAKE: stored; there is no second core and no dormant mode to raise a line |
+| `0x138` | PROC1_INTE2 | Partial | PROC1 / DORMANT_WAKE: stored; there is no second core and no dormant mode to raise a line |
+| `0x13c` | PROC1_INTE3 | Partial | PROC1 / DORMANT_WAKE: stored; there is no second core and no dormant mode to raise a line |
+| `0x140` | PROC1_INTF0 | Partial | PROC1 / DORMANT_WAKE: stored; there is no second core and no dormant mode to raise a line |
+| `0x144` | PROC1_INTF1 | Partial | PROC1 / DORMANT_WAKE: stored; there is no second core and no dormant mode to raise a line |
+| `0x148` | PROC1_INTF2 | Partial | PROC1 / DORMANT_WAKE: stored; there is no second core and no dormant mode to raise a line |
+| `0x14c` | PROC1_INTF3 | Partial | PROC1 / DORMANT_WAKE: stored; there is no second core and no dormant mode to raise a line |
+| `0x150` | PROC1_INTS0 | Partial | PROC1 / DORMANT_WAKE: stored; there is no second core and no dormant mode to raise a line |
+| `0x154` | PROC1_INTS1 | Partial | PROC1 / DORMANT_WAKE: stored; there is no second core and no dormant mode to raise a line |
+| `0x158` | PROC1_INTS2 | Partial | PROC1 / DORMANT_WAKE: stored; there is no second core and no dormant mode to raise a line |
+| `0x15c` | PROC1_INTS3 | Partial | PROC1 / DORMANT_WAKE: stored; there is no second core and no dormant mode to raise a line |
+| `0x160` | DORMANT_WAKE_INTE0 | Partial | PROC1 / DORMANT_WAKE: stored; there is no second core and no dormant mode to raise a line |
+| `0x164` | DORMANT_WAKE_INTE1 | Partial | PROC1 / DORMANT_WAKE: stored; there is no second core and no dormant mode to raise a line |
+| `0x168` | DORMANT_WAKE_INTE2 | Partial | PROC1 / DORMANT_WAKE: stored; there is no second core and no dormant mode to raise a line |
+| `0x16c` | DORMANT_WAKE_INTE3 | Partial | PROC1 / DORMANT_WAKE: stored; there is no second core and no dormant mode to raise a line |
+| `0x170` | DORMANT_WAKE_INTF0 | Partial | PROC1 / DORMANT_WAKE: stored; there is no second core and no dormant mode to raise a line |
+| `0x174` | DORMANT_WAKE_INTF1 | Partial | PROC1 / DORMANT_WAKE: stored; there is no second core and no dormant mode to raise a line |
+| `0x178` | DORMANT_WAKE_INTF2 | Partial | PROC1 / DORMANT_WAKE: stored; there is no second core and no dormant mode to raise a line |
+| `0x17c` | DORMANT_WAKE_INTF3 | Partial | PROC1 / DORMANT_WAKE: stored; there is no second core and no dormant mode to raise a line |
+| `0x180` | DORMANT_WAKE_INTS0 | Partial | PROC1 / DORMANT_WAKE: stored; there is no second core and no dormant mode to raise a line |
+| `0x184` | DORMANT_WAKE_INTS1 | Partial | PROC1 / DORMANT_WAKE: stored; there is no second core and no dormant mode to raise a line |
+| `0x188` | DORMANT_WAKE_INTS2 | Partial | PROC1 / DORMANT_WAKE: stored; there is no second core and no dormant mode to raise a line |
+| `0x18c` | DORMANT_WAKE_INTS3 | Partial | PROC1 / DORMANT_WAKE: stored; there is no second core and no dormant mode to raise a line |
 
 ## IO_QSPI
 
 | Offset | Register | Status | Note |
 |---|---|---|---|
-| `0x30` | INTR | Absent |  |
-| `0x34` | PROC0_INTE | Absent |  |
-| `0x38` | PROC0_INTF | Absent |  |
-| `0x3c` | PROC0_INTS | Absent |  |
-| `0x40` | PROC1_INTE | Absent |  |
-| `0x44` | PROC1_INTF | Absent |  |
-| `0x48` | PROC1_INTS | Absent |  |
-| `0x4c` | DORMANT_WAKE_INTE | Absent |  |
-| `0x50` | DORMANT_WAKE_INTF | Absent |  |
-| `0x54` | DORMANT_WAKE_INTS | Absent |  |
+| `0x30` | INTR | Acts |  |
+| `0x34` | PROC0_INTE | Acts |  |
+| `0x38` | PROC0_INTF | Acts |  |
+| `0x3c` | PROC0_INTS | Acts |  |
+| `0x40` | PROC1_INTE | Partial | PROC1 / DORMANT_WAKE: stored; there is no second core and no dormant mode to raise a line |
+| `0x44` | PROC1_INTF | Partial | PROC1 / DORMANT_WAKE: stored; there is no second core and no dormant mode to raise a line |
+| `0x48` | PROC1_INTS | Partial | PROC1 / DORMANT_WAKE: stored; there is no second core and no dormant mode to raise a line |
+| `0x4c` | DORMANT_WAKE_INTE | Partial | PROC1 / DORMANT_WAKE: stored; there is no second core and no dormant mode to raise a line |
+| `0x50` | DORMANT_WAKE_INTF | Partial | PROC1 / DORMANT_WAKE: stored; there is no second core and no dormant mode to raise a line |
+| `0x54` | DORMANT_WAKE_INTS | Partial | PROC1 / DORMANT_WAKE: stored; there is no second core and no dormant mode to raise a line |
 
 ## PADS_BANK0
+
+Stubs in this block: VOLTAGE_SELECT, SWCLK and SWD are stored (peripherals/pads.py): the voltage thresholds and the debug pads have no electrical model.
+
+| Offset | Register | Status | Note |
+|---|---|---|---|
+| `0x00` | VOLTAGE_SELECT | Stub |  |
+| `0x04` | GPIO0, GPIO1, …, GPIO28, GPIO29 | Acts |  |
+| `0x7c` | SWCLK | Stub |  |
+| `0x80` | SWD | Stub |  |
+
+## PADS_QSPI
 
 Stubs in this block: VOLTAGE_SELECT is stored (peripherals/pads.py).
 
 | Offset | Register | Status | Note |
 |---|---|---|---|
 | `0x00` | VOLTAGE_SELECT | Stub |  |
-| `0x04` | GPIO0, GPIO1, …, GPIO28, GPIO29 | Unchecked | the block was never audited |
-| `0x7c` | SWCLK | Absent |  |
-| `0x80` | SWD | Absent |  |
-
-## PADS_QSPI
-
-| Offset | Register | Status | Note |
-|---|---|---|---|
-| `0x00` | VOLTAGE_SELECT | Unchecked | the block was never audited |
-| `0x04` | GPIO_QSPI_SCLK | Unchecked | the block was never audited |
-| `0x18` | GPIO_QSPI_SS | Unchecked | the block was never audited |
+| `0x04` | GPIO_QSPI_SCLK | Acts |  |
+| `0x18` | GPIO_QSPI_SS | Acts |  |
 
 ## USB
 

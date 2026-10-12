@@ -40,7 +40,7 @@ namespace pin_bits {
 constexpr uint32_t kIrqLevelLow = 1u << 0, kIrqLevelHigh = 1u << 1, kIrqEdgeLow = 1u << 2, kIrqEdgeHigh = 1u << 3;
 constexpr uint32_t kPadPulldown = 1u << 2, kPadPullup = 1u << 3, kPadInputEnable = 1u << 6;
 constexpr uint32_t kDefaultCtrl = 0x1F;          // FUNCSEL = NULL, no overrides
-constexpr uint32_t kDefaultPad = 0b0110110;      // PADS_BANK0's reset value
+constexpr uint32_t kDefaultPad = 0x56;           // PADS_BANK0.GPIOn's reset value (OD 0, IE 1, DRIVE 4 mA, PDE 1, SCHMITT 1; datasheet table 341, pico-sdk)
 }  // namespace pin_bits
 
 // Where a pin's output level/direction can come from: the registers of other blocks.
@@ -53,7 +53,9 @@ enum PinSource : uint32_t {
     kSrcPio1Value = 5,
     kSrcPwmDirection = 6,
     kSrcPwmValue = 7,
-    kPinSources = 8,
+    kSrcSioQspiOe = 8,     // GPIO_HI_OE: the QSPI pins' SIO output enable
+    kSrcSioQspiValue = 9,  // GPIO_HI_OUT
+    kPinSources = 10,
 };
 
 using PinSourceFn = bool (*)(void* ctx, uint32_t source, uint32_t* out);                       // false: failed
@@ -89,6 +91,7 @@ struct Pin {
     bool raw_input_value = false;  // what the outside world drives (or its last value)
     bool driven = false;           // something is driving it (else the pad's pull decides)
     bool always_output_enabled = false;
+    bool seen = false;  // the level the interrupt logic sees (the pad reading behind its input buffer): INTR's level bits follow it, its transitions latch the edge bits
     PinListener direct[kMaxDirectListeners];
     uint32_t direct_count = 0;
 };
@@ -139,6 +142,7 @@ public:
             p.last_state = code;
             p.ctrl = pin_bits::kDefaultCtrl;
             p.pad_value = pin_bits::kDefaultPad;
+            sync_irq_levels(i, /*edges=*/false);
         }
         return true;
     }
@@ -181,8 +185,14 @@ public:
 
     bool raw_output_enable(uint32_t i, uint32_t fsel, bool* out) const noexcept {
         const Pin& p = pins_[i];
-        if (p.always_output_enabled) {
-            *out = true;
+        if (p.always_output_enabled) {  // a QSPI pin: SIO drives it through GPIO_HI_OE (datasheet 2.19.2, table 282); XIP and the rest keep it enabled
+            if (fsel != kFuncSio) {
+                *out = true;
+                return true;
+            }
+            uint32_t bits = 0;
+            if (!read_source(kSrcSioQspiOe, &bits)) return false;
+            *out = ((bits >> p.index) & 1u) != 0;
             return true;
         }
         uint32_t source = 0;
@@ -198,6 +208,16 @@ public:
 
     bool raw_output_value(uint32_t i, uint32_t fsel, bool* out) const noexcept {
         const Pin& p = pins_[i];
+        if (p.always_output_enabled) {  // a QSPI pin: only SIO (GPIO_HI_OUT) drives its level; the XIP side is not modelled
+            if (fsel != kFuncSio) {
+                *out = false;
+                return true;
+            }
+            uint32_t bits = 0;
+            if (!read_source(kSrcSioQspiValue, &bits)) return false;
+            *out = ((bits >> p.index) & 1u) != 0;
+            return true;
+        }
         uint32_t source = 0;
         if (!source_for(fsel, /*value=*/true, &source)) {
             *out = false;
@@ -306,19 +326,31 @@ public:
     }
     bool refresh_input(uint32_t i) noexcept { return apply_input_value(i, pins_[i].raw_input_value); }
 
+    // The level the interrupt logic sees: the pad's reading behind its input buffer (PADS IE) - "Level High: the GPIO pin is a logical 1" (datasheet 2.19.3).
+    bool seen_level(uint32_t i) const noexcept { return eff_raw_input(i) && (pins_[i].pad_value & pin_bits::kPadInputEnable) != 0; }
+
+    // INTR's level bits follow the seen level at all times (read only, "not latched"); the edge bits latch on a *transition* of it.
+    void sync_irq_levels(uint32_t i, bool edges) noexcept {
+        Pin& p = pins_[i];
+        const bool now = seen_level(i);
+        if (edges && now != p.seen) p.irq_status |= now ? pin_bits::kIrqEdgeHigh : pin_bits::kIrqEdgeLow;
+        p.seen = now;
+        p.irq_status = (p.irq_status & ~(pin_bits::kIrqLevelHigh | pin_bits::kIrqLevelLow)) | (now ? pin_bits::kIrqLevelHigh : pin_bits::kIrqLevelLow);
+    }
+
     bool apply_input_value(uint32_t i, bool value) noexcept {
         Pin& p = pins_[i];
         p.raw_input_value = value;
         const bool prev_irq_value = irq_value(i);
-        if (value && (p.pad_value & pin_bits::kPadInputEnable)) {
-            p.irq_status |= pin_bits::kIrqEdgeHigh | pin_bits::kIrqLevelHigh;
-            p.irq_status &= ~pin_bits::kIrqLevelLow;
-        } else {
-            p.irq_status |= pin_bits::kIrqEdgeLow | pin_bits::kIrqLevelLow;
-            p.irq_status &= ~pin_bits::kIrqLevelHigh;
-        }
+        sync_irq_levels(i, /*edges=*/true);
         if (irq_value(i) != prev_irq_value && !io_interrupt()) return false;
         return host_.input_changed == nullptr || host_.input_changed(host_.ctx, p.index, (p.ctrl & 0x1F) == kFuncPwm);
+    }
+
+    // The pad register was written: if that moved the level the interrupt logic sees (IE, or a pull on a floating pin), it is an input change.
+    bool pad_changed(uint32_t i) noexcept {
+        if (seen_level(i) == pins_[i].seen) return true;
+        return refresh_input(i);
     }
 
     // INTR write: acknowledge edge interrupts (`value` is the raw written nibble).
@@ -337,7 +369,7 @@ public:
 
     // `GPIOPin.reset(io, pads)`: the chip's own registers back to power-on, what is wired to the pin left alone. `last_state` is
     // recomputed *after* the registers are back, so no spurious edge is announced for a transition the pin never made.
-    bool reset(uint32_t i, bool io, bool pads) noexcept {
+    bool reset(uint32_t i, bool io, bool pads, uint32_t pad_reset = pin_bits::kDefaultPad) noexcept {
         Pin& p = pins_[i];
         if (io) {
             p.ctrl = pin_bits::kDefaultCtrl;
@@ -345,7 +377,9 @@ public:
             p.irq_force_mask = 0;
             p.irq_status = 0;
         }
-        if (pads) p.pad_value = pin_bits::kDefaultPad;
+        if (pads) p.pad_value = pad_reset;
+        p.seen = false;
+        sync_irq_levels(i, /*edges=*/false);  // a reset raises no edge; the level bits follow the pin
         int code = 0;
         if (!state_code(i, &code)) return false;
         p.last_state = code;

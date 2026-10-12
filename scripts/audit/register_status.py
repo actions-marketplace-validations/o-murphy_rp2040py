@@ -23,13 +23,25 @@ ALL = "all"  # every register of the block
 # Blocks read against the datasheet (record 0098) and, but for the exceptions listed below, acting on their registers
 AUDITED = {
     "M0PLUS", "SIO", "TIMER", "WATCHDOG", "RTC", "UART", "SPI", "I2C", "ADC", "PWM", "DMA", "PIO", "SSI", "CLOCKS", "PLL", "XOSC", "PSM", "RESETS", "SYSCFG", "SYSINFO", "TBMAN",
-    "VREG_AND_CHIP_RESET", "BUSCTRL", "ROSC",
+    "VREG_AND_CHIP_RESET", "BUSCTRL", "ROSC", "IO_BANK0", "IO_QSPI", "PADS_BANK0", "PADS_QSPI",
 }  # fmt: skip
-# Blocks never audited: whatever they answer is unchecked (IO_BANK0, PADS_*, USB, XIP: the ports still to do; IO_QSPI: nothing there)
-UNAUDITED = {"IO_BANK0", "IO_QSPI", "PADS_BANK0", "PADS_QSPI", "USB"}
+# Blocks never audited: whatever they answer is unchecked (USB, XIP: the ports still to do)
+UNAUDITED = {"USB"}
 
 # block -> {offset: what is not acted on} for registers that act but not in every field (from 0098's backlog and the second passes)
 PARTIAL: dict[str, dict[int, str]] = {
+    "IO_BANK0": {
+        **{
+            offset: "PROC1 / DORMANT_WAKE: stored; there is no second core and no dormant mode to raise a line"
+            for offset in range(0x130, 0x190, 4)
+        },
+    },
+    "IO_QSPI": {
+        **{
+            offset: "PROC1 / DORMANT_WAKE: stored; there is no second core and no dormant mode to raise a line"
+            for offset in range(0x40, 0x58, 4)
+        },
+    },
     "ROSC": {
         0x00: "CTRL: DISABLE is stored, the oscillator keeps running; STABLE follows ENABLE at once",
         0x04: "FREQA: the drive strengths are validated and stored; they do not change the frequency (no figures in the datasheet)",
@@ -124,7 +136,11 @@ STUBS: dict[str, tuple[object, str]] = {
         "PWR (PD, VCOPD, POSTDIVPD, DSMPD) is stored: the PLL is always locked and running (peripherals/pll.py)",
     ),
     "XOSC": ({0x1C}, "COUNT is loaded by a write but never counts down (peripherals/_xosc.py)"),
-    "PADS_BANK0": ({0x00}, "VOLTAGE_SELECT is stored (peripherals/pads.py)"),
+    "PADS_BANK0": (
+        {0x00, 0x7C, 0x80},
+        "VOLTAGE_SELECT, SWCLK and SWD are stored (peripherals/pads.py): the voltage thresholds and the debug pads have no electrical model",
+    ),
+    "PADS_QSPI": ({0x00}, "VOLTAGE_SELECT is stored (peripherals/pads.py)"),
     "USB": (
         {0x60, 0x64, 0x68, 0x6C, 0x70, 0x78},
         "EP_ABORT, EP_ABORT_DONE, EP_STALL_ARM, NAK_POLL, EP_STATUS_STALL_NAK and USB_PWR are stored in peripherals/usb.py and nothing reads them back for behaviour (found by a static scan; the block itself is not audited)",

@@ -191,7 +191,7 @@ class RP2040:
         # polls it - CircuitPython 10.x does, from RAM, during boot - never sees it go high.
         # See docs/records/0050-qspi-pad-reset-values.md.
         for _qspi_pin, _pad_reset in zip(self.qspi, QSPI_PAD_RESET_VALUES):
-            _qspi_pin.pad_value = _pad_reset
+            _qspi_pin.reset(io=False, pad_reset=_pad_reset)
 
         self.dma = RPDMA(self, "DMA")
         self.pio = [
@@ -230,6 +230,8 @@ class RP2040:
         self.xip_ctrl = RPXIPCtrl(self, "XIP_CTRL_BASE")
         self.ssi = RPSSI(self, "SSI")
         self.xosc = RPXOSC(self, "XOSC_BASE")
+        self.io_bank0 = RPIO(self, "IO_BANK0_BASE")
+        self.io_qspi = RPIO(self, "IO_QSPI_BASE", pins=self.qspi)
         self.rosc = RPROSC(self, "ROSC_BASE")
 
         self.peripherals: dict[int, Peripheral] = {
@@ -240,8 +242,8 @@ class RP2040:
             0x40008: self.clocks,
             0x4000C: self.resets,
             0x40010: self.psm,
-            0x40014: RPIO(self, "IO_BANK0_BASE"),
-            0x40018: RPIO(self, "IO_QSPI_BASE", pins=self.qspi),
+            0x40014: self.io_bank0,
+            0x40018: self.io_qspi,
             0x4001C: self.pads_bank0,
             0x40020: self.pads_qspi,
             0x40024: self.xosc,
@@ -467,6 +469,7 @@ class RP2040:
         if resets_wdsel & RESET_IO_BANK0:
             for pin in self.gpio:
                 pin.reset(pads=False)
+            self.io_bank0.reset()
         if resets_wdsel & RESET_PADS_BANK0:
             for pin in self.gpio:
                 pin.reset(io=False)
@@ -474,14 +477,13 @@ class RP2040:
         if resets_wdsel & RESET_IO_QSPI:
             for qspi_pin in self.qspi:
                 qspi_pin.reset(pads=False)
+            self.io_qspi.reset()
         if resets_wdsel & RESET_PADS_QSPI:
-            for qspi_pin in self.qspi:
-                qspi_pin.reset(io=False)
             # PADS_QSPI does not share BANK0's reset value - GPIO_QSPI_SS's pull-up is what holds
             # the flash deselected and what makes BOOTSEL readable (record 0050). Re-applied here
             # exactly as __init__ does it, right after the generic pad reset above.
             for qspi_pin, pad_reset in zip(self.qspi, QSPI_PAD_RESET_VALUES):
-                qspi_pin.pad_value = pad_reset
+                qspi_pin.reset(io=False, pad_reset=pad_reset)
             self.pads_qspi.reset()
 
         if resets_wdsel & RESET_PWM:

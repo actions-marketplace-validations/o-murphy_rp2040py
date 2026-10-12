@@ -98,7 +98,7 @@ Follows the datasheet's own table of contents (chapter.section), so a row is som
 | 2.15.5 | Resus | Missing | the `FRCE` slice needs no stopped-clock model; the detection does | Go-ahead |
 | 2.15.6 | Programmer's model: configuring a generator | Done | | - |
 | 2.15.6.3 | A GPIO output clock (`CLK_GPOUT0-3`) | Stub | CTRL / DIV are stored; nothing is driven onto a pin | Go-ahead |
-| 2.15.6.4, 2.15.6.5, 2.15.6.6 | A GPIO input clock, enabling resus, configuring sleep mode | Missing | | Go-ahead |
+| 2.15.6.4, 2.15.6.5, 2.15.6.6 | A GPIO input clock, enabling resus, configuring sleep mode | Missing | resus needs a "stopped clk_sys" model (requirements in 0098) | After the gate |
 | 2.16.1, 2.16.2 | XOSC: overview, usage (enable, `STATUS.STABLE`) | Done | 0098 | - |
 | 2.16.3 | XOSC: start-up delay | Stub | `STARTUP` is stored; `STABLE` is set at once, not after the delay | Go-ahead |
 | 2.16.4 | XOSC counter | Stub | `COUNT` is loaded by a write and never counts down | Go-ahead |
@@ -121,7 +121,7 @@ Follows the datasheet's own table of contents (chapter.section), so a row is som
 | 3.5.3 | FIFO joining (`FJOIN_TX/RX`) | Done | 8-deep joined FIFO, the other reads full and empty (PUSH / PULL stall, TXOVER / RXUNDER, FSTAT, FLEVEL, DREQ, interrupts), both bits make both unavailable, a change flushes (0098) | - |
 | 3.5.4 | Autopush and autopull | Partial | the autopull happens when the next `OUT` starts, not at the `OUT` that reaches the threshold | Go-ahead |
 | 3.5.5 | Clock dividers | Done | | - |
-| 3.5.6 | GPIO mapping | Partial | `OUT_STICKY`, `INLINE_OUT_EN`, `OUT_EN_SEL` and the input synchroniser bypass are stored and ignored | Go-ahead |
+| 3.5.6 | GPIO mapping | Partial | `OUT_STICKY`, `INLINE_OUT_EN`, `OUT_EN_SEL` and the input synchroniser bypass are stored and ignored; the requirement (per-cycle write arbitration, highest machine wins) is in 0098 | With IO_BANK0 port |
 | 3.5.7 | Forced and EXEC'd instructions | Done | | - |
 | 3.6 | Examples | Partial | WS2812 is a test; duplex SPI, UART TX/RX, Manchester, BMC, I2C, PWM, addition are Unchecked | - |
 
@@ -142,7 +142,7 @@ Follows the datasheet's own table of contents (chapter.section), so a row is som
 | 4.3.5-4.3.7 | I2C: behaviour, protocols, TX FIFO management with START / STOP / RESTART | Done | master mode, 0098 | - |
 | 4.3.8 | I2C: multiple master arbitration | Done | `ARB_LOST` | - |
 | 4.3.9 | I2C: clock synchronisation | Unchecked | | - |
-| 4.3.10.1 | I2C: slave mode | Missing | needs an external master on the bus (requirements in 0098) | Needs a bus model |
+| 4.3.10.1 | I2C: slave mode | Missing | needs an external master on the bus (requirements in 0098) | Needs a bus model, after the gate |
 | 4.3.10.2-4.3.10.4 | I2C: master mode, disabling, aborting | Done | | - |
 | 4.3.11 | I2C: spike suppression | Stub | registers only | - |
 | 4.3.12, 4.3.14 | I2C: fast mode plus, IC_CLK configuration | Done | registers | - |
@@ -163,7 +163,7 @@ Follows the datasheet's own table of contents (chapter.section), so a row is som
 | 4.9.5 | ADC: temperature sensor as channel 4 | Partial | `CS.TS_EN` does not gate it | Go-ahead |
 | 4.9.3, 4.9.4 | ADC: ENOB, INL / DNL | n/a | silicon characteristics | - |
 | 4.10 | SSI: the flash-command model used by the boot ROM and XIP, `DR` aliases, clear-on-disable | Done | 0098 | - |
-| 4.10.5, 4.10.7, 4.10.8 | SSI: own 16-entry FIFOs, the five interrupts, `TMOD` 00/01/10/11 | Stub | 21 of 28 registers are stubs; requirements in 0098 | Go-ahead |
+| 4.10.5, 4.10.7, 4.10.8 | SSI: own 16-entry FIFOs, the five interrupts, `TMOD` 00/01/10/11 | Stub | 21 of 28 registers are stubs; requirements in 0098 | With XIP_CTRL port |
 | 4.10.6 | SSI: 32-bit frame size | Missing | | Go-ahead |
 | 4.10.11 | SSI: DMA interface | Missing | | Go-ahead |
 | 4.10 | SSI: XIP streaming | Missing | read datasheet 2.6 first | With the XIP_CTRL port |

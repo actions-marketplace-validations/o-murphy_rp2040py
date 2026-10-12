@@ -38,6 +38,14 @@ cdef void _warn_trampoline(void* ctx, uint32_t kind, uint32_t offset, int64_t va
         park_error(error)
 
 
+cdef void _system_reset_trampoline(void* ctx) noexcept:
+    cdef RPPPB ppb = <RPPPB> ctx
+    try:
+        ppb.on_system_reset_request()
+    except BaseException as error:
+        park_error(error)
+
+
 cdef class _AlarmView:
     """SysTick's compare alarm as the reference's `Timer32PeriodicAlarm` shows it (`target`, `enable`): the state lives in the C++ block."""
 
@@ -154,6 +162,8 @@ cdef class RPPPB:
         self._core = rp2040.core
         cpu = <Cpu*> (<size_t> native_cpu_address())
         host.warn = _warn_trampoline
+        host.system_reset_request = _system_reset_trampoline
+        self.on_system_reset_request = self._default_system_reset_request
         host.ctx = <void*> self
         self._block.init(cpu, &(<SimulationClock> clock)._clock, host, <double> rp2040.clk_sys, <uint32_t> int(MAX_HARDWARE_IRQ))
         timer = _TimerView.__new__(_TimerView)
@@ -164,6 +174,32 @@ cdef class RPPPB:
         alarm._owner = self
         alarm._alarm = &self._block.alarm
         self.systick_alarm = alarm
+
+    def _default_system_reset_request(self):
+        # AIRCR.SYSRESETREQ: "Reset the core only" (datasheet 2.4.2.9)
+        self.rp2040.core.reset()
+        self.reset()
+        self.rp2040.leave_reset()
+
+    @property
+    def scr(self):
+        return self._block.scr
+
+    @property
+    def mpu_ctrl(self):
+        return self._block.mpu_ctrl
+
+    @property
+    def mpu_rnr(self):
+        return self._block.mpu_rnr
+
+    @property
+    def mpu_rbar(self):
+        return [self._block.mpu_rbar[i] for i in range(8)]
+
+    @property
+    def mpu_rasr(self):
+        return [self._block.mpu_rasr[i] for i in range(8)]
 
     def __dealloc__(self):
         # Safe whichever of this block and its clock the collector frees first: the C++ clock unlinks its alarms when it dies.

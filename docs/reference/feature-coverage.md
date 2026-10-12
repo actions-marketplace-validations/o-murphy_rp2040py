@@ -12,7 +12,7 @@ One place to see, block by block and datasheet section by section, what is model
 
 | Block | Model | Read against the datasheet | C++ core | Main gaps |
 |---|---|---|---|---|
-| Cortex-M0+ CPU, NVIC, SysTick, PPB | Partial | n/a (ARMv6-M tests; MicroPython interpreter tests) | Ported | `AIRCR`, `SCR`, `CCR`, `SHCSR` and the MPU are absent; core 1 |
+| Cortex-M0+ CPU, NVIC, SysTick, PPB | Partial | n/a (ARMv6-M tests; MicroPython interpreter tests) | Ported | System control and MPU registers present (0098); `SCR` and the MPU are stored, not acted on; core 1 |
 | SIO | Partial | Yes | Ported | inter-core FIFO; CPUID of core 1 |
 | TIMER | Partial | Yes | Ported | `DBGPAUSE` is stored (no debug halt) |
 | WATCHDOG | Partial | Yes | Ported | `PAUSE_DBG*`/`PAUSE_JTAG` are stored (no debug halt) |
@@ -57,9 +57,9 @@ Follows the datasheet's own table of contents (chapter.section), so a row is som
 | 2.3.3 | Event signals (SEV / WFE) | Done | | - |
 | 2.3.4 | Debug | Partial | a GDB stub, not an SWD/DAP model | - |
 | 2.4.1-2.4.3 | Cortex-M0+ core and programmer's model | Done | MicroPython interpreter tests: 664 files, no failure | - |
-| 2.4.4 | System control | Partial | `CPUID`, `ICSR`, `VTOR` work; **`AIRCR`, `SCR`, `CCR`, `SHCSR` absent** (`SYSRESETREQ` through `AIRCR` is how `NVIC_SystemReset()` resets) | Go-ahead |
+| 2.4.4 | System control | Partial | `CPUID`, `ICSR`, `VTOR`, `AIRCR` (`SYSRESETREQ` resets the core only, through the `on_system_reset_request` hook), `CCR`, `SHCSR.SVCALLPENDED`, reserved bits of `VTOR`/`SHPR2`/`SHPR3`; **`SCR` is stored only** (`SLEEPONEXIT`, `SEVONPEND` do nothing) | Go-ahead |
 | 2.4.5 | NVIC, SysTick | Done | | - |
-| 2.4.6 | MPU | Missing | `MPU_TYPE`, `MPU_CTRL`, `MPU_RNR`, `MPU_RBAR`, `MPU_RASR` absent | Go-ahead |
+| 2.4.6 | MPU | Stub | `MPU_TYPE` (8 regions), `MPU_CTRL`, `MPU_RNR`, `MPU_RBAR` (`VALID`/`REGION`), `MPU_RASR` registers store and read back; **no access is checked against a region** (no MemManage on ARMv6-M: a violation is a HardFault, which the core does not raise) | Go-ahead |
 | 2.5.1 | DMA: configuring channels | Done | 0098 | - |
 | 2.5.2 | DMA: starting (aliases, triggers, chaining, null triggers) | Done | the datasheet's two example use cases run as tests (0098) | - |
 | 2.5.3 | DMA: DREQ, system table | Partial | I2C and SSI have no DREQ output | Go-ahead |

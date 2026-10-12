@@ -13,7 +13,7 @@ from utils.ppb_diff import MUTANTS, PPB_BASE, Rig, coverage, generate, mutant_ri
 STEPS = 3000
 DIFF_STEPS = 2000
 SEEDS = range(1, 5)
-MUTANT_SEEDS = range(1, 9)
+MUTANT_SEEDS = range(1, 17)
 MUTANT_STEPS = 1500
 
 
@@ -115,4 +115,14 @@ def test_the_runs_exercise_what_they_claim_to():
         "scb.pending",
     ):
         assert total.get(name, 0) >= 100, (name, total)
+    for name in (
+        "scb.svcall_pending",
+        "scb.scr_set",
+        "mpu.enabled",
+        "mpu.regions_set",
+        "aircr.sysreset",
+        "aircr.bad_key",
+    ):
+        assert total.get(name, 0) >= 10, (name, total)
     assert total.get("log.log", 0) >= 10, total
+    assert total.get("log.sysreset", 0) >= 10, total

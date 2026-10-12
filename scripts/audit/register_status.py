@@ -30,6 +30,7 @@ UNAUDITED = {"IO_BANK0", "IO_QSPI", "PADS_BANK0", "PADS_QSPI", "USB", "ROSC"}
 
 # block -> {offset: what is not acted on} for registers that act but not in every field (from 0098's backlog and the second passes)
 PARTIAL: dict[str, dict[int, str]] = {
+    "M0PLUS": {0xED0C: "AIRCR: SYSRESETREQ resets the core only; VECTCLRACTIVE (a debug bit) is ignored"},
     "UART": {
         0x000: "DR[11:8] (OE/BE/PE/FE of the entry) always 0",
         0x018: "FR modem bits (CTS/DSR/DCD/RI) read 0",
@@ -105,6 +106,10 @@ STUBS: dict[str, tuple[object, str]] = {
     "BUSCTRL": (
         {0x000, 0x00C, 0x014, 0x01C, 0x024, 0x008, 0x010, 0x018, 0x020},
         "BUS_PRIORITY, PERFSEL0-3 are stored and PERFCTR0-3 stay 0: there is no arbitration and no bus-fabric events to count (peripherals/_busctrl.py)",
+    ),
+    "M0PLUS": (
+        {0xED10, 0xED94, 0xED98, 0xED9C, 0xEDA0},
+        "SCR (SLEEPONEXIT, SLEEPDEEP, SEVONPEND) and the MPU (CTRL, RNR, RBAR, RASR) are stored and read back as the datasheet lays them out; nothing acts on them: WFI ignores SLEEPONEXIT and SEVONPEND, and no access is ever checked against a region (peripherals/_ppb.py)",
     ),
     "UART": ({0x020}, "UARTILPR (IrDA low-power counter) is stored: there is no IrDA (peripherals/_uart.py)"),
     "TIMER": ({0x2C}, "DBGPAUSE is stored: there is no debug halt for the timer to pause on (peripherals/_timer.py)"),

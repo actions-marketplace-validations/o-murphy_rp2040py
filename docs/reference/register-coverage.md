@@ -12,11 +12,11 @@
 
 **This is a curated list, not a measurement.** "Answers" is measured (a read at the register's address does not warn "Unimplemented peripheral read"; for a write-only register, a write of 0 does not warn). "Acts" is curated: it means the block was audited and the register is in none of the stub / partial lists of `scripts/audit/register_status.py`, each entry of which carries its evidence. A stub that nobody has listed yet shows as Acts; if you find one, add it there and re-run the script. For what each block does and does not do, see [feature-coverage.md](feature-coverage.md). A table shared by several instances (UART0/UART1, the DMA's per-channel tables) is listed once, as the datasheet gives it.
 
-**474 registers: 278 act, 83 are stubs, 16 partial, 33 exist but are unchecked, 64 are absent.**
+**474 registers: 281 act, 88 are stubs, 17 partial, 33 exist but are unchecked, 55 are absent.**
 
 | Block | Registers | Acts | Stub | Partial | Unchecked | Absent |
 |---|---|---|---|---|---|---|
-| M0PLUS | 29 | 20 | 0 | 0 | 0 | 9 |
+| M0PLUS | 29 | 23 | 5 | 1 | 0 | 0 |
 | SIO | 63 | 59 | 0 | 1 | 0 | 3 |
 | TIMER | 17 | 16 | 1 | 0 | 0 | 0 |
 | WATCHDOG | 5 | 4 | 0 | 1 | 0 | 0 |
@@ -49,6 +49,8 @@
 
 ## M0PLUS
 
+Stubs in this block: SCR (SLEEPONEXIT, SLEEPDEEP, SEVONPEND) and the MPU (CTRL, RNR, RBAR, RASR) are stored and read back as the datasheet lays them out; nothing acts on them: WFI ignores SLEEPONEXIT and SEVONPEND, and no access is ever checked against a region (peripherals/_ppb.py).
+
 | Offset | Register | Status | Note |
 |---|---|---|---|
 | `0xe014` | SYST_RVR | Acts |  |
@@ -69,17 +71,17 @@
 | `0xed00` | CPUID | Acts |  |
 | `0xed04` | ICSR | Acts |  |
 | `0xed08` | VTOR | Acts |  |
-| `0xed0c` | AIRCR | Absent |  |
-| `0xed10` | SCR | Absent |  |
-| `0xed14` | CCR | Absent |  |
+| `0xed0c` | AIRCR | Partial | AIRCR: SYSRESETREQ resets the core only; VECTCLRACTIVE (a debug bit) is ignored |
+| `0xed10` | SCR | Stub |  |
+| `0xed14` | CCR | Acts |  |
 | `0xed1c` | SHPR2 | Acts |  |
 | `0xed20` | SHPR3 | Acts |  |
-| `0xed24` | SHCSR | Absent |  |
-| `0xed90` | MPU_TYPE | Absent |  |
-| `0xed94` | MPU_CTRL | Absent |  |
-| `0xed98` | MPU_RNR | Absent |  |
-| `0xed9c` | MPU_RBAR | Absent |  |
-| `0xeda0` | MPU_RASR | Absent |  |
+| `0xed24` | SHCSR | Acts |  |
+| `0xed90` | MPU_TYPE | Acts |  |
+| `0xed94` | MPU_CTRL | Stub |  |
+| `0xed98` | MPU_RNR | Stub |  |
+| `0xed9c` | MPU_RBAR | Stub |  |
+| `0xeda0` | MPU_RASR | Stub |  |
 
 ## SIO
 

@@ -73,7 +73,18 @@ PARTIAL: dict[str, dict[int, str]] = {
     },
     "I2C": {0x000: "IC_CON: the slave bits (IC_SLAVE_DISABLE, IC_10BITADDR_SLAVE) do nothing: no slave mode"},
     "PLL": {0x000: "CS.LOCK is always 1 (no start-up time)"},
-    "SIO": {0x000: "CPUID is always 0 (no core 1)"},
+    "SIO": {
+        0x000: "CPUID is always 0 (no core 1)",
+        0x004: "GPIO_IN reads the pad at once: the two-cycle input synchroniser is not modelled (SYSCFG.PROC_IN_SYNC_BYPASS is stored)",
+        0x008: "GPIO_HI_IN reads the pad at once: the two-cycle input synchroniser is not modelled (SYSCFG.PROC_IN_SYNC_BYPASS_HI is stored)",
+    },
+    "PADS_BANK0": {
+        0x04: "GPIOn: IE, PUE, PDE and OD act; DRIVE, SLEWFAST and SCHMITT are stored: there is no electrical model"
+    },
+    "PADS_QSPI": {
+        offset: "GPIO_QSPI_*: IE, PUE, PDE and OD act; DRIVE, SLEWFAST and SCHMITT are stored: there is no electrical model"
+        for offset in range(0x04, 0x1C, 4)
+    },
     "USB": {
         0x000: "ADDR_ENDP: acts as the host's device address (`_dev_addr_ctrl`); in device mode the value is only stored"
     },
@@ -115,7 +126,7 @@ STUBS: dict[str, tuple[object, str]] = {
     ),
     "SYSCFG": (
         {0x04, 0x08, 0x0C, 0x10, 0x14, 0x18},
-        "only PROC0_NMI_MASK has an effect (peripherals/_syscfg.py); the rest is stored: no second core, no debug port, no memory to power down",
+        "only PROC0_NMI_MASK has an effect (peripherals/_syscfg.py); the rest is stored: no second core, no debug port, no memory to power down, and PROC_IN_SYNC_BYPASS(_HI) bypass a synchroniser whose two cycles of latency are not modelled",
     ),
     "VREG_AND_CHIP_RESET": (
         {0x00, 0x04},

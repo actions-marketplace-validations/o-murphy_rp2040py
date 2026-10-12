@@ -12,12 +12,12 @@
 
 **This is a curated list, not a measurement.** "Answers" is measured (a read at the register's address does not warn "Unimplemented peripheral read"; for a write-only register, a write of 0 does not warn). "Acts" is curated: it means the block was audited and the register is in none of the stub / partial lists of `scripts/audit/register_status.py`, each entry of which carries its evidence. A stub that nobody has listed yet shows as Acts; if you find one, add it there and re-run the script. For what each block does and does not do, see [feature-coverage.md](feature-coverage.md). A table shared by several instances (UART0/UART1, the DMA's per-channel tables) is listed once, as the datasheet gives it.
 
-**474 registers: 308 act, 91 are stubs, 52 partial, 13 exist but are unchecked, 10 are absent.**
+**474 registers: 303 act, 91 are stubs, 57 partial, 13 exist but are unchecked, 10 are absent.**
 
 | Block | Registers | Acts | Stub | Partial | Unchecked | Absent |
 |---|---|---|---|---|---|---|
 | M0PLUS | 29 | 23 | 5 | 1 | 0 | 0 |
-| SIO | 63 | 59 | 0 | 1 | 0 | 3 |
+| SIO | 63 | 57 | 0 | 3 | 0 | 3 |
 | TIMER | 17 | 16 | 1 | 0 | 0 | 0 |
 | WATCHDOG | 5 | 4 | 0 | 1 | 0 | 0 |
 | RTC | 12 | 12 | 0 | 0 | 0 | 0 |
@@ -42,8 +42,8 @@
 | BUSCTRL | 9 | 1 | 8 | 0 | 0 | 0 |
 | IO_BANK0 | 40 | 16 | 0 | 24 | 0 | 0 |
 | IO_QSPI | 10 | 4 | 0 | 6 | 0 | 0 |
-| PADS_BANK0 | 4 | 1 | 3 | 0 | 0 | 0 |
-| PADS_QSPI | 3 | 2 | 1 | 0 | 0 | 0 |
+| PADS_BANK0 | 4 | 0 | 3 | 1 | 0 | 0 |
+| PADS_QSPI | 3 | 0 | 1 | 2 | 0 | 0 |
 | USB | 23 | 0 | 6 | 1 | 13 | 3 |
 | XIP | 8 | 0 | 8 | 0 | 0 | 0 |
 
@@ -88,8 +88,8 @@ Stubs in this block: SCR (SLEEPONEXIT, SLEEPDEEP, SEVONPEND) and the MPU (CTRL, 
 | Offset | Register | Status | Note |
 |---|---|---|---|
 | `0x000` | CPUID | Partial | CPUID is always 0 (no core 1) |
-| `0x004` | GPIO_IN | Acts |  |
-| `0x008` | GPIO_HI_IN | Acts |  |
+| `0x004` | GPIO_IN | Partial | GPIO_IN reads the pad at once: the two-cycle input synchroniser is not modelled (SYSCFG.PROC_IN_SYNC_BYPASS is stored) |
+| `0x008` | GPIO_HI_IN | Partial | GPIO_HI_IN reads the pad at once: the two-cycle input synchroniser is not modelled (SYSCFG.PROC_IN_SYNC_BYPASS_HI is stored) |
 | `0x010` | GPIO_OUT | Acts |  |
 | `0x014` | GPIO_OUT_SET | Acts |  |
 | `0x018` | GPIO_OUT_CLR | Acts |  |
@@ -523,7 +523,7 @@ Stubs in this block: COUNT is loaded by a write but never counts down (periphera
 
 ## SYSCFG
 
-Stubs in this block: only PROC0_NMI_MASK has an effect (peripherals/_syscfg.py); the rest is stored: no second core, no debug port, no memory to power down.
+Stubs in this block: only PROC0_NMI_MASK has an effect (peripherals/_syscfg.py); the rest is stored: no second core, no debug port, no memory to power down, and PROC_IN_SYNC_BYPASS(_HI) bypass a synchroniser whose two cycles of latency are not modelled.
 
 | Offset | Register | Status | Note |
 |---|---|---|---|
@@ -642,7 +642,7 @@ Stubs in this block: VOLTAGE_SELECT, SWCLK and SWD are stored (core/pads.hpp): t
 | Offset | Register | Status | Note |
 |---|---|---|---|
 | `0x00` | VOLTAGE_SELECT | Stub |  |
-| `0x04` | GPIO0, GPIO1, …, GPIO28, GPIO29 | Acts |  |
+| `0x04` | GPIO0, GPIO1, …, GPIO28, GPIO29 | Partial | GPIOn: IE, PUE, PDE and OD act; DRIVE, SLEWFAST and SCHMITT are stored: there is no electrical model |
 | `0x7c` | SWCLK | Stub |  |
 | `0x80` | SWD | Stub |  |
 
@@ -653,8 +653,8 @@ Stubs in this block: VOLTAGE_SELECT is stored (core/pads.hpp).
 | Offset | Register | Status | Note |
 |---|---|---|---|
 | `0x00` | VOLTAGE_SELECT | Stub |  |
-| `0x04` | GPIO_QSPI_SCLK | Acts |  |
-| `0x18` | GPIO_QSPI_SS | Acts |  |
+| `0x04` | GPIO_QSPI_SCLK | Partial | GPIO_QSPI_*: IE, PUE, PDE and OD act; DRIVE, SLEWFAST and SCHMITT are stored: there is no electrical model |
+| `0x18` | GPIO_QSPI_SS | Partial | GPIO_QSPI_*: IE, PUE, PDE and OD act; DRIVE, SLEWFAST and SCHMITT are stored: there is no electrical model |
 
 ## USB
 

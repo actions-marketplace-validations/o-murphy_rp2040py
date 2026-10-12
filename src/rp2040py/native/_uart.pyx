@@ -8,13 +8,14 @@ C++ read/write functions in the bus's window table (see `_native_window`), so a 
 the edge of the block, reached through trampolines whose failures are parked in the shared slot of `_pending.pyx` and re-raised by whoever
 called in: the interrupt line (`rp2040.set_interrupt`), the TX DREQ (`rp2040.dma`), the transmitted-byte callback `on_byte`, the baud-rate
 announcement `on_baud_rate_change` (the division by `clk_peri` and the callback are Python's: a zero divider is a `ZeroDivisionError` that
-must reach the writer) and the logger.
+must reach the writer), the bit time (`bit_ns`, the reference's own helper, so both sides compute the same double) and the logger. The transmitter's
+shift register is an alarm of the chip's C++ clock, so a character's time on the wire runs without Python (it needs the native `SimulationClock`, like the ADC's).
 
 The API is the reference's: the registers' private attributes (`_ctrl_register`, `_line_ctrl_register`, `_int_divisor`, `_frac_divisor`,
 `_interrupt_mask`, `_interrupt_status`, readable and writable - `tests/test_chip_reset.py` pokes them), `rx_fifo` (a view with the reference
 FIFO's attribute names), `flags`, `enabled`/`tx_enabled`/`rx_enabled`/`fifos_enabled`, `word_length`, `baud_divider`, `baud_rate`,
-`feed_byte`, `check_interrupts`, `reset`, `on_byte`/`on_baud_rate_change`, plus `BasePeripheral`'s surface (name, rp2040, raw_write_value,
-read_uint32, write_uint32, write_uint32_atomic, warn/...). Unlike the DMA it needs neither the chip's bus nor a native clock.
+`feed_byte`, `check_interrupts`, `reset`, `on_byte`/`on_baud_rate_change`, `tx_fifo` (a view), `tx_full`/`tx_capacity`/`tx_trigger`, plus `BasePeripheral`'s surface (name,
+rp2040, raw_write_value, read_uint32, write_uint32, write_uint32_atomic, warn/...). Unlike the DMA it does not need the chip's bus.
 """
 
 from libc.stdint cimport int64_t, uint32_t
@@ -23,7 +24,8 @@ from libcpp cimport bool as cppbool
 from rp2040py.native._pending cimport park_error, pending_flag, raise_if_pending
 from rp2040py.native._window_map cimport WindowHandler
 
-from rp2040py.peripherals._uart import _WORD_LENGTH_BY_LCR_WLEN, _baud_rate
+from rp2040py.native._simulation_clock cimport SimulationClock
+from rp2040py.peripherals._uart import _WORD_LENGTH_BY_LCR_WLEN, _baud_rate, _bit_ns
 
 __all__ = ("RPUART",)
 
@@ -81,6 +83,16 @@ cdef cppbool _baud_trampoline(void* ctx) noexcept:
     return True
 
 
+cdef cppbool _bit_trampoline(void* ctx, double* nanos) noexcept:
+    cdef RPUART uart = <RPUART> ctx
+    try:
+        nanos[0] = _bit_ns(uart.rp2040.clk_peri, uart.baud_divider)
+    except BaseException as error:
+        park_error(error)
+        return False
+    return True
+
+
 cdef void _warn_trampoline(void* ctx, uint32_t kind, uint32_t offset, int64_t value) noexcept:
     cdef RPUART uart = <RPUART> ctx
     try:
@@ -132,9 +144,48 @@ cdef class _RxFifo:
         self._owner._block.rx_reset()
 
 
+cdef class _TxFifo:
+    """The TX FIFO as the reference's `utils.fifo.FIFO(32)` shows it."""
+
+    cdef RPUART _owner
+
+    @property
+    def size(self):
+        return 32
+
+    @property
+    def item_count(self):
+        return self._owner._block.tx_count()
+
+    @property
+    def empty(self):
+        return self._owner._block.tx_empty()
+
+    @property
+    def items(self):
+        return [self._owner._block.tx_at(i) for i in range(self._owner._block.tx_count())]
+
+    def push(self, value):
+        self._owner._block.tx_push(<uint32_t> (<int64_t> value))
+
+    def pull(self):
+        return self._owner._block.tx_pull()
+
+    def reset(self):
+        self._owner._block.tx_reset()
+
+
 cdef class RPUART:
     def __init__(self, rp2040, name, irq, dreq):
         cdef UartHost host
+        clock = rp2040.clock
+        if not isinstance(clock, SimulationClock):
+            raise TypeError(
+                "the native UART schedules its transmitter's alarm on the native SimulationClock; "
+                f"{type(rp2040).__name__} with {type(clock).__name__} is not that "
+                "(use the pure-Python peripherals/_uart.RPUART with it)"
+            )
+        self.clock = clock
         self.rp2040 = rp2040
         self.name = name
         self.irq = irq
@@ -145,10 +196,15 @@ cdef class RPUART:
         host.dreq = _dreq_trampoline
         host.on_byte = _byte_trampoline
         host.baud_changed = _baud_trampoline
+        host.bit_ns = _bit_trampoline
         host.warn = _warn_trampoline
         host.ctx = <void*> self
         host.failed = pending_flag()
-        self._block.init(host)
+        self._block.init(&(<SimulationClock> clock)._clock, host)
+
+    def __dealloc__(self):
+        # Safe whichever of this block and its clock the collector frees first: the C++ clock unlinks its alarms when it dies.
+        self._block.detach()
 
     # --- the reference's attributes --------------------------------------------------------------
 
@@ -161,6 +217,28 @@ cdef class RPUART:
         cdef _RxFifo view = _RxFifo.__new__(_RxFifo)
         view._owner = self
         return view
+
+    @property
+    def tx_fifo(self):
+        cdef _TxFifo view = _TxFifo.__new__(_TxFifo)
+        view._owner = self
+        return view
+
+    @property
+    def tx_capacity(self):
+        return self._block.tx_capacity()
+
+    @property
+    def tx_full(self):
+        return self._block.tx_full()
+
+    @property
+    def tx_trigger(self):
+        return self._block.tx_trigger()
+
+    @property
+    def _tx_shifting(self):
+        return self._block.tx_shifting()
 
     @property
     def _ctrl_register(self):

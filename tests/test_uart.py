@@ -150,3 +150,79 @@ def test_an_overrun_drops_the_byte_and_sets_oe_and_its_interrupt(rp2040_factory)
     uart.feed_byte(0xEE)
     assert uart.read_uint32(UARTRSR) == 0x8 and uart.read_uint32(UARTRIS) & UARTOEINTR
     assert [uart.read_uint32(UARTDR) for _ in range(32)] == list(range(32))  # the FIFO kept its contents
+
+
+# --- the transmitter's time (RP2040 datasheet 4.2.3.2.2 "Data transmission or reception", 4.2.6.3 UARTTXINTR, UARTFR) ----------------------------------------------------------
+
+UARTFR = 0x18
+UARTLCR_H = 0x2C
+FR_TXFF, FR_TXFE, FR_BUSY = 1 << 5, 1 << 7, 1 << 3
+LCR_8N1_FEN = 0x70
+
+
+def _wired_uart(rp2040_factory, *, divisor=1):
+    """A UART at a known bit time: clk_peri / (16 x divisor) baud."""
+    rp2040 = rp2040_factory()
+    uart = rp2040.uart[0]
+    sent = []
+    uart.on_byte = sent.append
+    uart.write_uint32(UARTIBRD, divisor)
+    uart.write_uint32(UARTLCR_H, LCR_8N1_FEN)
+    uart.write_uint32(UARTCR, UART_ENABLED)
+    bit_ns = 16 * divisor * 1e9 / rp2040.clk_peri
+    return rp2040, uart, sent, bit_ns
+
+
+def test_a_character_reaches_the_line_after_ten_bit_times_and_busy_covers_the_frame(rp2040_factory):
+    rp2040, uart, sent, bit_ns = _wired_uart(rp2040_factory)
+    uart.write_uint32(UARTDR, 0x41)
+    assert (
+        sent == [] and uart.read_uint32(UARTFR) & FR_BUSY
+    )  # "BUSY ... set as soon as the transmit FIFO becomes non-empty"
+    rp2040.clock.tick(bit_ns * 9.5)
+    assert sent == []
+    rp2040.clock.tick(bit_ns * 0.5 + 1)
+    assert sent == [0x41] and not uart.read_uint32(UARTFR) & FR_BUSY  # start + 8 data + 1 stop
+
+
+def test_the_tx_fifo_is_32_deep_and_txff_marks_it_full(rp2040_factory):
+    rp2040, uart, sent, bit_ns = _wired_uart(rp2040_factory)
+    for value in range(40):
+        uart.write_uint32(UARTDR, value)
+    assert uart.read_uint32(UARTFR) & FR_TXFF and not uart.read_uint32(UARTFR) & FR_TXFE
+    rp2040.clock.tick(bit_ns * 10 * 40)
+    assert sent == list(range(33))  # one in the shift register + 32 queued; the rest were lost, as on the chip
+    assert uart.read_uint32(UARTFR) & FR_TXFE and not uart.read_uint32(UARTFR) & (FR_TXFF | FR_BUSY)
+
+
+def test_without_fen_the_tx_fifo_is_a_single_holding_register(rp2040_factory):
+    rp2040, uart, sent, bit_ns = _wired_uart(rp2040_factory)
+    uart.write_uint32(UARTLCR_H, 0x60)  # WLEN 8, FIFOs off
+    for value in (1, 2, 3):
+        uart.write_uint32(UARTDR, value)
+    assert uart.read_uint32(UARTFR) & FR_TXFF
+    rp2040.clock.tick(bit_ns * 30)
+    assert sent == [1, 2]
+
+
+def test_the_tx_interrupt_asserts_as_the_fifo_falls_to_the_trigger_level(rp2040_factory):
+    rp2040, uart, _sent, bit_ns = _wired_uart(rp2040_factory)
+    for value in range(20):  # one on the wire, 19 queued; TXIFLSEL resets to b010: at or below 16
+        uart.write_uint32(UARTDR, value)
+    assert not uart.read_uint32(0x3C) & UARTTXINTR
+    rp2040.clock.tick(bit_ns * 10 * 3 + 1)  # three characters later: 16 queued
+    assert uart.read_uint32(0x3C) & UARTTXINTR
+    uart.write_uint32(
+        UARTDR, 99
+    )  # back above the level: "cleared by writing data ... until it becomes greater than the trigger level"
+    uart.write_uint32(UARTDR, 98)
+    assert not uart.read_uint32(0x3C) & UARTTXINTR
+
+
+def test_a_loopback_byte_arrives_in_the_receiver_after_its_frame_time(rp2040_factory):
+    rp2040, uart, sent, bit_ns = _wired_uart(rp2040_factory)
+    uart.write_uint32(UARTCR, UART_ENABLED | (1 << 7))  # LBE
+    uart.write_uint32(UARTDR, 0x5A)
+    assert uart.read_uint32(UARTFR) & (1 << 4)  # RXFE: still on the wire
+    rp2040.clock.tick(bit_ns * 10 + 1)
+    assert not uart.read_uint32(UARTFR) & (1 << 4) and uart.read_uint32(UARTDR) == 0x5A and sent == []

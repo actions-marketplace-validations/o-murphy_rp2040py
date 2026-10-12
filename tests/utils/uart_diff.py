@@ -6,6 +6,8 @@ the facade gives (today the same class, later the C++ one), fed one stream of op
 
 * writes of **every register offset**, through the bus and through its four aliases (normal, XOR, SET, CLR - ``UARTICR`` clears what the bus *passed*, not the alias-decoded
   value), and reads of every offset including the unimplemented ones and the atomic-region addresses (so the warnings are compared);
+* the transmitter's time: LCR_H/IBRD/FBRD/CR/IFLS/DMACR sessions followed by bursts of DR writes (some overflow the 32-entry TX FIFO) and ``tick`` ops that move the chip's clock, so
+  characters leave the shift register after their frame time and the TX interrupt, the TX DMA request and ``UARTFR`` (TXFE/TXFF/BUSY) follow the FIFO;
 * ``feed_byte()`` in bursts long enough to overflow the 32-entry RX FIFO, DR reads that drain it (and read it empty), ``check_interrupts()``, ``reset()``;
 * the callbacks attached and detached (``on_byte``, ``on_baud_rate_change``), and ``clk_peri`` changed under the baud-rate computation - including a zero divider, whose
   ``ZeroDivisionError`` has to reach the writer on both sides.
@@ -50,6 +52,7 @@ WRITABLE = (
 UNIMPLEMENTED = (0x08, 0x14, 0x1C, 0x4C, 0x80, 0x100, 0xF00, 0xFDC, 0xFFC + 4)
 CLOCKS = (125_000_000, 48_000_000, 12_000_000, 133_000_000, 1, 0)
 INTERRUPT_BITS = (0x10, 0x20, 0x30, 0x7FF, 0x400, 0x1)
+TICKS = (100, 700, 5_000, 30_000, 200_000, 2_000_000)  # ns: from inside a character to many frames
 
 
 class Rig:
@@ -123,6 +126,8 @@ class Rig:
             self.attach_callbacks(op[1], op[2])
         elif kind == "clk":
             chip.clk_peri = op[1]
+        elif kind == "tick":
+            chip.clock.tick(op[1])
         else:
             raise ValueError(f"unknown op {op!r}")
         return None
@@ -148,6 +153,14 @@ class Rig:
                 int(uart.raw_write_value),
             ),
             "rx": (bool(fifo.empty), bool(fifo.full), int(fifo.item_count), tuple(int(v) for v in fifo.items)),
+            "tx": (
+                int(uart.tx_fifo.item_count),
+                tuple(int(v) for v in uart.tx_fifo.items),
+                bool(uart._tx_shifting),
+                int(uart.tx_capacity),
+                int(uart.tx_trigger),
+                bool(uart.tx_full),
+            ),
             "nvic": int(chip.read_uint32(NVIC_ISPR)),
         }
 
@@ -168,11 +181,166 @@ def mutant_rig(name: str) -> Rig:
         def flags(self) -> int:
             if name == "flags_no_txfe":
                 return super().flags & ~U.TXFE
+            if name == "flags_no_txff":
+                return super().flags & ~U.TXFF
+            if name == "flags_no_busy":
+                return super().flags & ~U.BUSY
+            if name == "flags_busy_fifo_only":
+                return (super().flags & ~U.BUSY) | (U.BUSY if not self.tx_fifo.empty else 0)
+            if name == "flags_busy_shift_only":
+                return (super().flags & ~U.BUSY) | (U.BUSY if self._tx_shifting else 0)
+            if name == "flags_txfe_counts_shift":
+                return (super().flags & ~U.TXFE) | (U.TXFE if self.tx_fifo.empty and not self._tx_shifting else 0)
+            if name == "flags_txff_half":
+                return (super().flags & ~U.TXFF) | (
+                    U.TXFF if self.tx_fifo.item_count >= self.tx_capacity // 2 + 1 else 0
+                )
             if name == "flags_rxff_wrong":
                 return (super().flags & ~U.RXFF) | (U.RXFF if self.rx_fifo.item_count > 16 else 0)
             return super().flags
 
+        # -- the transmitter
+        @property
+        def tx_capacity(self) -> int:
+            if name == "tx_capacity_ignores_fen":
+                return U.TX_FIFO_DEPTH
+            if name == "tx_capacity_16":
+                return 16 if self.fifos_enabled else 1
+            if name == "tx_capacity_two_without_fen":
+                return U.TX_FIFO_DEPTH if self.fifos_enabled else 2
+            return super().tx_capacity
+
+        @property
+        def tx_trigger(self) -> int:
+            if name == "tx_trigger_ignores_fen":
+                return U._TX_TRIGGER_BY_SEL.get(self._ifls & 0x7, 16)
+            if name == "tx_trigger_table_off":
+                return {0: 4, 1: 8, 2: 15, 3: 24, 4: 28}.get(self._ifls & 0x7, 16) if self.fifos_enabled else 0
+            if name == "tx_trigger_reserved_zero":
+                return {0: 4, 1: 8, 2: 16, 3: 24, 4: 28}.get(self._ifls & 0x7, 0) if self.fifos_enabled else 0
+            if name == "tx_trigger_reads_rx_field":
+                return {0: 4, 1: 8, 2: 16, 3: 24, 4: 28}.get((self._ifls >> 3) & 0x7, 16) if self.fifos_enabled else 0
+            return super().tx_trigger
+
+        def _char_ns(self) -> float:
+            if name.startswith("frame_") or name == "bit_from_rounded_baud":
+                lcr = self._line_ctrl_register
+                wlen = U._WORD_LENGTH_BY_LCR_WLEN[(lcr >> 5) & 0x3]
+                parity = 0 if name == "frame_no_parity" else (1 if lcr & U.LCR_PEN else 0)
+                stop = 1 if name == "frame_one_stop" else (2 if lcr & U.LCR_STP2 else 1)
+                start = 0 if name == "frame_no_start" else 1
+                if name == "frame_wlen_8":
+                    wlen = 8
+                bits = start + wlen + parity + stop
+                if name == "bit_from_rounded_baud":
+                    baud = self.baud_rate if self.baud_divider > 0 and self.rp2040.clk_peri > 0 else 0
+                    return (1e9 / baud * bits) if baud else 0.0
+                return U._bit_ns(self.rp2040.clk_peri, self.baud_divider) * bits
+            return super()._char_ns()
+
+        def _tx_pump(self) -> bool:
+            if not name.startswith("p_"):
+                return super()._tx_pump()
+            moved = False
+            while not self._tx_shifting and not self.tx_fifo.empty:
+                if name != "p_ignores_enable" and not self.enabled:
+                    break
+                if name != "p_ignores_txe" and not self.tx_enabled:
+                    break
+                before = self.tx_fifo.item_count
+                byte = self.tx_fifo.pull()
+                moved = True
+                ns = self._char_ns()
+                if name == "p_emit_at_start":
+                    self._tx_emit(byte)
+                    if ns > 0:
+                        self._tx_shifting = True
+                        self._tx_byte = byte
+                        self._tx_alarm.schedule(ns)
+                elif ns <= 0 or name == "p_always_instant":
+                    self._tx_emit(byte)
+                else:
+                    self._tx_shifting = True
+                    self._tx_byte = byte
+                    self._tx_alarm.schedule(ns if name != "p_ns_doubled" else ns * 2)
+                level = self.tx_fifo.item_count
+                trigger = self.tx_trigger
+                if name == "p_event_lt":
+                    hit = before > trigger and level < trigger
+                elif name == "p_no_event":
+                    hit = False
+                elif name == "p_event_only_when_empty":
+                    hit = level == 0
+                elif name == "p_event_every_pop":
+                    hit = level <= trigger
+                elif name == "p_event_before_ge":
+                    hit = before >= trigger >= level
+                elif name == "p_event_before_pull":
+                    hit = before > trigger >= before
+                elif name == "p_event_level_after_gt":
+                    hit = before > trigger and level > trigger
+                else:
+                    hit = before > trigger >= level
+                if hit:
+                    self._interrupt_status |= U.UARTTXINTR
+            return moved
+
+        def _on_tx_done(self) -> None:
+            if name == "done_no_pump":
+                self._tx_shifting = False
+                self._tx_emit(self._tx_byte)
+                self.check_interrupts()
+                self._update_dreq()
+                return
+            if name == "done_no_refresh":
+                self._tx_shifting = False
+                self._tx_emit(self._tx_byte)
+                self._tx_pump()
+                return
+            if name == "done_keeps_shifting":
+                self._tx_emit(self._tx_byte)
+                self._tx_pump()
+                self.check_interrupts()
+                self._update_dreq()
+                return
+            if name == "done_drops_byte":
+                self._tx_shifting = False
+                self._tx_pump()
+                self.check_interrupts()
+                self._update_dreq()
+                return
+            super()._on_tx_done()
+
         def _update_dreq(self) -> None:
+            if name == "dreq_tx_ignores_full":
+                tx = self.enabled and self.tx_enabled and bool(self._dmacr & U.DMACR_TXDMAE)
+                rx = (
+                    self.enabled
+                    and self.rx_enabled
+                    and bool(self._dmacr & U.DMACR_RXDMAE)
+                    and not self.rx_fifo.empty
+                    and not (self._dmacr & U.DMACR_DMAONERR and self._interrupt_status & U.UART_ERROR_INTERRUPTS)
+                )
+                (self.rp2040.dma.set_dreq if tx else self.rp2040.dma.clear_dreq)(self.dreq.tx)
+                (self.rp2040.dma.set_dreq if rx else self.rp2040.dma.clear_dreq)(self.dreq.rx)
+                return
+            if name == "dreq_tx_when_not_empty":
+                tx = (
+                    self.enabled
+                    and self.tx_enabled
+                    and bool(self._dmacr & U.DMACR_TXDMAE)
+                    and self.tx_fifo.item_count < self.tx_capacity - 1
+                )
+                rx = (
+                    self.enabled
+                    and self.rx_enabled
+                    and bool(self._dmacr & U.DMACR_RXDMAE)
+                    and not self.rx_fifo.empty
+                    and not (self._dmacr & U.DMACR_DMAONERR and self._interrupt_status & U.UART_ERROR_INTERRUPTS)
+                )
+                (self.rp2040.dma.set_dreq if tx else self.rp2040.dma.clear_dreq)(self.dreq.tx)
+                (self.rp2040.dma.set_dreq if rx else self.rp2040.dma.clear_dreq)(self.dreq.rx)
+                return
             if name == "dreq_tx_ignores_dmacr":
                 tx = self.enabled and self.tx_enabled
                 rx = self.enabled and self.rx_enabled and bool(self._dmacr & U.DMACR_RXDMAE) and not self.rx_fifo.empty
@@ -274,6 +442,47 @@ def mutant_rig(name: str) -> Rig:
             return super().read_uint32(offset)
 
         def write_uint32(self, offset: int, value: int) -> None:
+            if offset == U.UARTDR and name in ("tx_full_overwrites", "tx_no_clear_above", "tx_write_when_full_pushes"):
+                if self.enabled and self.tx_enabled:
+                    if name == "tx_full_overwrites" and self.tx_full:
+                        self.tx_fifo.pull()
+                    if not self.tx_full or name == "tx_write_when_full_pushes":
+                        self.tx_fifo.push(value & 0xFF)
+                        if self.tx_fifo.item_count > self.tx_trigger and name != "tx_no_clear_above":
+                            self._interrupt_status &= ~U.UARTTXINTR
+                    self._tx_pump()
+                    self.check_interrupts()
+                    self._update_dreq()
+                return
+            if offset == U.UARTDR and name == "dr_write_no_refresh":
+                if self.enabled and self.tx_enabled:
+                    if not self.tx_full:
+                        self.tx_fifo.push(value & 0xFF)
+                        if self.tx_fifo.item_count > self.tx_trigger:
+                            self._interrupt_status &= ~U.UARTTXINTR
+                    self._tx_pump()
+                    self.check_interrupts()
+                return
+            if offset == U.UARTDR and name == "dr_write_masked_9":
+                if self.enabled and self.tx_enabled:
+                    if not self.tx_full:
+                        self.tx_fifo.push(value & 0x1FF)
+                    self._tx_pump()
+                    self.check_interrupts()
+                    self._update_dreq()
+                return
+            if offset == U.UARTCR and name == "cr_no_pump":
+                self._ctrl_register = value & U.CR_MASK
+                self._update_dreq()
+                return
+            if offset == U.UARTCR and name == "cr_pump_no_irq":
+                self._ctrl_register = value & U.CR_MASK
+                self._tx_pump()
+                self._update_dreq()
+                return
+            if offset == U.UARTLCR_H and name == "lcr_no_dreq":
+                self._line_ctrl_register = value & U.LCR_H_MASK
+                return
             if offset == U.UARTDR and name == "dr_write_no_txintr":
                 if self.on_byte:
                     self.on_byte(value & 0xFF)
@@ -367,6 +576,23 @@ def mutant_rig(name: str) -> Rig:
 
         def reset(self) -> None:
             on_byte, on_baud = self.on_byte, self.on_baud_rate_change
+            if name == "reset_keeps_tx":
+                kept = list(self.tx_fifo.items)
+                super().reset()
+                for item in kept:
+                    self.tx_fifo.push(item)
+                return
+            if name == "reset_keeps_alarm":
+                alarm = self._tx_alarm
+                self._tx_alarm = type("_Keep", (), {"schedule": alarm.schedule, "cancel": lambda _s: None})()
+                super().reset()
+                self._tx_alarm = alarm
+                return
+            if name == "reset_keeps_shifting":
+                kept = self._tx_shifting
+                super().reset()
+                self._tx_shifting = kept
+                return
             if name == "reset_keeps_ifls":
                 kept = self._ifls
                 super().reset()
@@ -407,6 +633,13 @@ MUTANTS = (
     "dreq_tx_ignores_dmacr", "dreq_tx_ignores_txe", "dreq_rx_ignores_dmacr", "dreq_rx_when_empty", "dreq_rx_ignores_rxe", "dreq_ignores_dmaonerr",
     "dreq_ignores_uarten", "dreq_swapped_channels", "feed_ignores_enable", "feed_ignores_rxe", "overrun_no_status", "overrun_no_interrupt", "overrun_pushes",
     "dr_read_no_dreq_update", "ifls_reads_ilpr", "rsr_reads_zero", "loopback_ignored",
+    "tx_capacity_ignores_fen", "tx_capacity_16", "tx_capacity_two_without_fen", "tx_trigger_ignores_fen", "tx_trigger_table_off", "tx_trigger_reserved_zero",
+    "tx_trigger_reads_rx_field", "frame_no_parity", "frame_one_stop", "frame_no_start", "frame_wlen_8", "bit_from_rounded_baud", "p_ignores_enable", "p_ignores_txe",
+    "p_event_before_pull", "p_emit_at_start", "p_always_instant", "p_ns_doubled", "p_event_lt", "p_no_event", "p_event_only_when_empty",
+    "p_event_every_pop", "p_event_before_ge", "p_event_level_after_gt",
+    "done_no_pump", "done_no_refresh", "done_keeps_shifting", "done_drops_byte", "dreq_tx_ignores_full", "dreq_tx_when_not_empty", "flags_no_txff", "flags_no_busy",
+    "flags_busy_fifo_only", "flags_busy_shift_only", "flags_txfe_counts_shift", "flags_txff_half", "tx_full_overwrites", "tx_no_clear_above", "tx_write_when_full_pushes",
+    "dr_write_no_refresh", "dr_write_masked_9", "cr_no_pump", "cr_pump_no_irq", "lcr_no_dreq", "reset_keeps_tx", "reset_keeps_alarm", "reset_keeps_shifting",
 )  # fmt: skip
 
 
@@ -450,6 +683,38 @@ def generate(seed: int, steps: int) -> list[tuple]:
             ops.append(("write", U.UARTCR, r.choice((0x301, 0x301, 0x381, 0x201, 0x101, 0x1)), ALIASES[0]))
             ops.append(("write", U.UARTDMACR, r.choice((3, 3, 1, 2, 5, 7)), ALIASES[0]))
             ops.append(("write", U.UARTIMSC, r.choice((0x10, 0x30, 0x7FF, 0x400)), ALIASES[0]))
+        elif (
+            roll < 0.11
+        ):  # a transmit session: configure the line, send a burst (some overflow the 32-entry FIFO), let time pass
+            ops.append(("write", U.UARTLCR_H, r.choice((0x70, 0x70, 0x60, 0x7A, 0x1A, 0x78, 0x10, 0x00)), ALIASES[0]))
+            ops.append(("write", U.UARTIBRD, r.choice((1, 2, 3, 26, 0)), ALIASES[0]))
+            ops.append(("write", U.UARTFBRD, r.choice((0, 3, 0x3F)), ALIASES[0]))
+            ops.append(("write", U.UARTCR, r.choice((0x301, 0x301, 0x381, 0x201)), ALIASES[0]))
+            ops.append(("write", U.UARTIFLS, r.choice((0x00, 0x12, 0x09, 0x1B, 0x24, 0x2D, 0x3F)), ALIASES[0]))
+            ops.append(("write", U.UARTDMACR, r.choice((3, 2, 1)), ALIASES[0]))
+            ops.append(("write", U.UARTIMSC, r.choice((0x20, 0x30, 0x7FF)), ALIASES[0]))
+            ops.extend(
+                ("write", U.UARTDR, r.getrandbits(8), ALIASES[0]) for _ in range(r.choice((1, 3, 8, 20, 34, 40)))
+            )
+            disabled = (
+                r.random() < 0.3
+            )  # disable (UARTEN or TXE off) with the burst still queued: the frame on the wire finishes, the rest waits
+            if disabled:
+                ops.append(("write", U.UARTCR, r.choice((0x0, 0x100, 0x200, 0x1)), ALIASES[0]))
+            handler = not disabled and r.random() < 0.6
+            if handler:  # an interrupt handler that clears TXINTR after every look: the characters after the transition must not raise it again
+                for _ in range(r.choice((12, 24, 40))):
+                    ops.append(("tick", r.choice(TICKS[:4])))
+                    ops.append(("write", U.UARTICR, 0x20, ALIASES[0]))
+            else:
+                ops.extend(("tick", r.choice(TICKS)) for _ in range(r.choice((1, 2, 4, 8))))
+            if disabled:
+                ops.append(
+                    ("write", U.UARTCR, r.choice((0x301, 0x301, 0x381)), ALIASES[0])
+                )  # re-enabled: the queue resumes
+                ops.extend(("tick", r.choice(TICKS)) for _ in range(r.choice((1, 3))))
+            if r.random() < 0.5:
+                ops.append(("write", U.UARTICR, 0x20, r.choice(ALIASES)))
         elif roll < 0.30:
             offset = r.choice(WRITABLE + (U.UARTIMSC, U.UARTICR, U.UARTCR, U.UARTDR))
             alias = ALIASES[0] if r.random() < 0.7 else r.choice(ALIASES[1:])
@@ -477,10 +742,54 @@ def generate(seed: int, steps: int) -> list[tuple]:
                 ops.append(("write", U.UARTCR, 0x301, ALIASES[0]))
         elif roll < 0.92:
             ops.append(("callbacks", r.random() < 0.7, r.random() < 0.7))
-        elif roll < 0.96:
+        elif roll < 0.95:
             ops.append(("clk", r.choice(CLOCKS)))
-        else:
+        elif roll < 0.97:
             ops.append(("check",))
+        else:
+            ops.append(("tick", r.choice(TICKS)))
+    return ops[:steps]
+
+
+def generate_tx(seed: int, steps: int) -> list[tuple]:
+    """A transmit-only stream: sessions whose ticks are a fraction of a character's time, with the interrupt handler's ICR after most of them, so every transition of the TX FIFO through
+    the trigger level - and the characters after it - is looked at one by one. (``generate`` mixes everything; this one is the microscope.)"""
+    r = random.Random(seed)
+    ops: list[tuple] = []
+    while len(ops) < steps:
+        lcr = r.choice((0x70, 0x70, 0x60, 0x7A, 0x1A, 0x78, 0x10))
+        ibrd = r.choice((1, 2, 3))
+        fbrd = r.choice((0, 3, 0x3F))
+        bits = (
+            1
+            + {0x60: 8, 0x70: 8, 0x7A: 8, 0x1A: 5, 0x78: 8, 0x10: 5}[lcr]
+            + (1 if lcr & 2 else 0)
+            + (2 if lcr & 8 else 1)
+        )
+        char_ns = 16 * (ibrd + fbrd / 64) * 1e9 / 125_000_000 * bits
+        ops.append(("write", U.UARTCR, 0x301, ALIASES[0]))
+        ops.append(("write", U.UARTLCR_H, lcr, ALIASES[0]))
+        ops.append(("write", U.UARTIBRD, ibrd, ALIASES[0]))
+        ops.append(("write", U.UARTFBRD, fbrd, ALIASES[0]))
+        ops.append(("write", U.UARTIFLS, r.choice((0x00, 0x12, 0x09, 0x1B, 0x24, 0x2D)), ALIASES[0]))
+        ops.append(("write", U.UARTDMACR, r.choice((3, 2)), ALIASES[0]))
+        ops.append(("write", U.UARTIMSC, 0x20, ALIASES[0]))
+        count = r.choice((3, 6, 12, 20, 34, 40))
+        ops.extend(("write", U.UARTDR, r.getrandbits(8), ALIASES[0]) for _ in range(count))
+        step = max(50, int(char_ns * r.choice((0.3, 0.6, 1.0, 1.4))))
+        disable_at = r.randrange(count) if r.random() < 0.3 else -1
+        for i in range(count * 3):
+            ops.append(("tick", step))
+            if r.random() < 0.7:
+                ops.append(("write", U.UARTICR, 0x20, ALIASES[0]))
+            if r.random() < 0.15:
+                ops.append(("write", U.UARTDR, r.getrandbits(8), ALIASES[0]))
+            if i == disable_at:
+                ops.append(("write", U.UARTCR, r.choice((0x0, 0x100, 0x200, 0x1)), ALIASES[0]))
+            if i == disable_at + 2:
+                ops.append(("write", U.UARTCR, 0x301, ALIASES[0]))
+        if r.random() < 0.3:
+            ops.append(("reset",))
     return ops[:steps]
 
 
@@ -562,6 +871,10 @@ def coverage(ops: list[tuple]) -> dict[str, int]:
             count("rx.full_drop")
         if op[0] == "read" and op[1] == U.UARTDR and op[2] == 0:
             count("dr.read.empty" if uart.rx_fifo.empty else "dr.read.data")
+        if op[0] == "write" and op[1] == U.UARTDR and uart.tx_full:
+            count("tx.full_drop")
+        if op[0] == "tick" and uart._tx_shifting:
+            count("tick.mid_frame")
         if op[0] == "write" and op[1] == U.UARTICR:
             count("icr.alias" if op[3] else "icr.plain")
         if op[0] == "write" and op[1] == U.UARTIMSC:
@@ -573,6 +886,12 @@ def coverage(ops: list[tuple]) -> dict[str, int]:
             count(f"log.{event[0]}" + (f".{event[2]}" if event[0] in ("dreq", "irq") else ""))
         if op[0] == "write" and op[1] == U.UARTDR and any(e[0] == "byte" for e in rig.log[before:]):
             count("dr.write.byte")
+        if op[0] == "tick" and any(e[0] == "byte" for e in rig.log[before:]):
+            count("tick.byte")
+        if op[0] == "tick" and uart._interrupt_status & U.UARTTXINTR:
+            count("tick.txintr_up")
+        if uart._tx_shifting and uart.flags & U.BUSY and not uart.tx_fifo.empty:
+            count("tx.busy_queue")
         if op[0] == "reset":
             count("reset.fifo_nonempty" if queued else "reset")
     return counts

@@ -302,6 +302,7 @@ class RPPIO(BasePeripheral):
                     self._run_task = asyncio.get_running_loop().create_task(self.run())
             if not should_run:
                 self.stopped = True
+                self.settle_held_writes()
 
         elif offset == FDEBUG:
             self.fdebug &= ~self.raw_write_value
@@ -414,6 +415,15 @@ class RPPIO(BasePeripheral):
                 else:
                     values = ((values & ~mask) | (data & mask)) & 0x3FFFFFFF
         return values, directions
+
+    def settle_held_writes(self) -> None:
+        """The block stops (no machine enabled) and nothing will step it to the next cycle: a held write that was overwritten for one cycle is back on the pins now, as it would be a
+        cycle later (sticky writes are asserted whether or not their machine is enabled)."""
+        if self.resolve_due_fp != NEVER_DUE:
+            self.pin_values, self.pin_directions = self.held_image()
+            self.resolve_due_fp = NEVER_DUE
+            self.recompute_due()
+            self.check_changed_pins()
 
     def schedule_resolve(self) -> None:
         """After a cycle's collation: if a held write was overwritten (by a higher-numbered machine's write, or by its own machine's side-set) the image falls back to the held

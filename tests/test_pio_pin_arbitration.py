@@ -143,6 +143,21 @@ def test_levels_and_directions_are_collated_separately(rp2040_factory):
     assert _level(chip) == 1 and (chip.pio[0].pin_directions >> PIN) & 1 == 1
 
 
+def test_a_block_that_stops_shows_the_held_write_it_had_overwritten(rp2040_factory):
+    """Sticky writes are asserted whether or not their machine is enabled, and a stopped block gets no further cycle: the fall-back to the held write is not left pending."""
+    chip = _chip(rp2040_factory)
+    _program(chip, [_set_pins(1), JMP(1), _set_pins(0), JMP(3)])
+    _config(chip, 0, (0, 1), execctrl=OUT_STICKY)
+    _config(chip, 1, (2, 3))
+    _enable(chip, 0b1)
+    _run(chip, 3)
+    _enable(chip, 0b11)
+    _run(chip, 1)
+    assert _level(chip) == 0  # machine 1's write is on the pin for its cycle
+    _enable(chip, 0)  # everything off: the block stops
+    assert _level(chip) == 1
+
+
 def test_restart_clears_a_held_write(rp2040_factory):
     """SM_RESTART clears "any pin write left asserted due to OUT_STICKY"."""
     chip = _chip(rp2040_factory)

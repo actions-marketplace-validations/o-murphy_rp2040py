@@ -366,6 +366,16 @@ public:
         *directions = d;
     }
 
+    // The block stops (no machine enabled) and nothing will step it to the next cycle: a held write that was overwritten for one cycle is back on the pins now, as it would be a cycle
+    // later (sticky writes are asserted whether or not their machine is enabled).
+    bool settle_held_writes() noexcept {
+        if (resolve_due_fp == kPioNeverDue) return true;
+        held_image(&pin_values, &pin_directions);
+        resolve_due_fp = kPioNeverDue;
+        recompute_due();
+        return check_changed_pins();
+    }
+
     // After a cycle's collation: if a held write was overwritten (by a higher-numbered machine's write, or by its own machine's side-set) the image falls back to the held writes one cycle
     // later - unless something writes again.
     void schedule_resolve() noexcept {
@@ -608,7 +618,10 @@ private:
             stopped = 0;
             RP2040PY_PIO_TRY(host_.started == nullptr || host_.started(host_.ctx));
         }
-        if (should_run == 0) stopped = 1;
+        if (should_run == 0) {
+            stopped = 1;
+            return settle_held_writes();
+        }
         return true;
     }
 

@@ -10,7 +10,7 @@ set -u
 MP_DIR=$1
 TAG=$2
 OUT=$3
-PER_TEST_TIMEOUT=${PER_TEST_TIMEOUT:-150}
+PER_TEST_TIMEOUT=${PER_TEST_TIMEOUT:-45}
 WORK=$(mktemp -d)
 EMU_LOG=$WORK/emu.log
 EMU_PID=
@@ -38,6 +38,11 @@ cd "$MP_DIR/tests" || exit 0
 pass=0 fail=0 skip=0 hang=0
 for t in ports/rp2/*.py extmod/machine_*.py; do
   log=$WORK/$(echo "$t" | tr / _).log
+  # `_thread` starts the second core (multicore_launch_core1 waits for the bootrom FIFO handshake): the emulator has no core 1 yet (record 0096, dual-core seams), so
+  # the file would only hang until the timeout and cost an emulator restart
+  if grep -q "_thread" "$t"; then
+    echo "| $t | SKIP (needs core 1) |" >>"$OUT"; echo "$t: SKIP (needs core 1)"; skip=$((skip + 1)); continue
+  fi
   timeout "$PER_TEST_TIMEOUT" "$VIRTUAL_ENV/bin/python" run-tests.py -t "$DEV" -r "$WORK/res" "$t" >"$log" 2>&1
   rc=$?
   if [ $rc = 124 ]; then

@@ -8,7 +8,7 @@ from rp2040py.native._window_map cimport WindowHandler
 
 cdef extern from "sio.hpp" namespace "rp2040core":
     ctypedef uint32_t (*SioInputFn)(void* ctx)
-    ctypedef bool (*SioUpdatePinsFn)(void* ctx, uint32_t pin_mask)
+    ctypedef bool (*SioUpdatePinsFn)(void* ctx, uint32_t pin_mask, bool qspi)
     ctypedef void (*SioCyclesFn)(void* ctx, uint32_t cycles)
     ctypedef void (*SioWarnFn)(void* ctx, uint32_t kind, uint32_t offset, int64_t value)
 

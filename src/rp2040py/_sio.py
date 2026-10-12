@@ -313,6 +313,8 @@ class RPSIO:
 
         prev_gpio_value = self.gpio_value
         prev_gpio_output_enable = self.gpio_output_enable
+        prev_qspi_gpio_value = self.qspi_gpio_value
+        prev_qspi_gpio_output_enable = self.qspi_gpio_output_enable
 
         if offset == GPIO_OUT:
             self.gpio_value = value & GPIO_MASK
@@ -431,3 +433,12 @@ class RPSIO:
             for gpio_index in range(len(gpio)):
                 if pins_to_update & (1 << gpio_index):
                     gpio[gpio_index].check_for_updates()
+        # the QSPI pins too: GPIO_HI_OUT / GPIO_HI_OE drive them (datasheet table 282), and whatever listens to them must hear it
+        qspi_to_update = (self.qspi_gpio_value ^ prev_qspi_gpio_value) | (
+            self.qspi_gpio_output_enable ^ prev_qspi_gpio_output_enable
+        )
+        if qspi_to_update:
+            qspi = self.rp2040.qspi
+            for qspi_index in range(len(qspi)):
+                if qspi_to_update & (1 << qspi_index):
+                    qspi[qspi_index].check_for_updates()

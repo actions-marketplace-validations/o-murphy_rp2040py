@@ -38,7 +38,7 @@ constexpr uint32_t kFuncPwm = 4, kFuncSio = 5, kFuncPio0 = 6, kFuncPio1 = 7;
 
 namespace pin_bits {
 constexpr uint32_t kIrqLevelLow = 1u << 0, kIrqLevelHigh = 1u << 1, kIrqEdgeLow = 1u << 2, kIrqEdgeHigh = 1u << 3;
-constexpr uint32_t kPadPulldown = 1u << 2, kPadPullup = 1u << 3, kPadInputEnable = 1u << 6;
+constexpr uint32_t kPadPulldown = 1u << 2, kPadPullup = 1u << 3, kPadInputEnable = 1u << 6, kPadOutputDisable = 1u << 7;
 constexpr uint32_t kDefaultCtrl = 0x1F;          // FUNCSEL = NULL, no overrides
 constexpr uint32_t kDefaultPad = 0x56;           // PADS_BANK0.GPIOn's reset value (OD 0, IE 1, DRIVE 4 mA, PDE 1, SCHMITT 1; datasheet table 341, pico-sdk)
 }  // namespace pin_bits
@@ -246,7 +246,8 @@ public:
         const uint32_t fsel = p.ctrl & 0x1F;
         bool raw_oe = false;
         if (!raw_output_enable(i, fsel, &raw_oe)) return false;
-        if (apply_override(raw_oe, (p.ctrl >> 12) & 3u)) {
+        // PADS.OD "has priority over output enable from peripherals" (datasheet, GPIOn register): an output-disabled pad is not driven
+        if (apply_override(raw_oe, (p.ctrl >> 12) & 3u) && (p.pad_value & pin_bits::kPadOutputDisable) == 0) {
             bool raw_ov = false;
             if (!raw_output_value(i, fsel, &raw_ov)) return false;
             *out = apply_override(raw_ov, (p.ctrl >> 8) & 3u) ? kPinHigh : kPinLow;

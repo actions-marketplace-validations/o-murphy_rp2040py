@@ -128,3 +128,29 @@ def test_pads_qspi_lists_its_pads_in_its_own_order(rp2040_factory):
         assert chip.read_uint32(PADS_QSPI + offset) == 0x52  # SD0..SD3: no pull
     chip.write_uint32(PADS_QSPI + 0x08, 0x40 | 0x8)  # SD0: input enable and a pull-up
     assert chip.qspi[2].pad_value == 0x48 and chip.qspi[1].pad_value == 0x5A
+
+
+def test_a_pad_with_output_disabled_is_not_driven_whatever_the_function_says(rp2040_factory):
+    """PADS.OD "has priority over output enable from peripherals" (datasheet, GPIOn register): SIO drives the pin high, then OD is set and the pad lets go (to its pull)."""
+    chip = rp2040_factory()
+    chip.write_uint32(IO + 8 * 3 + 4, FUNCSEL_SIO)
+    chip.write_uint32(SIO + 0x24, 1 << 3)  # GPIO_OE_SET
+    chip.write_uint32(SIO + 0x14, 1 << 3)  # GPIO_OUT_SET
+    assert chip.gpio[3].value == GPIOPinState.HIGH
+    chip.write_uint32(PADS + 4 + 4 * 3, 0x56 | 0x80)  # OD
+    assert chip.gpio[3].value == GPIOPinState.INPUT_PULL_DOWN
+    chip.write_uint32(PADS + 4 + 4 * 3, 0x56)
+    assert chip.gpio[3].value == GPIOPinState.HIGH
+
+
+def test_a_qspi_pin_driven_by_sio_tells_its_listeners(rp2040_factory):
+    """GPIO_HI_OUT / GPIO_HI_OE drive the QSPI pins (table 282): the listeners of a QSPI pin hear a change SIO makes, as they do for a GPIO pin."""
+    chip = rp2040_factory()
+    heard = []
+    chip.qspi[1].add_listener(lambda new, old: heard.append(new))
+    chip.write_uint32(0x40018000 + 8 * 1 + 4, FUNCSEL_SIO)
+    heard.clear()
+    chip.write_uint32(SIO + GPIO_HI_OE, 1 << 1)
+    chip.write_uint32(SIO + GPIO_HI_OUT, 1 << 1)
+    chip.write_uint32(SIO + GPIO_HI_OUT, 0)
+    assert heard == [GPIOPinState.LOW, GPIOPinState.HIGH, GPIOPinState.LOW]

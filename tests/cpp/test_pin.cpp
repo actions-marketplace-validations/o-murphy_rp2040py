@@ -105,7 +105,7 @@ static bool ref_val(const RefPin& p, const uint32_t* src, uint32_t index) {
 }
 
 static int ref_state(const RefPin& p, const uint32_t* src, uint32_t index) {
-    if (ov(ref_oe(p, src, index), (p.ctrl >> 12) & 3)) return ov(ref_val(p, src, index), (p.ctrl >> 8) & 3) ? 1 : 0;
+    if (ov(ref_oe(p, src, index), (p.ctrl >> 12) & 3) && !(p.pad & 0x80)) return ov(ref_val(p, src, index), (p.ctrl >> 8) & 3) ? 1 : 0;
     const bool pd = p.pad & 4, pu = p.pad & 8;
     if (pd && pu) return 5;
     if (pd) return 4;
@@ -497,6 +497,24 @@ static void test_a_listener_is_told_when_its_bank_is_destroyed_first() {
     CHECK(gone_calls == 0);
 }
 
+// PADS.OD (bit 7) has priority over the output enable of every function and override: an output-disabled pad is not driven.
+static void test_output_disable_wins_over_every_output_enable() {
+    Recorder r;
+    PinBank bank;
+    CHECK(bank.init(1, host_for(&r)));
+    r.sources[kSrcSioOe] = 1;
+    r.sources[kSrcSioValue] = 1;
+    bank.pin(0).ctrl = kFuncSio;
+    int code = 0;
+    CHECK(bank.state_code(0, &code) && code == kPinHigh);
+    bank.pin(0).pad_value = pin_bits::kDefaultPad | (1u << 7);
+    CHECK(bank.state_code(0, &code) && code == kPinPullDown);
+    bank.pin(0).ctrl = kFuncSio | (3u << 12);  // OEOVER = enable
+    CHECK(bank.state_code(0, &code) && code == kPinPullDown);
+    bank.pin(0).pad_value = pin_bits::kDefaultPad;
+    CHECK(bank.state_code(0, &code) && code == kPinHigh);
+}
+
 int main() {
     test_defaults_and_last_state();
     test_sio_driven_level_and_announcement();
@@ -512,6 +530,7 @@ int main() {
     test_failures_stop_at_once_and_leave_the_pin_updated();
     test_input_values_mask();
     test_level_function_against_the_reference_transcription();
+    test_output_disable_wins_over_every_output_enable();
     if (failures == 0) std::printf("test_pin: all checks passed\n");
     return failures == 0 ? 0 : 1;
 }

@@ -51,10 +51,10 @@ cdef uint32_t _qspi_in_trampoline(void* ctx) noexcept:
     return result
 
 
-cdef bool _update_pins_trampoline(void* ctx, uint32_t pin_mask) noexcept:
+cdef bool _update_pins_trampoline(void* ctx, uint32_t pin_mask, bool qspi) noexcept:
     cdef RPSIO sio = <RPSIO> ctx
     try:
-        gpio = sio.rp2040.gpio
+        gpio = sio.rp2040.qspi if qspi else sio.rp2040.gpio
         for index in range(len(gpio)):
             if index < 32 and pin_mask & ((<uint32_t> 1) << index):
                 gpio[index].check_for_updates()

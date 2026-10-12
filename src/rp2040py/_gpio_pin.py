@@ -295,7 +295,8 @@ class GPIOPin:
 
     @property
     def value(self) -> GPIOPinState:
-        if self.output_enable:
+        # PADS.OD "has priority over output enable from peripherals" (datasheet, GPIOn register): an output-disabled pad is not driven, whatever the function and the overrides say
+        if self.output_enable and not self.output_disable:
             return GPIOPinState.HIGH if self.output_value else GPIOPinState.LOW
         # TODO: check what happens when we enable both pullup/pulldown
         # ANSWER: It is valid, see: 2.19.4.1. Bus Keeper Mode, datasheet p240

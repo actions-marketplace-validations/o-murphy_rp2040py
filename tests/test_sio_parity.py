@@ -83,11 +83,13 @@ class Probe:
         outer = self
 
         class Pin:
-            def __init__(self, index):
+            def __init__(self, index, bank="pin"):
                 self.index = index
+                self.bank = bank
+                self.input_value = False
 
             def check_for_updates(self):
-                outer.log.append(("pin", self.index))
+                outer.log.append((self.bank, self.index))
                 if outer.fail_pin_at is not None:
                     outer.fail_pin_at -= 1
                     if outer.fail_pin_at < 0:
@@ -97,7 +99,7 @@ class Probe:
         class Chip:
             def __init__(self):
                 self.core = SimpleNamespace(cycles=0)
-                self.qspi = [SimpleNamespace(input_value=False) for _ in range(6)]
+                self.qspi = [Pin(i, "qspi") for i in range(6)]
                 self.gpio = [Pin(i) for i in range(30)]
                 self.logger = SimpleNamespace(**{n: outer._logger(n) for n in ("debug", "info", "warning", "error")})
                 self._levels = 0

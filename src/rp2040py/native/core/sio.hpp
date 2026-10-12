@@ -38,7 +38,7 @@ enum SioWarn : uint32_t {
 struct SioHost {
     uint32_t (*gpio_in)(void* ctx) = nullptr;                           // GPIO_IN: the 30 pins' effective input levels
     uint32_t (*qspi_in)(void* ctx) = nullptr;                           // GPIO_HI_IN: the 6 QSPI pins'
-    bool (*update_pins)(void* ctx, uint32_t pin_mask) = nullptr;        // these pins' SIO-driven state changed; false: it failed
+    bool (*update_pins)(void* ctx, uint32_t pin_mask, bool qspi) = nullptr;  // these pins' (the QSPI bank's if `qspi`) SIO-driven state changed; false: it failed
     void (*add_cycles)(void* ctx, uint32_t cycles) = nullptr;           // charge the CPU
     void (*warn)(void* ctx, uint32_t kind, uint32_t offset, int64_t value) = nullptr;
     void* ctx = nullptr;
@@ -198,6 +198,7 @@ public:
             return true;
         }
         const uint32_t prev_value = gpio_value, prev_oe = gpio_output_enable;
+        const uint32_t prev_qspi_value = qspi_gpio_value, prev_qspi_oe = qspi_gpio_output_enable;
         const uint32_t masked = static_cast<uint32_t>(value) & GPIO_MASK;
         const uint32_t qspi_masked = static_cast<uint32_t>(value) & QSPI_MASK;
         const uint32_t inverted = static_cast<uint32_t>(~value);
@@ -233,7 +234,10 @@ public:
         }
 
         const uint32_t pins_to_update = (gpio_value ^ prev_value) | (gpio_output_enable ^ prev_oe);
-        if (pins_to_update != 0 && host_.update_pins) return host_.update_pins(host_.ctx, pins_to_update);
+        if (pins_to_update != 0 && host_.update_pins && !host_.update_pins(host_.ctx, pins_to_update, false)) return false;
+        // the QSPI pins too: GPIO_HI_OUT / GPIO_HI_OE drive them (datasheet table 282), and whatever listens to them must hear it
+        const uint32_t qspi_to_update = (qspi_gpio_value ^ prev_qspi_value) | (qspi_gpio_output_enable ^ prev_qspi_oe);
+        if (qspi_to_update != 0 && host_.update_pins) return host_.update_pins(host_.ctx, qspi_to_update, true);
         return true;
     }
 

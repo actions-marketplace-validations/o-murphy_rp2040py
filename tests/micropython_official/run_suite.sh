@@ -1,0 +1,55 @@
+#!/usr/bin/env bash
+# Runs MicroPython's own test files (tests/ports/rp2, tests/extmod/machine_*) against the emulated board, one file at a time, through the console's pty.
+#
+# It only reports: every file ends as PASS / FAIL / SKIP / HANG / ERROR in $OUT (a markdown table), and the script itself always exits 0. A file that hangs is killed after
+# $PER_TEST_TIMEOUT seconds and the emulator is restarted for the next one. Why the failures happen is for a human to sort (hardware-only, a missing model, or a bug): see
+# docs/records/0098-datasheet-conformance-audit.md.
+#
+# usage: run_suite.sh <micropython checkout> <image tag> <output .md>
+set -u
+MP_DIR=$1
+TAG=$2
+OUT=$3
+PER_TEST_TIMEOUT=${PER_TEST_TIMEOUT:-150}
+WORK=$(mktemp -d)
+EMU_LOG=$WORK/emu.log
+EMU_PID=
+
+start_emulator() {
+  uv run rp2040py micropython --image "$TAG" --pty >"$EMU_LOG" 2>&1 &
+  EMU_PID=$!
+  for _ in $(seq 60); do grep -q "PTY REPL listening" "$EMU_LOG" && break; sleep 1; done
+  DEV=$(grep -o "/dev/pts/[0-9]*" "$EMU_LOG" | head -1)
+  # mip downloads on the host and copies to the device, so the board needs no network
+  timeout 180 uv run mpremote connect "$DEV" mip install unittest >/dev/null 2>&1 || true
+}
+
+stop_emulator() { [ -n "$EMU_PID" ] && kill "$EMU_PID" 2>/dev/null; wait "$EMU_PID" 2>/dev/null; true; }
+
+{
+  echo "MicroPython official tests on the emulated RP2040 ($TAG)"
+  echo
+  echo "| test | result |"
+  echo "|---|---|"
+} >"$OUT"
+
+start_emulator
+cd "$MP_DIR/tests" || exit 0
+pass=0 fail=0 skip=0 hang=0
+for t in ports/rp2/*.py extmod/machine_*.py; do
+  log=$WORK/$(echo "$t" | tr / _).log
+  timeout "$PER_TEST_TIMEOUT" "$VIRTUAL_ENV/bin/python" run-tests.py -t "$DEV" -r "$WORK/res" "$t" >"$log" 2>&1
+  rc=$?
+  if [ $rc = 124 ]; then
+    r=HANG; hang=$((hang + 1)); stop_emulator; start_emulator
+  elif grep -q "^pass " "$log"; then r=PASS; pass=$((pass + 1))
+  elif grep -q "^FAIL " "$log"; then r=FAIL; fail=$((fail + 1))
+  elif grep -qi "^skip" "$log"; then r=SKIP; skip=$((skip + 1))
+  else r="ERROR (see log)"; fail=$((fail + 1)); fi
+  echo "| $t | $r |" >>"$OUT"
+  echo "$t: $r"
+done
+stop_emulator
+{ echo; echo "pass $pass, fail $fail, skip $skip, hang $hang"; } >>"$OUT"
+cat "$OUT"
+exit 0

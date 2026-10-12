@@ -1,0 +1,66 @@
+name: MicroPython official tests (report only)
+
+# Runs MicroPython's own test files (ports/rp2 and extmod/machine_*) against the emulated board and LOGS what passes and what does not.
+# It never fails the push or the pull request: continue-on-error on the job, and the script exits 0. Read the job summary / artifact.
+
+on:
+  push:
+    paths-ignore: &non-code-paths
+      - "**.md"
+      - "docs/**"
+      - "LICENSE"
+  pull_request:
+    branches: [main]
+    paths-ignore: *non-code-paths
+
+concurrency:
+  group: ci-micropython-official-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  official-tests:
+    name: MicroPython ${{ matrix.micropython_tag }} official tests (report only)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        micropython_tag: ["1.29.0"]
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          python-version: "3.10"
+          github-token: ${{ github.token }}
+
+      - name: Install dependencies
+        run: uv sync
+
+      - name: Fetch the MicroPython firmware
+        run: uv run rp2040py micropython --image ${{ matrix.micropython_tag }} --fetch-fw-only
+
+      - name: Clone MicroPython at the same tag (its tests are the suite)
+        run: git clone --depth 1 --branch v${{ matrix.micropython_tag }} https://github.com/micropython/micropython.git "$RUNNER_TEMP/micropython"
+
+      - name: Run the suite (report only)
+        continue-on-error: true
+        run: |
+          source .venv/bin/activate
+          bash tests/micropython_official/run_suite.sh "$RUNNER_TEMP/micropython" ${{ matrix.micropython_tag }} "$RUNNER_TEMP/official-tests.md"
+
+      - name: Job summary
+        if: always()
+        run: cat "$RUNNER_TEMP/official-tests.md" >> "$GITHUB_STEP_SUMMARY" || true
+
+      - name: Upload the report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: micropython-official-${{ matrix.micropython_tag }}
+          path: ${{ runner.temp }}/official-tests.md
+          if-no-files-found: ignore
+          retention-days: 14

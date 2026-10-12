@@ -637,3 +637,15 @@ Each of these is a statement about what real firmware does, read from the SDK so
 - 2026-10-08: **RTC read against the datasheet and ported to C++** - the time base is `clk_rtc / (CLKDIV_M1 + 1)` (clk_rtc is now the CLOCKS block's: a bare chip's RTC does not count until firmware configures it), a real calendar with leap years and `FORCE_NOTLEAPYEAR`, LOAD without ENABLE, the RTC_0 -> RTC_1 latch, the match alarm and its interrupt (NVIC 25). One oracle (`tests/utils/rtc_diff.py`). Next: USB, then the pure-Python blocks nobody has read yet (ROSC, IO_BANK0, PADS_BANK0, XIP_CTRL).
 - 2026-10-12: **UART second pass (operation chapters 4.2.2-4.2.6) read**: no code change; receive-timeout interrupt, per-entry DR error flags and the TX interrupt level rule recorded as gaps. Next: ADC.
 - 2026-10-12: **ADC second pass (operation chapter 4.9.2) read and fixed**: a FIFO read now lowers the IRQ line, clearing EN halts a free-running capture; reference, C++, oracle mutants and tests together. This closes the item-1 readings of "Not audited yet". Next: ROSC port (0096).
+
+## MicroPython's own test suite against the emulator (first run, 2026-10-12, v1.29.0, native build)
+
+MicroPython's `tests/run-tests.py -t <pty>` drives the emulated board through the console's `--pty` (the bridge of `docs/reference/mpremote.md`; `pyboard.py` opens the device with `serial.Serial`, so a `socket://` URL does not work there but a pty does). `unittest` is installed on the board with `mpremote mip install unittest` (host-side download). Run on `ports/rp2/*.py` and `extmod/machine_*.py`: **11 pass, 3 skip, 2 fail, 1 test file with one failing case** (`rp2_dma.py`: 8 of 9 cases pass).
+
+- `rp2_dma.py::test_time_taken_for_large_memory_copy` expects 30-80 ms for a large copy; the DMA here finishes in about 1 ms. A missing model (bus throughput of a transfer), not a logic error.
+- `machine_uart_tx.py`, `machine_uart_irq_txidle.py`: both measure the time a `UART.write` takes at 2400/9600/115200 baud and the moment `IRQ_TXIDLE` fires. The transmitter here is instant (see "UART" above: "no timing of transmission"), so the timing windows are missed. Same root as the receive-timeout and TX-level gaps of the UART second pass: **a baud-rate time base for the UART** would close all three.
+- Skipped by the files themselves (`machine_pinbase`, `machine_pulse`, `machine_signal`: they need wiring or a feature check that does not apply).
+- `rp2_thread_reset_part*` and the `.exp`-comparing multi-file tests were not run in this first pass.
+
+`.github/workflows/ci-micropython-official.yml` (with `tests/micropython_official/run_suite.sh`) repeats this on every push and pull request as a **report only** job: `continue-on-error`, the script always exits 0, the table goes to the job summary and an artifact. It does not gate anything.
+

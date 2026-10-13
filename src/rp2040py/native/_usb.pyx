@@ -15,7 +15,7 @@ The API is the reference's, private attributes included (the registers, `_buff_d
 from libc.stdint cimport int64_t, uint8_t, uint32_t
 from libcpp cimport bool as cppbool
 
-from cpython.bytes cimport PyBytes_AS_STRING, PyBytes_FromStringAndSize
+from cpython.bytes cimport PyBytes_AsString, PyBytes_FromStringAndSize
 
 from rp2040py.native._pending cimport park_error, pending_flag, raise_if_pending
 from rp2040py.native._window_map cimport WindowHandler
@@ -105,7 +105,7 @@ cdef cppbool _drain_write_trampoline(void* ctx, uint32_t endpoint) noexcept:
         queued = usb._write_queue[endpoint]
         usb._write_queue[endpoint] = []
         for buffer, half in queued:  # every buffer that arrived before the alarm ran
-            if not usb._block.finish_write(endpoint, <const uint8_t*> PyBytes_AS_STRING(buffer), len(buffer), half):
+            if not usb._block.finish_write(endpoint, <const uint8_t*> PyBytes_AsString(buffer), len(buffer), half):
                 return False  # (the failure is parked; the rest of the batch is lost, as the reference's exception loses it)
     except BaseException as error:
         park_error(error)
@@ -121,7 +121,7 @@ cdef cppbool _drain_read_trampoline(void* ctx, uint32_t endpoint) noexcept:
         usb._read_queue[endpoint] = []
         for item in queued:  # every answer that arrived before the alarm ran
             buffer = bytes(item)
-            if not usb._block.finish_read(endpoint, <const uint8_t*> PyBytes_AS_STRING(buffer), len(buffer)):
+            if not usb._block.finish_read(endpoint, <const uint8_t*> PyBytes_AsString(buffer), len(buffer)):
                 return False
     except BaseException as error:
         park_error(error)
@@ -194,7 +194,7 @@ cdef cppbool _pending_trampoline(void* ctx, uint32_t max_length, cppbool* presen
                 response = response[:max_length]
             usb._pending_response = None  # (whatever was cut off is forgotten with it, as in the reference)
             usb._scratch = bytes(response)
-            data[0] = <const uint8_t*> PyBytes_AS_STRING(usb._scratch)
+            data[0] = <const uint8_t*> PyBytes_AsString(usb._scratch)
             length[0] = len(usb._scratch)
         else:
             present[0] = False
@@ -210,7 +210,7 @@ cdef cppbool _device_in_trampoline(void* ctx, uint32_t endpoint_address, uint32_
         result = usb._device.handle_data_in(endpoint_address)
         status[0] = _status_code(result.status)
         usb._scratch = bytes(result.data or b"")
-        data[0] = <const uint8_t*> PyBytes_AS_STRING(usb._scratch)
+        data[0] = <const uint8_t*> PyBytes_AsString(usb._scratch)
         length[0] = len(usb._scratch)
     except BaseException as error:
         park_error(error)
@@ -717,7 +717,7 @@ cdef class RPUSBController:
 
     def send_setup_packet(self, setup_packet):
         cdef bytes packet = bytes(setup_packet)
-        if not self._block.send_setup_packet(<const uint8_t*> PyBytes_AS_STRING(packet), len(packet)):
+        if not self._block.send_setup_packet(<const uint8_t*> PyBytes_AsString(packet), len(packet)):
             raise_if_pending()
 
     def endpoint_read_done(self, endpoint, buffer, delay=None):

@@ -52,7 +52,7 @@ struct Env {
     bool pending_present = false;
     uint32_t in_status = kUsbAck;
     uint8_t in_data[64];
-    uint32_t in_size = 0;
+    uint32_t in_size = 0, last_in_address = 0xFFFF, last_out_endpoint = 0xFFFF;
     uint32_t out_status = kUsbAck;
     uint8_t last_out[64];
     uint32_t last_out_size = 0;
@@ -128,15 +128,17 @@ static bool h_pending(void*, uint32_t max_length, bool* present, const uint8_t**
     }
     return call();
 }
-static bool h_device_in(void*, uint32_t, uint32_t* status, const uint8_t** data, uint32_t* length) {
+static bool h_device_in(void*, uint32_t endpoint_address, uint32_t* status, const uint8_t** data, uint32_t* length) {
     ++env.ins;
+    env.last_in_address = endpoint_address;
     *status = env.in_status;
     *data = env.in_data;
     *length = env.in_size;
     return call();
 }
-static bool h_device_out(void*, uint32_t, const uint8_t* data, uint32_t length, uint32_t* status) {
+static bool h_device_out(void*, uint32_t endpoint, const uint8_t* data, uint32_t length, uint32_t* status) {
     ++env.outs;
+    env.last_out_endpoint = endpoint;
     std::memcpy(env.last_out, data, length);
     env.last_out_size = length;
     *status = env.out_status;
@@ -736,6 +738,126 @@ static void test_a_poll_that_gets_no_data() {
     }
 }
 
+static void test_the_remaining_corners() {
+    // EP_ABORT is stored; reading SOF_RD drops the interrupt line
+    fresh();
+    wr(EP_ABORT, 0x5);
+    CHECK(rd(EP_ABORT) == 0x5);
+    fresh();
+    wr(INTE, INTR_HOST_SOF);
+    usb.int_raw |= INTR_HOST_SOF;
+    CHECK(usb.check_interrupts() && env.irq_level);
+    CHECK(rd(SOF_RD) == 0 && !env.irq_level);
+    // over-current needs both its enable and its value
+    fresh();
+    wr(USB_PWR, PWR_OVERCURR_DETECT_EN);
+    CHECK(!(rd(SIE_STATUS) & SIE_VBUS_OVER_CURR));
+    wr(USB_PWR, PWR_OVERCURR_DETECT);
+    CHECK(!(rd(SIE_STATUS) & SIE_VBUS_OVER_CURR));
+    wr(USB_PWR, PWR_OVERCURR_DETECT | PWR_OVERCURR_DETECT_EN);
+    CHECK(rd(SIE_STATUS) & SIE_VBUS_OVER_CURR);
+    // buffer 1's status is written to the upper half, the lower one untouched
+    fresh();
+    put32(EP1_IN_CONTROL, 0x80000000u | USB_CTRL_DOUBLE_BUF | 0x400);
+    put32(EP1_IN_BUF, (BUF_AVAILABLE | BUF_FULL | 3) | ((BUF_AVAILABLE | BUF_FULL | BUF_LAST | BUF_DATA1_PID | 2) << BUF1_SHIFT));
+    arm(EP1_IN_BUF);
+    tick_us(11);
+    CHECK(w32(EP1_IN_BUF) == (3u | ((2u | BUF_LAST | BUF_DATA1_PID) << BUF1_SHIFT)));
+    // a double-buffered OUT flips its own select, in its own slot
+    fresh();
+    put32(EP1_OUT_CONTROL, 0x80000000u | USB_CTRL_DOUBLE_BUF | 0x500);
+    put32(EP1_OUT_BUF, (BUF_AVAILABLE | 4) | ((BUF_AVAILABLE | 4) << BUF1_SHIFT));
+    arm(EP1_OUT_BUF);
+    CHECK(env.read_requests == 2 && usb.buf_select[3] == 0 && usb.buf_select[2] == 0);
+    CHECK(usb.pending_count(1) == 2 && usb.pending_at(1, 0) == 0 && usb.pending_at(1, 1) == 1);
+    std::memset(env.reads[1][0], 0x11, 4);
+    env.read_size[1][0] = 4;
+    env.read_n[1] = 1;
+    usb.schedule_read(1, 10);
+    tick_us(10);
+    CHECK(usb.pending_count(1) == 1 && usb.pending_at(1, 0) == 1);  // the oldest request was served, the order is kept
+    CHECK((w32(EP1_OUT_BUF) & 0xFFFFu) == (4u | BUF_FULL) && usb.buf_select[3] == 0);
+    // popping from a full list
+    fresh();
+    for (uint32_t i = 0; i < kFifoDepth + 5; ++i) usb.done_push(2, i & 1);
+    for (uint32_t round = 0; round < 3; ++round) {
+        CHECK(usb.done_count(2) == kFifoDepth - round);
+        CHECK(wr(BUFF_STATUS, 1u << 2));
+        CHECK(usb.done_count(2) == kFifoDepth - round - 1);
+        CHECK(usb.done_at(2, 0) == ((round + 1) & 1));  // the rest moved up
+    }
+    fresh();
+    put32(EP1_OUT_CONTROL, 0x80000000u | 0x500);
+    for (uint32_t i = 0; i < kFifoDepth; ++i) {
+        put32(EP1_OUT_BUF, BUF_AVAILABLE | 4);
+        arm(EP1_OUT_BUF);
+    }
+    std::memset(env.reads[1][0], 1, 4);
+    env.read_size[1][0] = 4;
+    env.read_n[1] = 1;
+    usb.schedule_read(1, 10);
+    tick_us(10);
+    CHECK(usb.pending_count(1) == kFifoDepth - 1);
+    // a connect shows full speed whatever the speed bits held
+    fresh();
+    wr(MAIN_CTRL, MAIN_HOST_NDEVICE | MAIN_CONTROLLER_EN);
+    usb.sie_status = 3u << 8;
+    usb.connect_device();
+    CHECK(((rd(SIE_STATUS) >> 8) & 3) == SIE_SPEED_FS_VALUE);
+    // START_TRANS with no transaction kind selected does nothing, and every kind arms the completion alarm
+    fresh();
+    wr(MAIN_CTRL, MAIN_HOST_NDEVICE | MAIN_CONTROLLER_EN);
+    usb.connect_device();
+    CHECK(wr(SIE_CTRL, SIE_CTRL_START_TRANS) && !clk.has_alarm());
+    const uint32_t kinds[] = {SIE_CTRL_SEND_SETUP, SIE_CTRL_RECEIVE_DATA, SIE_CTRL_SEND_DATA};
+    for (uint32_t kind : kinds) {
+        env.in_size = 1;
+        put32(HOST_EPX_BUF_CTRL, BUF_AVAILABLE | 4);
+        CHECK(wr(SIE_CTRL, kind | SIE_CTRL_START_TRANS) && clk.has_alarm());
+        tick_us(5);
+        CHECK(!clk.has_alarm());
+    }
+    // the device is addressed with the endpoint the register names
+    wr(ADDR_ENDP, 3u << 16);
+    put32(HOST_EPX_BUF_CTRL, BUF_AVAILABLE | 4);
+    wr(SIE_CTRL, SIE_CTRL_RECEIVE_DATA | SIE_CTRL_START_TRANS);
+    CHECK(env.last_in_address == (0x80u | 3u));
+    tick_us(5);
+    wr(SIE_CTRL, SIE_CTRL_SEND_DATA | SIE_CTRL_START_TRANS);
+    CHECK(env.last_out_endpoint == 3u);
+    tick_us(5);
+    // a control IN on endpoint 0 with nothing kept asks the device for endpoint 0x80
+    wr(ADDR_ENDP, 0);
+    env.pending_present = false;
+    wr(SIE_CTRL, SIE_CTRL_RECEIVE_DATA | SIE_CTRL_START_TRANS);
+    CHECK(env.last_in_address == 0x80u);
+    tick_us(5);
+    // a timeout with the interrupt line failing
+    usb.has_device = false;
+    env.calls = 0;
+    env.fail_at = 0;
+    CHECK(!wr(SIE_CTRL, SIE_CTRL_RECEIVE_DATA | SIE_CTRL_START_TRANS) && env.failed);
+    // every host call of every transaction kind, failing in turn
+    for (int kind = 0; kind < 3; ++kind) {
+        for (int n = 0; n < 8; ++n) {
+            fresh();
+            wr(MAIN_CTRL, MAIN_HOST_NDEVICE | MAIN_CONTROLLER_EN);
+            usb.connect_device();
+            env.in_size = 1;
+            env.pending_present = kind == 1;
+            env.pending_size = 4;
+            env.setup_has_response = true;
+            wr(ADDR_ENDP, kind == 1 ? 0u : (1u << 16));
+            put32(HOST_EPX_BUF_CTRL, BUF_AVAILABLE | 8);
+            env.calls = 0;
+            env.fail_at = n;
+            const uint32_t flags[] = {SIE_CTRL_RECEIVE_DATA, SIE_CTRL_RECEIVE_DATA, SIE_CTRL_SEND_DATA};
+            const bool ok = usb.write(SIE_CTRL, flags[kind] | SIE_CTRL_START_TRANS);
+            CHECK(ok == !env.failed);
+        }
+    }
+}
+
 static void test_power_on_state() {
     fresh();
     CHECK(rd(NAK_POLL) == NAK_POLL_RESET && rd(USBPHY_TRIM) == USBPHY_TRIM_RESET);
@@ -1177,6 +1299,7 @@ int main() {
     test_the_setup_transaction();
     test_the_interrupt_endpoint_poll();
     test_a_poll_that_gets_no_data();
+    test_the_remaining_corners();
     if (failures == 0) std::printf("test_usb: ok\n");
     return failures == 0 ? 0 : 1;
 }

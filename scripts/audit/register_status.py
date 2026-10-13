@@ -23,10 +23,10 @@ ALL = "all"  # every register of the block
 # Blocks read against the datasheet (record 0098) and, but for the exceptions listed below, acting on their registers
 AUDITED = {
     "M0PLUS", "SIO", "TIMER", "WATCHDOG", "RTC", "UART", "SPI", "I2C", "ADC", "PWM", "DMA", "PIO", "SSI", "CLOCKS", "PLL", "XOSC", "PSM", "RESETS", "SYSCFG", "SYSINFO", "TBMAN",
-    "VREG_AND_CHIP_RESET", "BUSCTRL", "ROSC", "XIP", "IO_BANK0", "IO_QSPI", "PADS_BANK0", "PADS_QSPI",
+    "VREG_AND_CHIP_RESET", "BUSCTRL", "ROSC", "XIP", "USB", "IO_BANK0", "IO_QSPI", "PADS_BANK0", "PADS_QSPI",
 }  # fmt: skip
-# Blocks never audited: whatever they answer is unchecked (USB: the port still to do)
-UNAUDITED = {"USB"}
+# Blocks never audited: whatever they answer is unchecked (none left since the USB port)
+UNAUDITED: set[str] = set()
 
 # block -> {offset: what is not acted on} for registers that act but not in every field (from 0098's backlog and the second passes)
 PARTIAL: dict[str, dict[int, str]] = {
@@ -85,7 +85,7 @@ PARTIAL: dict[str, dict[int, str]] = {
         for offset in range(0x04, 0x1C, 4)
     },
     "USB": {
-        0x000: "ADDR_ENDP: acts as the host's device address (`_dev_addr_ctrl`); in device mode the value is only stored"
+        0x000: "ADDR_ENDP: acts as the host's device address; in device mode the value is only stored",
     },
     "XIP": {
         0x000: "CTRL.ERR_BADWRITE is never set: a write to a non-caching alias warns instead of raising the bus fault (record 0098, XIP_CTRL pass)"
@@ -151,8 +151,8 @@ STUBS: dict[str, tuple[object, str]] = {
     ),
     "PADS_QSPI": ({0x00}, "VOLTAGE_SELECT is stored (core/pads.hpp)"),
     "USB": (
-        {0x60, 0x64, 0x68, 0x6C, 0x70, 0x78},
-        "EP_ABORT, EP_ABORT_DONE, EP_STALL_ARM, NAK_POLL, EP_STATUS_STALL_NAK and USB_PWR are stored in peripherals/usb.py and nothing reads them back for behaviour (found by a static scan; the block itself is not audited)",
+        {0x6C, 0x70},
+        "NAK_POLL and EP_STATUS_STALL_NAK are stored and nothing acts on them: the shortcut wire has no NAK or STALL handshake (record 0098, USB)",
     ),
 }
 

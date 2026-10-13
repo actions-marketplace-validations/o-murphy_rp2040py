@@ -12,7 +12,7 @@
 
 **This is a curated list, not a measurement.** "Answers" is measured (a read at the register's address does not warn "Unimplemented peripheral read"; for a write-only register, a write of 0 does not warn). "Acts" is curated: it means the block was audited and the register is in none of the stub / partial lists of `scripts/audit/register_status.py`, each entry of which carries its evidence. A stub that nobody has listed yet shows as Acts; if you find one, add it there and re-run the script. For what each block does and does not do, see [feature-coverage.md](feature-coverage.md). A table shared by several instances (UART0/UART1, the DMA's per-channel tables) is listed once, as the datasheet gives it.
 
-**474 registers: 324 act, 69 are stubs, 58 partial, 13 exist but are unchecked, 10 are absent.**
+**474 registers: 344 act, 65 are stubs, 58 partial, 0 exist but are unchecked, 7 are absent.**
 
 | Block | Registers | Acts | Stub | Partial | Unchecked | Absent |
 |---|---|---|---|---|---|---|
@@ -44,7 +44,7 @@
 | IO_QSPI | 10 | 4 | 0 | 6 | 0 | 0 |
 | PADS_BANK0 | 4 | 0 | 3 | 1 | 0 | 0 |
 | PADS_QSPI | 3 | 0 | 1 | 2 | 0 | 0 |
-| USB | 23 | 0 | 6 | 1 | 13 | 3 |
+| USB | 23 | 20 | 2 | 1 | 0 | 0 |
 | XIP | 8 | 7 | 0 | 1 | 0 | 0 |
 
 ## M0PLUS
@@ -658,33 +658,33 @@ Stubs in this block: VOLTAGE_SELECT is stored (core/pads.hpp).
 
 ## USB
 
-Stubs in this block: EP_ABORT, EP_ABORT_DONE, EP_STALL_ARM, NAK_POLL, EP_STATUS_STALL_NAK and USB_PWR are stored in peripherals/usb.py and nothing reads them back for behaviour (found by a static scan; the block itself is not audited).
+Stubs in this block: NAK_POLL and EP_STATUS_STALL_NAK are stored and nothing acts on them: the shortcut wire has no NAK or STALL handshake (record 0098, USB).
 
 | Offset | Register | Status | Note |
 |---|---|---|---|
-| `0x00` | ADDR_ENDP | Partial | ADDR_ENDP: acts as the host's device address (`_dev_addr_ctrl`); in device mode the value is only stored |
-| `0x40` | MAIN_CTRL | Unchecked | the block was never audited |
-| `0x44` | SOF_WR | Unchecked | the block was never audited |
-| `0x48` | SOF_RD | Unchecked | the block was never audited |
-| `0x4c` | SIE_CTRL | Unchecked | the block was never audited |
-| `0x50` | SIE_STATUS | Unchecked | the block was never audited |
-| `0x54` | INT_EP_CTRL | Unchecked | the block was never audited |
-| `0x58` | BUFF_STATUS | Unchecked | the block was never audited |
-| `0x5c` | BUFF_CPU_SHOULD_HANDLE | Unchecked | the block was never audited |
-| `0x60` | EP_ABORT | Stub |  |
-| `0x64` | EP_ABORT_DONE | Stub |  |
-| `0x68` | EP_STALL_ARM | Stub |  |
+| `0x00` | ADDR_ENDP | Partial | ADDR_ENDP: acts as the host's device address; in device mode the value is only stored |
+| `0x40` | MAIN_CTRL | Acts |  |
+| `0x44` | SOF_WR | Acts |  |
+| `0x48` | SOF_RD | Acts |  |
+| `0x4c` | SIE_CTRL | Acts |  |
+| `0x50` | SIE_STATUS | Acts |  |
+| `0x54` | INT_EP_CTRL | Acts |  |
+| `0x58` | BUFF_STATUS | Acts |  |
+| `0x5c` | BUFF_CPU_SHOULD_HANDLE | Acts |  |
+| `0x60` | EP_ABORT | Acts |  |
+| `0x64` | EP_ABORT_DONE | Acts |  |
+| `0x68` | EP_STALL_ARM | Acts |  |
 | `0x6c` | NAK_POLL | Stub |  |
 | `0x70` | EP_STATUS_STALL_NAK | Stub |  |
-| `0x74` | USB_MUXING | Unchecked | the block was never audited |
-| `0x78` | USB_PWR | Stub |  |
-| `0x7c` | USBPHY_DIRECT | Absent |  |
-| `0x80` | USBPHY_DIRECT_OVERRIDE | Absent |  |
-| `0x84` | USBPHY_TRIM | Absent |  |
-| `0x8c` | INTR | Unchecked | the block was never audited |
-| `0x90` | INTE | Unchecked | the block was never audited |
-| `0x94` | INTF | Unchecked | the block was never audited |
-| `0x98` | INTS | Unchecked | the block was never audited |
+| `0x74` | USB_MUXING | Acts |  |
+| `0x78` | USB_PWR | Acts |  |
+| `0x7c` | USBPHY_DIRECT | Acts |  |
+| `0x80` | USBPHY_DIRECT_OVERRIDE | Acts |  |
+| `0x84` | USBPHY_TRIM | Acts |  |
+| `0x8c` | INTR | Acts |  |
+| `0x90` | INTE | Acts |  |
+| `0x94` | INTF | Acts |  |
+| `0x98` | INTS | Acts |  |
 
 ## XIP
 

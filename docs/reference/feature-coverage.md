@@ -37,7 +37,7 @@ One place to see, block by block and datasheet section by section, what is model
 | PADS_BANK0 / PADS_QSPI / IO_QSPI | Partial | Yes | C++ (with IO_BANK0, above) | `VOLTAGE_SELECT` and `SWCLK` / `SWD` are stored; pad drive, slew and Schmitt have no electrical model |
 | GPIO: input synchronisers | Missing | Yes | - | two clk_sys cycles of latency (2.21), bypassed by `SYSCFG.PROC_IN_SYNC_BYPASS(_HI)` and the PIO's `INPUT_SYNC_BYPASS`, both stored; needs a go-ahead |
 | XIP_CTRL | Done | Yes | Ported | tag-only 2-way cache, aliases, counters, flush, cache-as-SRAM, streaming FIFO + `DREQ_XIP_STREAM`, `XIP_AUX`; the XIP window is read-only to the bus (0098); no bus fault is raised |
-| USB controller + CDC host | Partial | No | Python only | host mode works; `USB_MUXING`, `USBPHY_*` absent; device mode unchecked |
+| USB controller + CDC host | Partial | Yes (reference fixed, oracle + C++ checks, 66 logic mutants) | C++ block + Cython shell (`core/usb.hpp`) | device mode (CDC shortcut) and host mode (Python `USBDevice`) work; no token-level wire: STALL/NAK handshakes, suspend/resume, device SOF absent (see the rows below) |
 
 ## 2. Every section of the datasheet
 
@@ -134,10 +134,14 @@ Follows the datasheet's own table of contents (chapter.section), so a row is som
 
 | Section | Feature | Status | Notes | When |
 |---|---|---|---|---|
-| 4.1 | USB controller as a host with the Python USB device and the CDC console | Done | not audited against the datasheet | With the USB port |
-| 4.1 | USB device mode | Unchecked | | - |
-| 4.1.3 | `USB_MUXING`, `USBPHY_DIRECT*`, `USBPHY_TRIM` | Missing | | With the USB port |
-| 4.1.3 | `EP_ABORT`, `EP_ABORT_DONE`, `EP_STALL_ARM`, `NAK_POLL`, `EP_STATUS_STALL_NAK`, `USB_PWR` | Stub | stored; nothing acts on them (found by a static scan; the block is not audited) | With the USB port |
+| 4.1 | USB controller as a host with the Python USB device and the CDC console | Done | audited and ported 2026-10-13 (record 0098, USB) | - |
+| 4.1 | USB device mode: buffers, status write-back, `BUFF_STATUS` / `BUFF_CPU_SHOULD_HANDLE`, per-buffer interrupts, double buffering, isochronous offset | Done | audited and ported 2026-10-13 | - |
+| 4.1.2.8 | STALL / NAK handshakes, `EP_STATUS_STALL_NAK`, `EP_STALL_ARM` gating of EP0, `EP_ABORT` taking time | Missing | needs a token-level host (record 0098, USB: "Still not modelled") | With a token-level USB wire, own go-ahead |
+| 4.1.2 | Device SOF, suspend, resume, `DEV_CONN_DIS` from VBUS, `LINE_STATE` beyond J / SE0 | Missing | as above | With a token-level USB wire, own go-ahead |
+| 4.1.3 | Host: erratum RP2040-E4, NAK retry timing (`NAK_POLL`), low speed / preamble, interrupt-endpoint interval model | Missing | as above | With a token-level USB wire, own go-ahead |
+| 4.1.3 | `USB_MUXING`, `USBPHY_DIRECT*`, `USBPHY_TRIM` | Done | stored with the datasheet masks and resets (the analogue pins of `USBPHY_DIRECT` read 0: no electrical model) | - |
+| 4.1.3 | `EP_ABORT`, `EP_ABORT_DONE` (done at once), `EP_STALL_ARM` (cleared by a setup), `USB_PWR` (drives `VBUS_DETECTED` / `VBUS_OVER_CURR`) | Done | | - |
+| 4.1.3 | `NAK_POLL`, `EP_STATUS_STALL_NAK` | Stub | stored; nothing acts on them (no NAK / STALL on the shortcut wire) | With a token-level USB wire |
 | 4.2.2, 4.2.3 | UART: functional description, operation, transmitter time | Done | 0098 | - |
 | 4.2.3 | UART: receive timing | Missing | bytes fed from outside arrive at once | Go-ahead |
 | 4.2.4 | UART: hardware flow control (CTS / RTS) | Missing | | Go-ahead |

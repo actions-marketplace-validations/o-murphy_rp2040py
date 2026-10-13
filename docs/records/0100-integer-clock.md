@@ -1,6 +1,6 @@
 # 0100. An integer time base for the simulation clock
 
-- Status: **Proposed - authorised by the maintainer on 2026-10-12; the unit is measured and chosen (2026-10-13), not built.** A cross-block change; the order below puts it after the XIP_CTRL port and before the USB port.
+- Status: **Proposed - authorised by the maintainer on 2026-10-12; the unit is measured and chosen (2026-10-13); the clock core is built (phase A), the blocks' own time arithmetic is phase B.** A cross-block change; the order below puts it after the XIP_CTRL port and before the USB port.
 - Conceived: 2026-10-12
 - Related: [0096](0096-cpp-mcu-core.md) (the C++ `Clock` and every block that schedules an alarm on it), [0098](0098-datasheet-conformance-audit.md) (the section "A limit found on the way", which found it).
 
@@ -42,5 +42,6 @@ The C++ `Clock` and alarm list, `SimulationClock` (Cython) and the Python clocks
 
 ## Progress log
 
+- 2026-10-13: **phase A built: the clock core is integer ticks.** C++ `Clock` (`core/clock.hpp`): `int64_t` ticks of 1/16 ns (`ticks()`, `tick_ticks`, `link_ticks`, `schedule_ticks`, `ticks_to_next_alarm`), `nanos_to_ticks` (round half up, saturating at `INT64_MAX / 2`, NaN as 0), `advance_cycles` (the remainder of a cycle that is not a whole number of ticks carried), `saturated()`; the `double`-nanosecond entry points stay for the blocks and convert once. The Python reference and the Cython `SimulationClock` mirror it (`ticks`, `tick_ticks`, `advance_cycles`, `ticks_to_next_alarm`, `ClockAlarm.schedule_ticks`/`.ticks`; `nanos` is derived). The batch (`batch.hpp`, `_execute_batch.py`) advances in cycles and keeps its budget in ticks, rounded up. The DMA keeps a per-channel remainder. Tests: `tests/cpp/test_clock.cpp`, `tests/test_simulation_clock_parity.py` (an 8 ns step after 2^53 ns, the 7.8e16 ns reading of the failing run, rounding and saturation, 133 MHz without drift), `tests/test_dma.py`. Benchmark (`scripts/bench/synthetic.py`, best of 5, A/B against the commit before, same machine): before 111 and 126 Minstr/s, after 86, 130 and 132 - within the noise, once the batch took an integer fast path for a clock that is a whole number of ticks per cycle (a first version that always went through the floating-point remainder was 15-25 % slower). Phase B (open): the blocks that subtract `clock.nanos` (TIMER, ROSC COUNT, TIMER32, the XIP flush deadline, WS2812, the pacing in `simulator.py`) should take their differences in ticks; they are exact below 2^53 / 16 ns (104 days) and lose sub-16-ns resolution above it, which none of them needs but the oracles' snapshots will want exact.
 - 2026-10-13: **unit measured and chosen** (above): int64 ticks of 1/16 ns, remainder carried by per-cycle schedulers, saturating overflow. Nothing built yet.
 - 2026-10-12: proposed; authorised by the maintainer; ordered after XIP_CTRL and before USB. Nothing built.

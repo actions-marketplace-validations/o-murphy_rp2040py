@@ -14,6 +14,7 @@
 #define RP2040PY_CORE_BATCH_HPP
 
 #include <cstdint>
+#include <cmath>
 #include <limits>
 
 #include "clock.hpp"
@@ -51,13 +52,19 @@ struct BatchParams {
 // Runs one batch. Returns 0, or kBatchFault when a clock alarm or the CPU failed (the Python error is parked; the pending tick time
 // is *not* flushed, as an exception would not have flushed it).
 inline int run_batch(Cpu& cpu, Clock& clock, const BatchHost& host, const BatchParams& params) noexcept {
-    constexpr double kInfinity = std::numeric_limits<double>::infinity();
+    constexpr int64_t kNoAlarm = std::numeric_limits<int64_t>::max();
+    // One system clock in ticks: not a whole number in general (133 MHz is 120.30), so time is advanced in CYCLES with the fraction carried by the clock.
+    const double ticks_per_cycle = params.cycle_nanos * static_cast<double>(kTicksPerNano);
+    // The common case (125 MHz: 128 ticks) is a whole number of ticks per cycle, and then time is plain integer arithmetic - no remainder to carry.
+    const bool whole_ticks = ticks_per_cycle == std::floor(ticks_per_cycle) && ticks_per_cycle < 1e12;
+    const int64_t cycle_ticks = whole_ticks ? static_cast<int64_t>(ticks_per_cycle) : 0;
+    auto advance = [&](int64_t n) noexcept { return whole_ticks ? clock.tick_ticks(n * cycle_ticks) : clock.advance_cycles(n, ticks_per_cycle); };
     long i = 0;
     int ticks_since_check = 0;
     const double batch_start = host.monotonic(host.ctx);
-    double pending_nanos = 0.0;
+    int64_t pending_cycles = 0;
     int pending_count = 0;
-    double nanos_budget = clock.has_alarm() ? clock.nanos_to_next_alarm() : kInfinity;
+    int64_t tick_budget = clock.has_alarm() ? clock.ticks_to_next_alarm() : kNoAlarm;
     // The flag addresses in registers instead of reloaded from the host struct on every iteration (the flags themselves are still
     // read every time: a firmware write that starts a PIO must make it step on the very next instruction).
     const volatile int* const pio_flag0 = host.pio_count > 0 ? host.pio_stopped[0] : nullptr;
@@ -73,38 +80,39 @@ inline int run_batch(Cpu& cpu, Clock& clock, const BatchHost& host, const BatchP
         int64_t cycles;
         bool paced = false;
         if (cpu.waiting) {
-            if (pending_nanos != 0.0) {
-                if (!clock.tick(pending_nanos)) return kBatchFault;
-                pending_nanos = 0.0;
+            if (pending_cycles != 0) {
+                if (!advance(pending_cycles)) return kBatchFault;
+                pending_cycles = 0;
                 pending_count = 0;
             }
-            double idle_nanos = clock.nanos_to_next_alarm();
+            int64_t idle_ticks = clock.ticks_to_next_alarm();
             if (host.real_io != nullptr && *host.real_io != 0) {
-                if (idle_nanos > params.paced_idle_nanos) idle_nanos = params.paced_idle_nanos;
+                const int64_t cap = nanos_to_ticks(params.paced_idle_nanos);
+                if (idle_ticks > cap) idle_ticks = cap;
                 paced = true;
             }
-            if (!clock.tick(idle_nanos)) return kBatchFault;
+            if (!clock.tick_ticks(idle_ticks)) return kBatchFault;
             // The system clocks that jump covered, floored at one: an idle jump with no alarm advances time by nothing, and a PIO
             // frozen whenever the CPU parks in WFI with an empty alarm queue could never make the progress that wakes it again.
-            cycles = static_cast<int64_t>(idle_nanos / params.cycle_nanos);
+            cycles = static_cast<int64_t>(static_cast<double>(idle_ticks) / ticks_per_cycle);
             if (cycles == 0) cycles = 1;
-            if (params.tick_batch > 1) nanos_budget = clock.has_alarm() ? clock.nanos_to_next_alarm() : kInfinity;
+            if (params.tick_batch > 1) tick_budget = clock.has_alarm() ? clock.ticks_to_next_alarm() : kNoAlarm;
         } else {
             const int executed = cpu.execute();
             if (executed < 0) return kBatchFault;
             cycles = executed;
-            const double delta_nanos = static_cast<double>(cycles) * params.cycle_nanos;
             if (params.tick_batch <= 1) {
-                if (!clock.tick(delta_nanos)) return kBatchFault;
+                if (!advance(cycles)) return kBatchFault;
             } else {
-                pending_nanos += delta_nanos;
+                pending_cycles += cycles;
                 pending_count += 1;
-                nanos_budget -= delta_nanos;
-                if (nanos_budget <= 0 || pending_count >= params.tick_batch) {
-                    if (!clock.tick(pending_nanos)) return kBatchFault;
-                    pending_nanos = 0.0;
+                // Rounded UP: an alarm is never flushed later than it is due, only (by under a tick) earlier.
+                if (tick_budget != kNoAlarm) tick_budget -= static_cast<int64_t>(std::ceil(static_cast<double>(cycles) * ticks_per_cycle));
+                if (tick_budget <= 0 || pending_count >= params.tick_batch) {
+                    if (!advance(pending_cycles)) return kBatchFault;
+                    pending_cycles = 0;
                     pending_count = 0;
-                    nanos_budget = clock.has_alarm() ? clock.nanos_to_next_alarm() : kInfinity;
+                    tick_budget = clock.has_alarm() ? clock.ticks_to_next_alarm() : kNoAlarm;
                 }
             }
         }
@@ -116,8 +124,8 @@ inline int run_batch(Cpu& cpu, Clock& clock, const BatchHost& host, const BatchP
         i += 1;
         if (paced) break;  // one capped idle jump per batch: the caller sleeps for the simulated time it covered
     }
-    if (pending_nanos != 0.0) {
-        if (!clock.tick(pending_nanos)) return kBatchFault;
+    if (pending_cycles != 0) {
+        if (!advance(pending_cycles)) return kBatchFault;
     }
     return 0;
 }

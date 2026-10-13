@@ -31,6 +31,7 @@
 #ifndef RP2040PY_CORE_DMA_HPP
 #define RP2040PY_CORE_DMA_HPP
 
+#include <cmath>
 #include <cstdint>
 
 #include "bus.hpp"
@@ -89,6 +90,7 @@ public:
     uint32_t treq = 0, data_size = 1, chain_to = 0, ring_mask = 0;
     bool swap = false;  // BSWAP, which only 16/32-bit transfers honour
     Alarm alarm;
+    double cycle_remainder = 0.0;  // the fraction of a tick a clk_sys cycle that is not a whole number of ticks leaves (133 MHz: 120.30), carried to the next transfer
 
     bool active() const noexcept { return (ctrl & dma_regs::EN) != 0 && (ctrl & dma_regs::BUSY) != 0; }
 
@@ -97,7 +99,10 @@ public:
     inline void abort() noexcept;
     inline uint32_t read(uint32_t offset) const noexcept;
     inline bool write(uint32_t offset, int64_t value) noexcept;
-    inline bool reset() noexcept { return write(dma_regs::CTRL_TRIG, static_cast<int64_t>(index) << 11); }
+    inline bool reset() noexcept {
+        cycle_remainder = 0.0;
+        return write(dma_regs::CTRL_TRIG, static_cast<int64_t>(index) << 11);
+    }
 
 private:
     friend class DmaBlock;
@@ -316,7 +321,11 @@ inline bool DmaChannel::start() noexcept {
 inline bool DmaChannel::schedule_transfer() noexcept {
     Clock* clock = dma_->clock_;
     if (dma_->dreq(treq) || treq == dma_regs::TREQ_PERMANENT) {
-        clock->schedule(&alarm, dma_->transfer_ns);  // a transfer that is ready takes one clk_sys cycle (datasheet 2.5)
+        // a transfer that is ready takes one clk_sys cycle (datasheet 2.5), in ticks with the fraction carried so that a clock that is not a whole number of ticks per cycle does not run fast
+        const double exact = cycle_remainder + dma_->transfer_ns * static_cast<double>(kTicksPerNano);
+        const double whole = std::floor(exact);
+        cycle_remainder = exact - whole;
+        clock->schedule_ticks(&alarm, whole >= static_cast<double>(kMaxTicks) ? kMaxTicks : static_cast<int64_t>(whole));
         return true;
     }
     bool ok;

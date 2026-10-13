@@ -153,7 +153,7 @@ cdef class _AlarmView:
 
     @property
     def nanos(self):
-        return self._node.nanos
+        return self._node.ticks / 16.0
 
 
 cdef class RPADC:

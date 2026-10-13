@@ -244,3 +244,26 @@ def test_an_abort_clears_the_transfer_counter_and_the_busy_flag(rp2040_factory):
     assert not cpu.dma.channels[0].active
     assert cpu.read_uint32(CH0_TRANS_COUNT) == 0
     assert cpu.read_uint32(DMA_BASE + 0x444) == 0
+
+
+def test_a_dma_at_a_clock_that_is_not_a_whole_number_of_ticks_does_not_run_fast(rp2040_factory):
+    """133 MHz is 120.30 ticks of 1/16 ns per cycle (docs/records/0100). Rounded per transfer the channel would run 0.25 % fast; with the fraction carried, 2000 one-cycle
+    transfers take 2000 cycles to within a tick."""
+    from rp2040py.peripherals.clocks import _set_clk_sys
+
+    rp2040 = rp2040_factory()
+    _set_clk_sys(rp2040, 133e6)
+    source, destination, count = 0x20010000, 0x20020000, 2000
+    rp2040.write_uint32(CH0_READ_ADDR, source)
+    rp2040.write_uint32(CH0_WRITE_ADDR, destination)
+    rp2040.write_uint32(CH0_TRANS_COUNT, count)
+    start = rp2040.clock.ticks
+    rp2040.write_uint32(
+        CH0_CTRL_TRIG, EN | INCR_READ | INCR_WRITE | (2 << DATA_SIZE_SHIFT) | (TREQ_PERMANENT << TREQ_SEL_SHIFT)
+    )
+    ticks_per_cycle = 1e9 / 133e6 * 16
+    last = start
+    while rp2040.read_uint32(CH0_CTRL_TRIG) & BUSY:
+        rp2040.clock.tick_ticks(1)
+        last = rp2040.clock.ticks
+    assert abs((last - start) - count * ticks_per_cycle) <= 2

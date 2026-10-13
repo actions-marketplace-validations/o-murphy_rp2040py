@@ -40,7 +40,9 @@ tests/test_simulation_clock_parity.py replays randomized alarm scripts against b
 from libcpp cimport bool
 
 from rp2040py.native._pending cimport has_pending_error, park_error, raise_if_pending
-from rp2040py.native._clock cimport cancel_alarm
+from libc.stdint cimport int64_t
+
+from rp2040py.native._clock cimport cancel_alarm, kTicksPerNano
 
 cdef bool _fire_alarm(void* ctx) noexcept:
     """What the C++ clock calls when an alarm comes due: drop the alarm's keep-alive (it is no longer
@@ -75,6 +77,21 @@ cdef class ClockAlarm:
             self.cancel()
         clock.link_alarm(delta_nanos, self)
 
+    cpdef schedule_ticks(self, int64_t delta_ticks):
+        cdef SimulationClock clock = <SimulationClock> self._clock
+        if self._node.scheduled:
+            self.cancel()
+        clock.link_alarm_ticks(delta_ticks, self)
+
+    @property
+    def ticks(self):
+        """The absolute due time while the alarm is linked, in ticks."""
+        return self._node.ticks
+
+    @property
+    def nanos(self):
+        return self._node.ticks / <double> kTicksPerNano
+
     cpdef cancel(self):
         cdef SimulationClock clock = <SimulationClock> self._clock
         clock.unlink_alarm(self)
@@ -101,6 +118,15 @@ cdef class SimulationClock:
         return self._clock.nanos()
 
     @property
+    def ticks(self):
+        """The time in ticks of 1/16 ns, exactly (`nanos` is derived from it)."""
+        return self._clock.ticks()
+
+    @property
+    def saturated(self):
+        return self._clock.saturated() != 0
+
+    @property
     def micros(self):
         return self._clock.nanos() / 1000
 
@@ -113,6 +139,13 @@ cdef class SimulationClock:
         if alarm._node.scheduled:
             self._clock.unlink(&alarm._node)  # never link one alarm twice
         self._clock.link(&alarm._node, nanos)
+        self._armed.add(alarm)
+        return alarm
+
+    cpdef ClockAlarm link_alarm_ticks(self, int64_t ticks, ClockAlarm alarm):
+        if alarm._node.scheduled:
+            self._clock.unlink(&alarm._node)
+        self._clock.link_ticks(&alarm._node, ticks)
         self._armed.add(alarm)
         return alarm
 
@@ -129,9 +162,26 @@ cdef class SimulationClock:
                 raise RuntimeError("the clock stopped ticking without a pending error")
             raise_if_pending()
 
+    cpdef tick_ticks(self, int64_t delta_ticks):
+        if not self._clock.tick_ticks(delta_ticks):
+            if not has_pending_error():
+                raise RuntimeError("the clock stopped ticking without a pending error")
+            raise_if_pending()
+
+    cpdef advance_cycles(self, int64_t cycles, double ticks_per_cycle):
+        """Advances by `cycles` periods of `ticks_per_cycle` ticks, the fraction carried between calls (the CPU's time)."""
+        if not self._clock.advance_cycles(cycles, ticks_per_cycle):
+            if not has_pending_error():
+                raise RuntimeError("the clock stopped ticking without a pending error")
+            raise_if_pending()
+
     @property
     def nanos_to_next_alarm(self):
         return self._clock.nanos_to_next_alarm()
+
+    @property
+    def ticks_to_next_alarm(self):
+        return self._clock.ticks_to_next_alarm()
 
     @property
     def has_scheduled_alarm(self):

@@ -12,6 +12,8 @@
 # per-instruction loop) can call the C++ `tick()`/`nanos_to_next_alarm()` directly. ClockAlarm._clock stays
 # `object`-typed, not SimulationClock: it is only read from schedule()/cancel(), and typing it would need
 # the two classes to forward-declare each other for no hot-path benefit.
+from libc.stdint cimport int64_t
+
 from rp2040py.native._clock cimport Alarm, Clock
 
 
@@ -21,6 +23,7 @@ cdef class ClockAlarm:
     cdef Alarm _node
 
     cpdef schedule(self, double delta_nanos)
+    cpdef schedule_ticks(self, int64_t delta_ticks)
     cpdef cancel(self)
 
 
@@ -30,5 +33,8 @@ cdef class SimulationClock:
 
     cpdef ClockAlarm create_alarm(self, callback)
     cpdef ClockAlarm link_alarm(self, double nanos, ClockAlarm alarm)
+    cpdef ClockAlarm link_alarm_ticks(self, int64_t ticks, ClockAlarm alarm)
     cpdef bint unlink_alarm(self, ClockAlarm alarm) except -1
     cpdef tick(self, double delta_nanos)
+    cpdef tick_ticks(self, int64_t delta_ticks)
+    cpdef advance_cycles(self, int64_t cycles, double ticks_per_cycle)

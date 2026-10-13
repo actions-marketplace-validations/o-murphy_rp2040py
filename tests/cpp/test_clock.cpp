@@ -1,4 +1,5 @@
 // Standalone checks of src/rp2040py/native/core/clock.hpp (see tests/test_core_cpp.py for the flags).
+#include <cmath>
 #include <cstdio>
 
 #include "clock.hpp"
@@ -161,6 +162,52 @@ int main() {
     CHECK(c3.nanos() == 20 && ok2.alarm.scheduled && c3.nanos_to_next_alarm() == 10);
     bad.fail = false;
     CHECK(c3.tick(100) && ok2.fired == 1 && c3.nanos() == 120);
+
+    // ---- the integer time base (docs/records/0100) ----------------------------------------------------------------------
+    {
+        Clock t;
+        CHECK(kTicksPerNano == 16 && t.ticks() == 0);
+        CHECK(nanos_to_ticks(8.0) == 128 && nanos_to_ticks(1.0 / 32) == 1 && nanos_to_ticks(1.0 / 32 - 1e-3) == 0 && nanos_to_ticks(-1.0 / 32) == 0 && nanos_to_ticks(-0.1) == -2);  // round half up
+        CHECK(nanos_to_ticks(1e30) == kMaxTicks && nanos_to_ticks(-1e30) == -kMaxTicks && nanos_to_ticks(std::nan("")) == 0);
+        // past 2^53 ns, where a double of nanoseconds could not hold now + 8: an 8 ns step still resolves, tick by tick
+        CHECK(t.tick_ticks((int64_t{1} << 53) * 16 + 7));
+        const int64_t start = t.ticks();
+        Probe p1, p2;
+        init(p1, t, 21); init(p2, t, 22);
+        t.schedule(&p1.alarm, 8.0);
+        t.schedule(&p2.alarm, 8.0);
+        order_count = 0;
+        CHECK(t.tick(8.0) && p1.fired == 1 && p2.fired == 1 && t.ticks() == start + 128 && order[0] == 21 && order[1] == 22);
+        CHECK(t.tick_ticks(1) && t.ticks() == start + 129);
+        // 2.5 years of simulated time is nowhere near the end of the range
+        Clock y;
+        CHECK(y.tick_ticks(static_cast<int64_t>(7.8e16) * 16) && !y.saturated());
+        const int64_t before = y.ticks();
+        CHECK(y.tick(8.0) && y.ticks() == before + 128);
+        // the end of the range saturates instead of wrapping, and says so
+        Clock z;
+        Probe never;
+        init(never, z, 23);
+        z.schedule(&never.alarm, 1e30);
+        CHECK(z.saturated() && z.ticks_to_next_alarm() == kMaxTicks);
+        CHECK(z.tick_ticks(kMaxTicks) && z.ticks() == kMaxTicks && never.fired == 1);
+        CHECK(z.tick_ticks(kMaxTicks) && z.ticks() == kMaxTicks);  // stays at the end
+        z.reset();
+        CHECK(!z.saturated() && z.ticks() == 0);
+        // a negative delta moves time back, as the double clock allowed
+        Clock n;
+        CHECK(n.tick_ticks(100) && n.tick_ticks(-40) && n.ticks() == 60);
+        // a period that is not a whole number of ticks: the remainder is carried, however the cycles are split
+        const double tpc = 1e9 / 133e6 * 16;
+        Clock one, chunks;
+        for (int i = 0; i < 1000000; ++i) CHECK(one.advance_cycles(1, tpc));
+        for (int i = 0; i < 10000; ++i) CHECK(chunks.advance_cycles(100, tpc));
+        const double exact = 1e6 * tpc;
+        CHECK(std::fabs(static_cast<double>(one.ticks()) - exact) <= 1.0 && std::fabs(static_cast<double>(chunks.ticks()) - exact) <= 1.0);
+        Clock c125;
+        for (int i = 0; i < 1000; ++i) CHECK(c125.advance_cycles(3, 128.0));
+        CHECK(c125.ticks() == 384000 && c125.nanos() == 24000.0);
+    }
 
     std::printf(failures ? "FAILED: %d\n" : "clock: all checks passed\n", failures);
     return failures ? 1 : 0;

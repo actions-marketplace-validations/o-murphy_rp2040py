@@ -14,6 +14,7 @@ __all__ = ("RPUSBController",)
 
 ENDPOINT_COUNT = 16
 USB_HOST_INTERRUPT_ENDPOINTS = 15
+FIFO_DEPTH = 64  # completed buffers per (endpoint, direction), and OUT starts per endpoint, the model remembers: a bound the C++ block needs (static storage); the hardware has one bit
 
 # USB DPSRAM Registers - Device mode
 EP1_IN_CONTROL = 0x8
@@ -357,6 +358,16 @@ class RPUSBController(BasePeripheral):
                 status |= 1 << index
         return status
 
+    def _push_done(self, slot: int, half: int) -> None:
+        """A buffer completed and the CPU has not handled it: remembered (at most FIFO_DEPTH of them) until BUFF_STATUS is written."""
+        if len(self._buff_done[slot]) < FIFO_DEPTH:
+            self._buff_done[slot].append(half)
+
+    def _push_pending(self, endpoint: int, half: int) -> None:
+        """An OUT buffer was handed to the controller and waits for the host's data (at most FIFO_DEPTH per endpoint)."""
+        if len(self._pending_reads[endpoint]) < FIFO_DEPTH:
+            self._pending_reads[endpoint].append(half)
+
     def _make_read_alarm(self, index: int) -> Callable[[], None]:
         def _on_alarm() -> None:
             alarm = self.endpoint_read_alarms[index]
@@ -626,7 +637,7 @@ class RPUSBController(BasePeripheral):
             if double:
                 self._buf_select[slot] ^= 1
             if out:
-                self._pending_reads[endpoint].append(half)
+                self._push_pending(endpoint, half)
                 if self.on_endpoint_read:
                     self.on_endpoint_read(endpoint, length)
             else:
@@ -686,12 +697,12 @@ class RPUSBController(BasePeripheral):
             per_buffer = bool(control & USB_CTRL_INTERRUPT_PER_TRANSFER)
             per_two = bool(control & EP_CTRL_INTERRUPT_PER_DOUBLE_BUFFER)
         if per_buffer:
-            self._buff_done[slot].append(half)
+            self._push_done(slot, half)
         elif per_two and self._is_double_buffered(endpoint, out):
             self._two_buffer_count[slot] += 1
             if self._two_buffer_count[slot] == 2:
                 self._two_buffer_count[slot] = 0
-                self._buff_done[slot].append(half)
+                self._push_done(slot, half)
         self._buff_status_updated()
         # the other buffer of a double-buffered endpoint may already be waiting
         self._service_endpoint(endpoint, out)
@@ -979,7 +990,7 @@ class RPUSBController(BasePeripheral):
 
                     # Set buffer status for this interrupt endpoint
                     # Interrupt EPs use bits 2+ in buff_status (bit 0 is epx IN, bit 1 is epx OUT)
-                    self._buff_done[(i + 1) * 2].append(0)
+                    self._push_done((i + 1) * 2, 0)
                     self._buff_status_updated()
 
     def _start_host_transaction(self) -> None:
@@ -1094,7 +1105,7 @@ class RPUSBController(BasePeripheral):
             _set_uint32_le(self.rp2040.usb_dpram, HOST_EPX_BUF_CTRL, buf_ctrl)
 
             # Set buffer status
-            self._buff_done[0].append(0)  # Bit 0 for EPX
+            self._push_done(0, 0)  # Bit 0 for EPX
             self._buff_status_updated()
 
             self._sie_status |= SIE_ACK_REC
@@ -1135,7 +1146,7 @@ class RPUSBController(BasePeripheral):
 
         if result.status == "ack":
             self._sie_status |= SIE_ACK_REC
-            self._buff_done[0].append(0)  # Bit 0 for EPX
+            self._push_done(0, 0)  # Bit 0 for EPX
             self._buff_status_updated()
         elif result.status == "nak":
             self._sie_status |= SIE_NAK_REC

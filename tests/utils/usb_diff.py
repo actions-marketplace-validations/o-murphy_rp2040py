@@ -373,8 +373,8 @@ MUTATIONS: dict[str, tuple[str, str, int]] = {
         1,
     ),
     "interrupt_enable_ignored": (
-        "        if per_buffer:\n            self._buff_done[slot].append(half)",
-        "        if True:\n            self._buff_done[slot].append(half)",
+        "        if per_buffer:\n            self._push_done(slot, half)",
+        "        if True:\n            self._push_done(slot, half)",
         1,
     ),
     "per_two_counts_to_one": ("if self._two_buffer_count[slot] == 2:", "if self._two_buffer_count[slot] == 1:", 1),

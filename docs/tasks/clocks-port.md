@@ -1,6 +1,6 @@
 # CLOCKS and PLL: audit against the datasheet, then the C++ port (working note)
 
-Status: audit read, port not started (2026-10-13). Recipe: [core-block-recipe.md](../reference/core-block-recipe.md), section A first. Folded into record 0098 (a CLOCKS/PLL section, as for USB) when done.
+Status: audit read, decisions made, port not started (2026-10-13). Recipe: [core-block-recipe.md](../reference/core-block-recipe.md), section A first. Folded into record 0098 (a CLOCKS/PLL section, as for USB) when done.
 
 Why this is in the C++ plan at all: record 0096's rule (2026-10-06) is that the core owns every behaviour firmware can observe with no host attached, and it lists the clock tree among the debt (item 2): "a core that is to run alone has to own `clk_sys`/`clk_peri` itself - the DMA already asks the host for `clk_sys` through a callback, which a headless host cannot answer". The 2026-10-05 entry that left the tree in Python "on purpose" predates the rule.
 
@@ -32,11 +32,11 @@ Not independently sourced: BYPASS passing `xosc / REFDIV` rather than the undivi
 - The retune: today a Python function that calls into six blocks. In C++ the tree needs a `ClockSink` list (function pointers + ctx), like `RebaseListener`: SysTick, the PWM counters, the UARTs, the watchdog tick, the RTC, the PIO dividers, the DMA's pacing, the SPI/I2C/ADC rates, and the host's own listeners (`add_clock_listener`). The shells register the Python callbacks in the same list.
 - `clk_sys` / `clk_peri` / `clk_ref` / `clk_rtc` / `clk_usb` / `clk_adc` as values the tree owns and every block reads through it - which is what makes the DMA's `clk_sys` host callback and the XIP's disappear.
 
-## Open decisions (for the maintainer)
+## Decisions (the maintainer, 2026-10-13)
 
-1. **One header or two** (`core/clocks.hpp` with `ClocksBlock` + `PllBlock`, or `clocks.hpp` + `pll.hpp`)? They are two peripherals at two addresses but the tree is one thing.
-2. **Should clk_sys retune the CPU's instruction time base?** Today it stays 125 MHz (`CYCLE_NANOS`, record 0096's "same as upstream" note): firmware at 200 MHz executes its instructions in 8 ns of simulated time, not 5. The integer clock's `advance_cycles(cycles, ticks_per_cycle)` can carry a fractional period already. Changing it makes simulated time follow the configured frequency (a behaviour change, and every timing in tests and CI would move).
-3. **XOSC as an input**: its 12 MHz is a constant; the XOSC block has `CTRL.ENABLE` and `STATUS.STABLE`. Should a disabled XOSC give 0 (so a PLL with no crystal does not lock)? That is the datasheet's behaviour, but firmware that never enables the XOSC (the bare `RP2040()` chip, many tests) would see 0 Hz unless the "0 keeps the last value" rule is kept.
+1. **Two headers**: `core/clocks.hpp` (`ClocksBlock`) and `core/pll.hpp` (`PllBlock`), siblings, as the module-layout rule says; the clocks block reads the PLLs' frequencies.
+2. **The CPU's instruction time follows `clk_sys`.** "If the firmware asks for a frequency change it has to work" - the emulator does not run faster or slower in wall time; the *simulated* time of an instruction is `1 / clk_sys`, i.e. what the firmware expects (an overclock to 250 MHz makes a bit-banged protocol take half the simulated time, an underclock to 12 MHz ten times as much). Today it is a constant 125 MHz (`CYCLE_NANOS` in `_simulator.pyx` and its pure twin). The integer clock already carries a fractional per-cycle period (`advance_cycles(cycles, ticks_per_cycle)`), so the mechanism exists; what changes is that the tree retunes it. A behaviour change: every test and CI job whose timing depends on a firmware that sets the frequency (the SDK's `runtime_init` sets 125 MHz, so the common case does not move; `machine.freq()`, `set_sys_clock_khz()` and the like do) is checked in the same commit.
+3. **A disabled XOSC gives 0 Hz** (hardware-faithful: the PLL has no reference, `clk_ref` from XOSC does not run). The oscillator blocks are the tree's inputs (`XOSC.STATUS.STABLE`, `ROSC` frequency), not the chip's constants `xosc_freq` / `rosc_freq`. An experiment (2026-10-13, reverted, not committed) with 0 Hz for an unstable XOSC in the reference broke tests that select XOSC as `clk_ref` or feed a PLL without enabling the crystal first (`tests/test_clock_rebase.py` among them: the watchdog tick, hence the TIMER, derives from clk_ref); those tests will enable the XOSC as firmware does. A bare chip that never touches the tree keeps its 125 MHz default (the rule "a frequency of 0 keeps the last value" stays: the emulator starts as if the bootrom had set the tree up, which is what the SDK's `runtime_init_clocks` then re-does).
 
 ## Plan
 

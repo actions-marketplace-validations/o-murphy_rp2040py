@@ -36,7 +36,9 @@ def test_pll_registers_keep_only_their_datasheet_bits(rp2040_factory):
     for offset, kept in ((0x04, 0x2D), (0x08, 0xFFF), (0x0C, 0x77000)):
         chip.write_uint32(PLL_SYS + offset, 0xFFFFFFFF)
         assert chip.read_uint32(PLL_SYS + offset) == kept, hex(offset)
-    chip.write_uint32(PLL_SYS + 0x00, 0xFFFFFFFF)  # CS: BYPASS 8 and REFDIV 5:0 (LOCK 31 is read only, and clear while PWR has PD set)
+    chip.write_uint32(
+        PLL_SYS + 0x00, 0xFFFFFFFF
+    )  # CS: BYPASS 8 and REFDIV 5:0 (LOCK 31 is read only, and clear while PWR has PD set)
     assert chip.read_uint32(PLL_SYS + 0x00) == 0x13F
 
 

@@ -5,8 +5,8 @@ Every test says which table or section it follows. They run on both builds: the 
 
 import pytest
 
-from rp2040py.peripherals import clocks as C
-from rp2040py.peripherals import pll as P
+from rp2040py.peripherals import _clocks as C
+from rp2040py.peripherals import _pll as P
 from rp2040py.rp2040 import RP2040
 
 CLOCKS_BASE = 0x40008000

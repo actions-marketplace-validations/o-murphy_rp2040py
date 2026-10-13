@@ -414,7 +414,7 @@ Stubs in this block: stored only (peripherals/_ssi.py): MWCR, SER, CTRLR1, RX_SA
 
 ## CLOCKS
 
-Stubs in this block: clock gating, the resus and its interrupt are not modelled (`STORED_REGISTERS` in peripherals/clocks.py, and the status reads constant 0; ENABLED0/1 read their reset value 0); the four GPOUT clock outputs (CLK_GPOUT0-3 CTRL/DIV) are stored: nothing is driven onto a pin.
+Stubs in this block: clock gating, the resus and its interrupt are not modelled (`STORED_REGISTERS` in peripherals/_clocks.py, and the status reads constant 0; ENABLED0/1 read their reset value 0); the four GPOUT clock outputs (CLK_GPOUT0-3 CTRL/DIV) are stored: nothing is driven onto a pin.
 
 | Offset | Register | Status | Note |
 |---|---|---|---|

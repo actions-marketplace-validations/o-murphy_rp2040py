@@ -48,7 +48,9 @@ def _init_pll(chip: RP2040, base: int, refdiv: int = 1, fbdiv: int = 125, postdi
     """Configures a PLL the way pico-sdk's `pll_init()` does."""
     chip.write_uint32(base + PLL_CS, refdiv)
     chip.write_uint32(base + PLL_FBDIV_INT, fbdiv)
-    chip.write_uint32(base + PLL_PWR, 0)  # PD, VCOPD and POSTDIVPD all cleared (the SDK does it in two steps around PRIM)
+    chip.write_uint32(
+        base + PLL_PWR, 0
+    )  # PD, VCOPD and POSTDIVPD all cleared (the SDK does it in two steps around PRIM)
     chip.write_uint32(base + PLL_PRIM, (postdiv1 << 16) | (postdiv2 << 12))
 
 

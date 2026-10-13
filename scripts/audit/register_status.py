@@ -71,7 +71,10 @@ PARTIAL: dict[str, dict[int, str]] = {
         0x038: "INPUT_SYNC_BYPASS has no effect",
     },
     "I2C": {0x000: "IC_CON: the slave bits (IC_SLAVE_DISABLE, IC_10BITADDR_SLAVE) do nothing: no slave mode"},
-    "PLL": {0x000: "CS.LOCK is always 1 (no start-up time)"},
+    "PLL": {
+        0x000: "CS.LOCK follows PD / VCOPD and the reference clock; it comes up at once (no lock time)",
+        0x004: "PD, VCOPD and POSTDIVPD act; DSMPD is stored: the fractional-N / dither is not modelled (peripherals/_pll.py)",
+    },
     "SIO": {
         0x000: "CPUID is always 0 (no core 1)",
         0x004: "GPIO_IN reads the pad at once: the two-cycle input synchroniser is not modelled (SYSCFG.PROC_IN_SYNC_BYPASS is stored)",
@@ -106,7 +109,7 @@ STUBS: dict[str, tuple[object, str]] = {
         set(clocks.STORED_REGISTERS)
         | {clocks.CLK_SYS_RESUS_STATUS, clocks.INTR, clocks.INTS, clocks.ENABLED0, clocks.ENABLED1}
         | {0x00, 0x04, 0x0C, 0x10, 0x18, 0x1C, 0x24, 0x28},
-        "clock gating, the resus and its interrupt are not modelled (`STORED_REGISTERS` in peripherals/clocks.py, and the status reads constant 0; ENABLED0/1 read their reset value 0); the four GPOUT clock outputs (CLK_GPOUT0-3 CTRL/DIV) are stored: nothing is driven onto a pin",
+        "clock gating, the resus and its interrupt are not modelled (`STORED_REGISTERS` in peripherals/_clocks.py, and the status reads constant 0; ENABLED0/1 read their reset value 0); the four GPOUT clock outputs (CLK_GPOUT0-3 CTRL/DIV) are stored: nothing is driven onto a pin",
     ),
     "I2C": (
         {
@@ -140,10 +143,6 @@ STUBS: dict[str, tuple[object, str]] = {
     ),
     "UART": ({0x020}, "UARTILPR (IrDA low-power counter) is stored: there is no IrDA (peripherals/_uart.py)"),
     "TIMER": ({0x2C}, "DBGPAUSE is stored: there is no debug halt for the timer to pause on (peripherals/_timer.py)"),
-    "PLL": (
-        {0x04},
-        "PWR (PD, VCOPD, POSTDIVPD, DSMPD) is stored: the PLL is always locked and running (peripherals/pll.py)",
-    ),
     "XOSC": ({0x1C}, "COUNT is loaded by a write but never counts down (peripherals/_xosc.py)"),
     "PADS_BANK0": (
         {0x00, 0x7C, 0x80},

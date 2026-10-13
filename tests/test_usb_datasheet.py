@@ -422,3 +422,24 @@ def test_data_for_the_second_out_buffer_lands_in_the_second_buffer(mcu):
     assert word & 0x3FF == 5
     assert (word >> U.USB_BUF1_SHIFT) & 0x3FF == 6
     assert word & U.USB_BUF_CTRL_FULL and word & (U.USB_BUF_CTRL_FULL << U.USB_BUF1_SHIFT)
+
+
+def test_data_for_a_buffer_at_the_end_of_the_dpram_does_not_change_its_size(mcu):
+    """The DPRAM is 4 kB (4.1.2.7). An endpoint control word can name a buffer base up to 64 kB and a length is up to 1023: the data is cut off at the end, the memory stays the size it is (a
+    bytearray slice assignment past the end used to grow it, a memoryview one raised; the two chips disagreed)."""
+    wire = Wire(mcu)
+    set_dpram(
+        mcu, U.EP1_OUT_CONTROL, U.EP_CTRL_ENABLE_BITS | U.USB_CTRL_INTERRUPT_PER_TRANSFER | 0xFFC0
+    )  # a base far past the end
+    set_dpram(mcu, EP1_OUT_BUFFER_CONTROL, in_buffer(1023, full=False))
+    mcu.usb_ctrl.endpoint_read_done(1, bytes(range(200)) * 5)
+    wire.settle()
+    assert len(mcu.usb_dpram) == 4096
+    assert dpram_word(mcu, EP1_OUT_BUFFER_CONTROL) & 0x3FF == 0  # nothing fitted
+    set_dpram(
+        mcu, U.EP1_OUT_CONTROL, U.EP_CTRL_ENABLE_BITS | U.USB_CTRL_INTERRUPT_PER_TRANSFER | 0xFFC0 - 0xFC0
+    )  # 0x1000 - 0x40 - 0x... a base 64 bytes from the end
+    set_dpram(mcu, EP1_OUT_BUFFER_CONTROL, in_buffer(1023, full=False))
+    mcu.usb_ctrl.endpoint_read_done(1, bytes([7]) * 200)
+    wire.settle()
+    assert len(mcu.usb_dpram) == 4096

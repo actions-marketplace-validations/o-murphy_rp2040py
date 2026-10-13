@@ -75,6 +75,7 @@ from rp2040py.peripherals._uart import (  # the pure chip's own UART: the native
     RPUART,
     IUARTDMAChannels,
 )
+from rp2040py.peripherals._usb import RPUSBController
 from rp2040py.peripherals._vreg_and_chip_reset import RPVREGAndChipReset
 from rp2040py.peripherals._watchdog import RPWatchdog
 from rp2040py.peripherals._xip_ctrl import (  # the pure chip's own XIP: the native one works on the native chip's flash buffer and memory map
@@ -87,7 +88,6 @@ from rp2040py.peripherals.peripheral import Peripheral
 from rp2040py.peripherals.pio import RPPIO
 from rp2040py.peripherals.pll import RPPLL
 from rp2040py.peripherals.timer import RPTimer
-from rp2040py.peripherals.usb import RPUSBController
 from rp2040py.qspi_pads import QSPI_PAD_RESET_VALUES
 from rp2040py.sio import RPSIO
 from rp2040py.utils.bit import (

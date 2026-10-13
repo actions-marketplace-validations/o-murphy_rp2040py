@@ -48,8 +48,8 @@ struct UsbHost {
     bool (*reset_received)(void* ctx) = nullptr;                        // on_reset_received
     bool (*endpoint_read)(void* ctx, uint32_t endpoint, uint32_t length) = nullptr;  // on_endpoint_read: the host is asked for `length` bytes
     bool (*write_queued)(void* ctx, uint32_t endpoint, uint32_t half, const uint8_t* data, uint32_t length) = nullptr;  // an IN buffer has started: the shell queues a copy
-    bool (*endpoint_write)(void* ctx, uint32_t endpoint, const uint8_t* data, uint32_t length) = nullptr;               // on_endpoint_write: the buffer reached the host
     bool (*drain_write)(void* ctx, uint32_t endpoint) = nullptr;        // the IN alarm fired: the shell finishes every queued buffer (`finish_write`)
+    bool (*drain_reaction)(void* ctx, uint32_t endpoint) = nullptr;     // the reaction alarm fired: the shell hands every acknowledged buffer to on_endpoint_write
     bool (*drain_read)(void* ctx, uint32_t endpoint) = nullptr;         // the OUT alarm fired: the shell hands the queued data over (`finish_read`)
     bool (*device_reset)(void* ctx) = nullptr;                          // connected_device.on_reset()
     bool (*device_address)(void* ctx, uint32_t* address) = nullptr;     // connected_device.address
@@ -125,7 +125,7 @@ public:
     bool host_mode = false, sof_enabled = false, has_device = false, expecting_status_phase = false;
     uint32_t control_data_pid = 1;
     uint32_t buf_select[kSlots] = {}, two_buffer_count[kSlots] = {};
-    int64_t read_delay_microseconds = 10, write_delay_microseconds = 10, host_transaction_delay_microseconds = 5;
+    int64_t read_delay_microseconds = 10, write_delay_microseconds = 10, host_transaction_delay_microseconds = 5, host_reaction_microseconds = 10;
 
     void init(Clock* clock, uint8_t* dpram, const UsbHost& host) noexcept {
         clock_ = clock;
@@ -431,10 +431,11 @@ public:
         return buffer_done(endpoint, true, half, stored);
     }
 
-    // An IN buffer reached the host and was acknowledged: the host callback, then the status phase.
-    bool finish_write(uint32_t endpoint, const uint8_t* data, uint32_t size, uint32_t half) noexcept {
-        if (!host_.endpoint_write(host_.ctx, endpoint, data, size)) return false;
-        return buffer_done(endpoint, false, half, 0);
+    // An IN buffer reached the host and was acknowledged: the status phase now (the shell has the data), the host's reaction `host_reaction_microseconds` later (`drain_reaction`).
+    bool finish_write(uint32_t endpoint, uint32_t half) noexcept {
+        if (!buffer_done(endpoint, false, half, 0)) return false;
+        clock_->schedule(&slots_[2 * usb_regs::kEndpoints + endpoint].alarm, static_cast<double>(host_reaction_microseconds * 1000));
+        return true;
     }
 
     // The shell queued OUT data / an IN buffer: (re)start the alarm that delivers it.
@@ -500,8 +501,8 @@ public:
     WindowHandler window_handler() noexcept { return BlockWindow<UsbBlock>::handler(this); }
 
 private:
-    static constexpr uint32_t kAlarms = usb_regs::kEndpoints * 2 + 3;
-    static constexpr uint32_t kResetAlarm = usb_regs::kEndpoints * 2, kSofAlarm = kResetAlarm + 1, kHostAlarm = kResetAlarm + 2;
+    static constexpr uint32_t kAlarms = usb_regs::kEndpoints * 3 + 3;  // 16 OUT, 16 IN, 16 host reactions, bus reset, host SOF, host transaction
+    static constexpr uint32_t kReactionAlarm = usb_regs::kEndpoints * 2, kResetAlarm = usb_regs::kEndpoints * 3, kSofAlarm = kResetAlarm + 1, kHostAlarm = kResetAlarm + 2;
 
     struct AlarmSlot {
         Alarm alarm;
@@ -514,7 +515,8 @@ private:
         UsbBlock* block = slot->owner;
         const uint32_t index = slot->index;
         if (index < usb_regs::kEndpoints) return block->host_.drain_read(block->host_.ctx, index);
-        if (index < kResetAlarm) return block->host_.drain_write(block->host_.ctx, index - usb_regs::kEndpoints);
+        if (index < kReactionAlarm) return block->host_.drain_write(block->host_.ctx, index - usb_regs::kEndpoints);
+        if (index < kResetAlarm) return block->host_.drain_reaction(block->host_.ctx, index - kReactionAlarm);
         if (index == kResetAlarm) {
             block->sie_status |= usb_regs::SIE_BUS_RESET;
             return block->sie_status_updated();

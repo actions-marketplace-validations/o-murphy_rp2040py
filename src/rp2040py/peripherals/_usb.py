@@ -326,14 +326,21 @@ class RPUSBController(BasePeripheral):
 
         self.read_delay_microseconds = 10
         self.write_delay_microseconds = 10  # Determined empirically
+        # The host's reaction to an acknowledged IN buffer comes this long after the ACK, which is when the status is written back and BUFF_STATUS raised. On the wire the next thing the host does (the
+        # OUT status stage of a control read, then the next SETUP) takes a transaction or more; the shortcut host (usb/cdc.py) reacts inside its callback, and without a gap the firmware sees SETUP_REQ and the
+        # BUFF_STATUS of the transfer before it in one interrupt - which the TinyUSB of pico-sdk 1.2.0-1.4.0 handles in that order and corrupts EP0 (found by CI, record 0098, USB). Not independently
+        # sourced: it is the gap the model had before, when BUFF_STATUS was raised at the start of the transfer.
+        self.host_reaction_microseconds = 10
         self.host_transaction_delay_microseconds = 5  # Host transaction delay
 
         clock = rp2040.clock
         self.endpoint_read_alarms: list[USBEndpointAlarm] = []
         self.endpoint_write_alarms: list[USBEndpointAlarm] = []
+        self.endpoint_reaction_alarms: list[USBEndpointAlarm] = []
         for i in range(ENDPOINT_COUNT):
             self.endpoint_read_alarms.append(USBEndpointAlarm(clock.create_alarm(self._make_read_alarm(i))))
             self.endpoint_write_alarms.append(USBEndpointAlarm(clock.create_alarm(self._make_write_alarm(i))))
+            self.endpoint_reaction_alarms.append(USBEndpointAlarm(clock.create_alarm(self._make_reaction_alarm(i))))
 
         self.reset_alarm = clock.create_alarm(self._on_reset_alarm)
 
@@ -385,6 +392,17 @@ class RPUSBController(BasePeripheral):
             alarm.clear()
             for buffer, half in zip(buffers, halves, strict=True):
                 self._finish_write(index, buffer, half)
+
+        return _on_alarm
+
+    def _make_reaction_alarm(self, index: int) -> Callable[[], None]:
+        def _on_alarm() -> None:
+            alarm = self.endpoint_reaction_alarms[index]
+            buffers = alarm.buffers
+            alarm.clear()
+            for buffer in buffers:  # the host sees every buffer that was acknowledged before the alarm ran
+                if self.on_endpoint_write:
+                    self.on_endpoint_write(index, buffer)
 
         return _on_alarm
 
@@ -645,10 +663,9 @@ class RPUSBController(BasePeripheral):
                 self.endpoint_write_alarms[endpoint].schedule(buffer, self.write_delay_microseconds * 1000, half)
 
     def _finish_write(self, endpoint: int, buffer: bytes | bytearray, half: int) -> None:
-        """An IN buffer reached the host and was acknowledged: the host callback, then the status phase (4.1.2.8.2)."""
-        if self.on_endpoint_write:
-            self.on_endpoint_write(endpoint, buffer)
+        """An IN buffer reached the host and was acknowledged: the status phase (4.1.2.8.2) now, the host's reaction `host_reaction_microseconds` later."""
         self._buffer_done(endpoint, False, half, 0)
+        self.endpoint_reaction_alarms[endpoint].schedule(buffer, self.host_reaction_microseconds * 1000)
 
     def endpoint_read_done(self, endpoint: int, buffer: bytes | bytearray, delay: int | None = None) -> None:
         if delay is None:
@@ -762,7 +779,7 @@ class RPUSBController(BasePeripheral):
 
         for alarm in (self.reset_alarm, self.sof_alarm, self.host_transaction_alarm):
             alarm.cancel()
-        for endpoint_alarm in (*self.endpoint_read_alarms, *self.endpoint_write_alarms):
+        for endpoint_alarm in (*self.endpoint_read_alarms, *self.endpoint_write_alarms, *self.endpoint_reaction_alarms):
             endpoint_alarm.alarm.cancel()
             endpoint_alarm.clear()
 

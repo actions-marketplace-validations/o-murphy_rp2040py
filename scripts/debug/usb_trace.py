@@ -44,7 +44,7 @@ NAMES = {
         "INTS",
     ]
 }
-HEAD = 400
+HEAD = 3000
 log: collections.deque = collections.deque(maxlen=80)
 head: list = []
 
@@ -69,12 +69,16 @@ read, write, dpram, done = (
 
 def traced_read(self, offset):
     value = read(self, offset)
-    record(("R", NAMES.get(offset, hex(offset)), hex(value), now(self)))
+    state = ""
+    if offset == U.BUFF_STATUS:  # copies: the lists keep changing after the entry is made
+        words = [hex(int.from_bytes(self.rp2040.usb_dpram[o : o + 4], "little")) for o in (0x80, 0x84)]
+        state = ([list(d) for d in self._buff_done[:6]], "buffer control ep0 in/out:", words)
+    record(("R", NAMES.get(offset, hex(offset)), hex(value), now(self), state))
     return value
 
 
 def traced_write(self, offset, value):
-    record(("W", NAMES.get(offset, hex(offset)), hex(value), now(self)))
+    record(("W", NAMES.get(offset, hex(offset)), hex(value), "raw", hex(self.raw_write_value), now(self)))
     return write(self, offset, value)
 
 
@@ -89,6 +93,15 @@ def traced_done(self, endpoint, out, half, received):
     return done(self, endpoint, out, half, received)
 
 
+setup_packet = U.RPUSBController.send_setup_packet
+
+
+def traced_setup(self, packet):
+    record(("SETUP", bytes(packet).hex(), now(self)))
+    return setup_packet(self, packet)
+
+
+U.RPUSBController.send_setup_packet = traced_setup
 U.RPUSBController.read_uint32, U.RPUSBController.write_uint32 = traced_read, traced_write
 U.RPUSBController.dpram_updated, U.RPUSBController._buffer_done = traced_dpram, traced_done
 

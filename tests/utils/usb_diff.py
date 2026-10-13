@@ -411,6 +411,21 @@ MUTATIONS: dict[str, tuple[str, str, int]] = {
         "self.write_delay_microseconds = 11",
         1,
     ),
+    "reaction_delay_11": (
+        "self.host_reaction_microseconds = 10\n",
+        "self.host_reaction_microseconds = 11\n",
+        1,
+    ),
+    "host_reacts_at_the_ack": (
+        "schedule(buffer, self.host_reaction_microseconds * 1000)",
+        "schedule(buffer, 0)",
+        1,
+    ),
+    "reaction_serves_one": (
+        "            for buffer in buffers:  # the host sees every buffer that was acknowledged before the alarm ran\n",
+        "            for buffer in buffers[:1]:\n",
+        1,
+    ),
     "read_delay_11": ("self.read_delay_microseconds = 10\n", "self.read_delay_microseconds = 11\n", 1),
     "host_mode_ignores_dpram": (
         "        if self._host_mode:\n            return\n        if EP0_IN_BUFFER_CONTROL <= offset",

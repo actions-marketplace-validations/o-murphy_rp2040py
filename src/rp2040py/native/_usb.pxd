@@ -19,7 +19,6 @@ cdef extern from "usb.hpp" namespace "rp2040core":
     ctypedef cppbool (*UsbVoidFn)(void* ctx)
     ctypedef cppbool (*UsbEndpointReadFn)(void* ctx, uint32_t endpoint, uint32_t length)
     ctypedef cppbool (*UsbWriteQueuedFn)(void* ctx, uint32_t endpoint, uint32_t half, const uint8_t* data, uint32_t length)
-    ctypedef cppbool (*UsbEndpointWriteFn)(void* ctx, uint32_t endpoint, const uint8_t* data, uint32_t length)
     ctypedef cppbool (*UsbEndpointFn)(void* ctx, uint32_t endpoint)
     ctypedef cppbool (*UsbAddressFn)(void* ctx, uint32_t* address)
     ctypedef cppbool (*UsbSetupFn)(void* ctx, const uint8_t* setup, cppbool* has_response)
@@ -35,8 +34,8 @@ cdef extern from "usb.hpp" namespace "rp2040core":
         UsbVoidFn reset_received
         UsbEndpointReadFn endpoint_read
         UsbWriteQueuedFn write_queued
-        UsbEndpointWriteFn endpoint_write
         UsbEndpointFn drain_write
+        UsbEndpointFn drain_reaction
         UsbEndpointFn drain_read
         UsbVoidFn device_reset
         UsbAddressFn device_address
@@ -82,6 +81,7 @@ cdef extern from "usb.hpp" namespace "rp2040core":
         int64_t read_delay_microseconds
         int64_t write_delay_microseconds
         int64_t host_transaction_delay_microseconds
+        int64_t host_reaction_microseconds
         UsbBlock() noexcept
         void init(Clock* clock, uint8_t* dpram, const UsbHost& host) noexcept
         void detach() noexcept
@@ -106,7 +106,7 @@ cdef extern from "usb.hpp" namespace "rp2040core":
         cppbool write_atomic(uint32_t offset, int64_t raw, uint32_t atomic_type) noexcept
         cppbool dpram_updated(uint32_t offset) noexcept
         cppbool finish_read(uint32_t endpoint, const uint8_t* data, uint32_t size) noexcept
-        cppbool finish_write(uint32_t endpoint, const uint8_t* data, uint32_t size, uint32_t half) noexcept
+        cppbool finish_write(uint32_t endpoint, uint32_t half) noexcept
         void schedule_read(uint32_t endpoint, double delay_microseconds) noexcept
         cppbool send_setup_packet(const uint8_t* packet, uint32_t size) noexcept
         cppbool reset_device() noexcept
@@ -126,6 +126,7 @@ cdef class RPUSBController:
     cdef object _pending_response
     cdef list _read_queue
     cdef list _write_queue
+    cdef list _reaction_queue
     cdef object _scratch
     cdef public object on_usb_enabled
     cdef public object on_reset_received

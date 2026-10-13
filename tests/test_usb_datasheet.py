@@ -241,6 +241,41 @@ def test_an_in_buffer_writes_back_length_pid_and_last_buffer_only(mcu):
     )  # AVAILABLE, FULL and the reset-select bit are gone
 
 
+def test_the_host_reacts_to_an_acknowledged_in_buffer_after_the_status_phase_not_with_it(mcu):
+    """4.1.2.8.2: the status is written and BUFF_STATUS raised when the IN buffer is acknowledged; what the host does next (the status stage of a control read, then the next SETUP) takes a
+    transaction or more. The shortcut host reacts inside its callback, so the callback comes `host_reaction_microseconds` later: otherwise the firmware sees SETUP_REQ and the BUFF_STATUS of the
+    transfer before it in one interrupt, and the TinyUSB of pico-sdk 1.2.0-1.4.0 (SETUP first) corrupts EP0's length - found by CI as hello_usb never enumerating (record 0098, USB)."""
+    wire = Wire(mcu)
+    configure_endpoint(mcu, U.EP1_IN_CONTROL)
+    mcu.usb_dpram[BUFFER : BUFFER + 3] = b"abc"
+    set_dpram(mcu, EP1_IN_BUFFER_CONTROL, in_buffer(3))
+    mcu.clock.tick(9_999)
+    assert reg(mcu, U.BUFF_STATUS) == 0 and wire.sent == []
+    mcu.clock.tick(2)  # 10 us: the ACK
+    assert reg(mcu, U.BUFF_STATUS) == 1 << 2 and dpram_word(mcu, EP1_IN_BUFFER_CONTROL) == 3
+    assert wire.sent == []  # the host has not reacted yet
+    mcu.clock.tick(9_000)
+    assert wire.sent == []
+    mcu.clock.tick(2_000)  # 20 us
+    assert wire.sent == [(1, b"abc")]
+
+
+def test_a_setup_the_host_sends_in_its_reaction_arrives_after_the_buffer_status(mcu):
+    """The same, from the firmware's side: BUFF_STATUS is visible one reaction time before the SETUP_REQ that the host's callback causes."""
+    wire = Wire(mcu)
+    seen = []
+    wire.usb.on_endpoint_write = lambda endpoint, buffer: (
+        seen.append((int(mcu.clock.ticks), reg(mcu, U.BUFF_STATUS))),
+        wire.usb.send_setup_packet(bytes(8)),
+    )
+    configure_endpoint(mcu, U.EP1_IN_CONTROL)
+    set_dpram(mcu, EP1_IN_BUFFER_CONTROL, in_buffer(1))
+    wire.settle()
+    assert len(seen) == 1
+    assert seen[0][1] == 1 << 2  # when the SETUP comes the buffer status has been there for a while
+    assert reg(mcu, U.INTR) & U.INTR_SETUP_REQ
+
+
 def test_a_last_buffer_raises_trans_complete(mcu):
     """Table 404: TRANS_COMPLETE is "raised by device if an IN or OUT packet is sent with the LAST_BUFF bit set in the buffer control register"."""
     wire = Wire(mcu)

@@ -86,27 +86,30 @@ cdef cppbool _write_queued_trampoline(void* ctx, uint32_t endpoint, uint32_t hal
     return True
 
 
-cdef cppbool _endpoint_write_trampoline(void* ctx, uint32_t endpoint, const uint8_t* data, uint32_t length) noexcept:
+cdef cppbool _drain_write_trampoline(void* ctx, uint32_t endpoint) noexcept:
     cdef RPUSBController usb = <RPUSBController> ctx
     try:
-        callback = usb.on_endpoint_write
-        if callback:
-            callback(endpoint, PyBytes_FromStringAndSize(<const char*> data, length))
+        queued = usb._write_queue[endpoint]
+        usb._write_queue[endpoint] = []
+        for buffer, half in queued:  # every buffer that arrived before the alarm ran
+            if not usb._block.finish_write(endpoint, half):
+                return False  # (the failure is parked; the rest of the batch is lost, as the reference's exception loses it)
+            usb._reaction_queue[endpoint].append(buffer)
     except BaseException as error:
         park_error(error)
         return False
     return True
 
 
-cdef cppbool _drain_write_trampoline(void* ctx, uint32_t endpoint) noexcept:
+cdef cppbool _drain_reaction_trampoline(void* ctx, uint32_t endpoint) noexcept:
     cdef RPUSBController usb = <RPUSBController> ctx
-    cdef bytes buffer
     try:
-        queued = usb._write_queue[endpoint]
-        usb._write_queue[endpoint] = []
-        for buffer, half in queued:  # every buffer that arrived before the alarm ran
-            if not usb._block.finish_write(endpoint, <const uint8_t*> PyBytes_AsString(buffer), len(buffer), half):
-                return False  # (the failure is parked; the rest of the batch is lost, as the reference's exception loses it)
+        buffers = usb._reaction_queue[endpoint]
+        usb._reaction_queue[endpoint] = []
+        callback = usb.on_endpoint_write
+        for buffer in buffers:  # the host sees every buffer that was acknowledged before the alarm ran
+            if callback:
+                callback(endpoint, buffer)
     except BaseException as error:
         park_error(error)
         return False
@@ -356,6 +359,7 @@ cdef class RPUSBController:
         self._scratch = b""
         self._read_queue = [[] for _ in range(ENDPOINTS)]
         self._write_queue = [[] for _ in range(ENDPOINTS)]
+        self._reaction_queue = [[] for _ in range(ENDPOINTS)]
         self.on_usb_enabled = None
         self.on_reset_received = None
         self.on_reset = None
@@ -369,8 +373,8 @@ cdef class RPUSBController:
         host.reset_received = _reset_received_trampoline
         host.endpoint_read = _endpoint_read_trampoline
         host.write_queued = _write_queued_trampoline
-        host.endpoint_write = _endpoint_write_trampoline
         host.drain_write = _drain_write_trampoline
+        host.drain_reaction = _drain_reaction_trampoline
         host.drain_read = _drain_read_trampoline
         host.device_reset = _device_reset_trampoline
         host.device_address = _device_address_trampoline
@@ -416,6 +420,14 @@ cdef class RPUSBController:
     @host_transaction_delay_microseconds.setter
     def host_transaction_delay_microseconds(self, value):
         self._block.host_transaction_delay_microseconds = <int64_t> value
+
+    @property
+    def host_reaction_microseconds(self):
+        return self._block.host_reaction_microseconds
+
+    @host_reaction_microseconds.setter
+    def host_reaction_microseconds(self, value):
+        self._block.host_reaction_microseconds = <int64_t> value
 
     @property
     def connected_device(self):
@@ -708,6 +720,8 @@ cdef class RPUSBController:
         for queue in self._read_queue:
             del queue[:]
         for queue in self._write_queue:
+            del queue[:]
+        for queue in self._reaction_queue:
             del queue[:]
         if not self._block.reset():
             raise_if_pending()

@@ -40,6 +40,8 @@ struct Env {
     uint32_t last_write_size = 0;
     Queued writes[16][kQueue];
     uint32_t write_n[16] = {};
+    Queued reactions[16][kQueue];
+    uint32_t reaction_n[16] = {};
     uint8_t reads[16][kQueue][1100];
     uint32_t read_size[16][kQueue];
     uint32_t read_n[16] = {};
@@ -89,18 +91,26 @@ static bool h_write_queued(void*, uint32_t endpoint, uint32_t half, const uint8_
     q.half = half;
     return call();
 }
-static bool h_endpoint_write(void*, uint32_t endpoint, const uint8_t* data, uint32_t length) {
-    ++env.written;
-    env.last_write_endpoint = endpoint;
-    std::memcpy(env.last_write, data, length);
-    env.last_write_size = length;
-    return call();
-}
-static bool h_drain_write(void*, uint32_t endpoint) {
+static bool h_drain_write(void*, uint32_t endpoint) {  // what the shell does: finish each buffer, and keep its bytes for the host's reaction
     const uint32_t n = env.write_n[endpoint];
     env.write_n[endpoint] = 0;
     for (uint32_t i = 0; i < n; ++i) {
-        if (!usb.finish_write(endpoint, env.writes[endpoint][i].data, env.writes[endpoint][i].size, env.writes[endpoint][i].half)) return false;
+        if (!usb.finish_write(endpoint, env.writes[endpoint][i].half)) return false;
+        Queued& kept = env.reactions[endpoint][env.reaction_n[endpoint]++];
+        std::memcpy(kept.data, env.writes[endpoint][i].data, env.writes[endpoint][i].size);
+        kept.size = env.writes[endpoint][i].size;
+    }
+    return true;
+}
+static bool h_drain_reaction(void*, uint32_t endpoint) {  // on_endpoint_write for each acknowledged buffer
+    const uint32_t n = env.reaction_n[endpoint];
+    env.reaction_n[endpoint] = 0;
+    for (uint32_t i = 0; i < n; ++i) {
+        ++env.written;
+        env.last_write_endpoint = endpoint;
+        std::memcpy(env.last_write, env.reactions[endpoint][i].data, env.reactions[endpoint][i].size);
+        env.last_write_size = env.reactions[endpoint][i].size;
+        if (!call()) return false;
     }
     return true;
 }
@@ -161,8 +171,8 @@ static void fresh() {
     host.reset_received = h_reset_received;
     host.endpoint_read = h_endpoint_read;
     host.write_queued = h_write_queued;
-    host.endpoint_write = h_endpoint_write;
     host.drain_write = h_drain_write;
+    host.drain_reaction = h_drain_reaction;
     host.drain_read = h_drain_read;
     host.device_reset = h_device_reset;
     host.device_address = h_device_address;
@@ -383,8 +393,10 @@ static void test_the_other_buffer_is_chased() {
     arm(EP1_IN_BUF);
     put32(EP1_IN_BUF, w32(EP1_IN_BUF) | ((BUF_AVAILABLE | BUF_FULL | 2) << BUF1_SHIFT));
     CHECK(env.write_n[1] == 1);
-    tick_us(11);
-    CHECK(env.written == 1);
+    tick_us(21);
+    CHECK(env.written == 0);  // buffer 0 went out at 10 us and started buffer 1; its reaction was moved by the second ACK
+    tick_us(10);
+    CHECK(env.written == 2 && env.reaction_n[1] == 0);  // both reach the host together
 }
 
 static void test_failures_in_the_status_phase() {
@@ -394,8 +406,8 @@ static void test_failures_in_the_status_phase() {
         put32(EP1_IN_BUF, BUF_AVAILABLE | BUF_FULL | BUF_LAST | 1);
         arm(EP1_IN_BUF);
         env.calls = 0;
-        env.fail_at = n;  // the callback to the host, then each interrupt-line update of the status phase
-        const bool ok = clk.tick(11000.0);
+        env.fail_at = n;  // each interrupt-line update of the status phase, then the callback to the host
+        const bool ok = clk.tick(21000.0);
         CHECK(!ok && env.failed);
     }
     fresh();
@@ -957,12 +969,16 @@ static void test_an_in_transfer() {
     CHECK(env.write_n[1] == 1 && env.writes[1][0].size == 5 && env.writes[1][0].data[4] == 0xA4);
     CHECK(env.written == 0 && rd(BUFF_STATUS) == 0);
     tick_us(9.9);
+    CHECK(env.written == 0 && rd(BUFF_STATUS) == 0);
+    tick_us(0.2);
+    // the status phase is written at the ACK; the host reacts 10 us later, not in the same instant
+    CHECK(env.written == 0);
+    CHECK(w32(EP1_IN_BUF) == (5u | BUF_DATA1_PID | BUF_LAST));  // status written back: length, pid, last - FULL is gone for an IN
+    CHECK(rd(BUFF_STATUS) == (1u << 2));  // endpoint 1 IN is slot 2
+    tick_us(9.7);
     CHECK(env.written == 0);
     tick_us(0.2);
-    CHECK(env.written == 1 && env.last_write_endpoint == 1 && env.last_write_size == 5);
-    // status written back: length, pid, last - FULL is gone for an IN
-    CHECK(w32(EP1_IN_BUF) == (5u | BUF_DATA1_PID | BUF_LAST));
-    CHECK(rd(BUFF_STATUS) == (1u << 2));  // endpoint 1 IN is slot 2
+    CHECK(env.written == 1 && env.last_write_endpoint == 1 && env.last_write_size == 5 && env.last_write[4] == 0xA4);
     CHECK(rd(BUFF_CPU_SHOULD_HANDLE) == 0);
     CHECK((rd(SIE_STATUS) & (SIE_TRANS_COMPLETE | SIE_ACK_REC)) == (SIE_TRANS_COMPLETE | SIE_ACK_REC));
     CHECK(env.irq_level && (rd(INTR) & (INTR_BUFF_STATUS | INTR_TRANS_COMPLETE)) == (INTR_BUFF_STATUS | INTR_TRANS_COMPLETE));
@@ -989,7 +1005,7 @@ static void test_the_interrupt_enable_decides_buff_status() {
     put32(EP1_IN_CONTROL, 0x80000000u | 0x200);  // no per-buffer interrupt
     put32(EP1_IN_BUF, BUF_AVAILABLE | BUF_FULL | 4);
     arm(EP1_IN_BUF);
-    tick_us(11);
+    tick_us(21);
     CHECK(env.written == 1 && rd(BUFF_STATUS) == 0);
 }
 

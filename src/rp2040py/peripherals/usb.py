@@ -17,6 +17,7 @@ USB_HOST_INTERRUPT_ENDPOINTS = 15
 
 # USB DPSRAM Registers - Device mode
 EP1_IN_CONTROL = 0x8
+EP1_OUT_CONTROL = 0xC
 EP0_IN_BUFFER_CONTROL = 0x80
 EP0_OUT_BUFFER_CONTROL = 0x84
 EP15_OUT_BUFFER_CONTROL = 0xFC
@@ -44,12 +45,26 @@ EP_CTRL_ENABLE_BITS = 1 << 31
 EP_CTRL_BUFFER_TYPE_LSB = 26
 EP_CTRL_HOST_INTERRUPT_INTERVAL_LSB = 16
 
-# Buffer Control bits
+EP_CTRL_INTERRUPT_PER_DOUBLE_BUFFER = 1 << 28
+EP_CTRL_TYPE_SHIFT = 26
+EP_CTRL_TYPE_ISOCHRONOUS = 1
+EP_CTRL_BUFFER_ADDRESS_MASK = 0xFFC0  # bits 5:0 are ignored (the buffer is 64-byte aligned)
+EP0_IN_DATA_BUFFER = 0x100  # EP0 has no endpoint control register: its buffer(s) sit here, shared by both directions
+
+# Buffer Control bits (one 16-bit half per buffer; buffer 1's are the same bits shifted by USB_BUF1_SHIFT)
 USB_BUF_CTRL_AVAILABLE = 1 << 10
+USB_BUF_CTRL_STALL = 1 << 11
+USB_BUF_CTRL_RESET_SELECT = 1 << 12  # device only: buffer select back to buffer 0, cleared with the transfer
 USB_BUF_CTRL_FULL = 1 << 15
 USB_BUF_CTRL_LEN_MASK = 0x3FF
 USB_BUF_CTRL_DATA1_PID = 1 << 13
 USB_BUF_CTRL_LAST = 1 << 14
+USB_BUF_CTRL_STATUS_KEEP = (
+    USB_BUF_CTRL_LEN_MASK | USB_BUF_CTRL_DATA1_PID | USB_BUF_CTRL_LAST
+)  # what the controller leaves in a half when it writes a transfer's status back
+USB_BUF_CTRL_ISO_OFFSET_SHIFT = (
+    27  # bits 28:27 of the word: buffer 1's offset in an isochronous endpoint (0..3 = 128, 256, 512, 1024)
+)
 # Buffer1
 USB_BUF1_SHIFT = 16
 USB_BUF1_OFFSET = 64
@@ -141,11 +156,30 @@ TO_DIGITAL_PAD = 1 << 2
 TO_EXTPHY = 1 << 1
 TO_PHY = 1 << 0
 
-# USB_PWR bits
-PWR_VBUS_DETECT = 1 << 3
-PWR_VBUS_DETECT_OVERRIDE_EN = 1 << 2
-PWR_OVERCURR_DETECT = 1 << 1
-PWR_OVERCURR_DETECT_EN = 1 << 0
+# USB_PWR bits (datasheet table 414, pico-sdk hardware/regs/usb.h)
+PWR_VBUS_EN = 1 << 0
+PWR_VBUS_EN_OVERRIDE_EN = 1 << 1
+PWR_VBUS_DETECT = 1 << 2
+PWR_VBUS_DETECT_OVERRIDE_EN = 1 << 3
+PWR_OVERCURR_DETECT = 1 << 4
+PWR_OVERCURR_DETECT_EN = 1 << 5
+PWR_MASK = 0x3F
+
+# register write masks (the datasheet's register tables) and reset values
+ADDR_ENDP_MASK = 0x000F007F
+ADDR_ENDPN_MASK = 0x060F007F
+SIE_CTRL_MASK = 0xFF07BF5F
+INT_EP_CTRL_MASK = 0x0000FFFE
+EP_STALL_ARM_MASK = 0x3
+NAK_POLL_MASK = 0x03FF03FF
+NAK_POLL_RESET = 0x00100010
+USB_MUXING_MASK = 0xF
+USBPHY_DIRECT_MASK = 0x0000FF77  # 22:16 (the RX / over-voltage / over-current pins) are read-only, 7 and 3 reserved
+USBPHY_DIRECT_OVERRIDE_MASK = 0x00009FFF
+USBPHY_TRIM_MASK = 0x00001F1F
+USBPHY_TRIM_RESET = 0x00001F1F
+INT_MASK = 0x000FFFFF
+SOF_COUNT_MASK = 0x7FF
 
 # INTR bits (directly from RP2040 datasheet)
 INTR_EP_STALL_NAK = 1 << 19
@@ -192,17 +226,29 @@ SIE_WRITECLEAR_MASK = (
     | SIE_TRANS_COMPLETE
     | SIE_SETUP_REC
     | SIE_RESUME
+    | SIE_SUSPENDED
 )
+SIE_SPEED_MASK = (
+    0x3 << 8
+)  # WC as well, but a LEVEL (the speed of the attached device): writing it acknowledges the connect event, the speed stays (TinyUSB reads it after clearing)
 
 
 class USBEndpointAlarm:
+    """One endpoint direction's pending transfers: the buffers (and which half of the endpoint's buffer-control word each came from) that wait for the alarm."""
+
     def __init__(self, alarm: IAlarm):
         self.alarm = alarm
         self.buffers: list[bytes | bytearray] = []
+        self.halves: list[int] = []
 
-    def schedule(self, buffer: bytes | bytearray, delay_nanos: int) -> None:
+    def schedule(self, buffer: bytes | bytearray, delay_nanos: int, half: int = 0) -> None:
         self.buffers.append(buffer)
+        self.halves.append(half)
         self.alarm.schedule(delay_nanos)
+
+    def clear(self) -> None:
+        self.buffers = []
+        self.halves = []
 
 
 def _get_uint32_le(buffer: bytearray, offset: int) -> int:
@@ -214,6 +260,10 @@ def _set_uint32_le(buffer: bytearray, offset: int, value: int) -> None:
 
 
 class RPUSBController(BasePeripheral):
+    """The RP2040 USB controller (datasheet 4.1): the registers, the DPRAM semantics and the interrupts. The other end of the bus is abstracted (docs/tasks/usb-port.md, "What the model is"):
+    in device mode `usb/cdc.py` acts as the host and a buffer is delivered the moment it is AVAILABLE; in host mode a Python `USBDevice` answers. Not modelled (each documented there): STALL / NAK
+    handshakes and EP_STATUS_STALL_NAK, EP_ABORT (done at once), device SOF, suspend and resume, erratum RP2040-E4, the B0/B1 enumeration fix."""
+
     def __init__(self, rp2040: "RP2040", name: str):
         super().__init__(rp2040, name)
 
@@ -226,16 +276,29 @@ class RPUSBController(BasePeripheral):
         self._sie_status = 0
         self._connected = False
         self._connect_event = False
-        self._buff_status = 0
+        self._host_connect_event = False
+
+        # Buffer status: a bit of BUFF_STATUS is set while the endpoint direction has completed buffers the CPU has not handled; the FIFO holds which buffer (0/1) each is, oldest first, and
+        # BUFF_CPU_SHOULD_HANDLE shows the oldest ("the cleared BUFF_STATUS bit will be set again, and BUFF_CPU_SHOULD_HANDLE will change", 4.1.2.8.2)
+        self._buff_done: list[list[int]] = [[] for _ in range(ENDPOINT_COUNT * 2)]
+
+        # Device mode: the controller's internal buffer select and the "every two buffers" counter, per endpoint and direction (index endpoint * 2 + out), and the halves of the OUT
+        # buffers the host was asked to fill, oldest first
+        self._buf_select = [0] * (ENDPOINT_COUNT * 2)
+        self._two_buffer_count = [0] * (ENDPOINT_COUNT * 2)
+        self._pending_reads: list[list[int]] = [[] for _ in range(ENDPOINT_COUNT)]
 
         # Host mode registers
         self._sie_ctrl = 0
         self._sof_frame_number = 0
-        self._dev_addr_ctrl = 0  # Device address and endpoint for non-interrupt transfers
         self._int_ep_addr_ctrl = [0] * USB_HOST_INTERRUPT_ENDPOINTS
         self._int_ep_ctrl = 0  # Interrupt endpoint control (enable bits)
         self._usb_pwr = 0
-        self._nak_poll = 0
+        self._usb_muxing = 0
+        self._usbphy_direct = 0
+        self._usbphy_direct_override = 0
+        self._usbphy_trim = USBPHY_TRIM_RESET
+        self._nak_poll = NAK_POLL_RESET
         self._ep_abort = 0
         self._ep_abort_done = 0
         self._ep_stall_arm = 0
@@ -277,11 +340,29 @@ class RPUSBController(BasePeripheral):
         self.sof_alarm = clock.create_alarm(self._generate_sof)
         self.host_transaction_alarm = clock.create_alarm(self._complete_host_transaction)
 
+    # the device address and the host's target share one register
+    @property
+    def _dev_addr_ctrl(self) -> int:
+        return self._addr_endp
+
+    @_dev_addr_ctrl.setter
+    def _dev_addr_ctrl(self, value: int) -> None:
+        self._addr_endp = value & ADDR_ENDP_MASK
+
+    @property
+    def _buff_status(self) -> int:
+        status = 0
+        for index, done in enumerate(self._buff_done):
+            if done:
+                status |= 1 << index
+        return status
+
     def _make_read_alarm(self, index: int) -> Callable[[], None]:
         def _on_alarm() -> None:
             alarm = self.endpoint_read_alarms[index]
-            if alarm.buffers:
-                buffer = alarm.buffers.pop(0)
+            buffers = alarm.buffers
+            alarm.clear()
+            for buffer in buffers:  # every answer that arrived before the alarm ran
                 self._finish_read(index, buffer)
 
         return _on_alarm
@@ -289,10 +370,10 @@ class RPUSBController(BasePeripheral):
     def _make_write_alarm(self, index: int) -> Callable[[], None]:
         def _on_alarm() -> None:
             alarm = self.endpoint_write_alarms[index]
-            for buffer in alarm.buffers:
-                if self.on_endpoint_write:
-                    self.on_endpoint_write(index, buffer)
-            alarm.buffers = []
+            buffers, halves = alarm.buffers, alarm.halves
+            alarm.clear()
+            for buffer, half in zip(buffers, halves, strict=True):
+                self._finish_write(index, buffer, half)
 
         return _on_alarm
 
@@ -311,28 +392,31 @@ class RPUSBController(BasePeripheral):
             return self._int_ep_addr_ctrl[ep_index]
 
         if offset == ADDR_ENDP:
-            return self._dev_addr_ctrl if self._host_mode else self._addr_endp & 0b1111000000001111111
+            return self._addr_endp
         if offset == MAIN_CTRL:
             return self._main_ctrl
         if offset == SOF_WR:
             return 0  # Write-only
         if offset == SOF_RD:
-            return self._sof_frame_number & 0x7FF
+            # reading it acknowledges the SOF interrupts (datasheet INTR.DEV_SOF / HOST_SOF)
+            if self._int_raw & (INTR_DEV_SOF | INTR_HOST_SOF):
+                self._int_raw &= ~(INTR_DEV_SOF | INTR_HOST_SOF)
+                self.check_interrupts()
+            return self._sof_frame_number & SOF_COUNT_MASK
         if offset == SIE_CTRL:
             return self._sie_ctrl
         if offset == SIE_STATUS:
-            # In host mode, reading SIE_STATUS acknowledges the connection event
-            # Clear HOST_CONN_DIS interrupt once firmware reads the status
-            if self._host_mode and self._int_raw & INTR_HOST_CONN_DIS:
-                self._int_raw &= ~INTR_HOST_CONN_DIS
-                self.check_interrupts()
             return self._sie_status
         if offset == INT_EP_CTRL:
             return self._int_ep_ctrl
         if offset == BUFF_STATUS:
             return self._buff_status
         if offset == BUFF_CPU_SHOULD_HANDLE:
-            return 0
+            should_handle = 0
+            for index, done in enumerate(self._buff_done):
+                if done and done[0]:
+                    should_handle |= 1 << index
+            return should_handle
         if offset == EP_ABORT:
             return self._ep_abort
         if offset == EP_ABORT_DONE:
@@ -343,8 +427,16 @@ class RPUSBController(BasePeripheral):
             return self._nak_poll
         if offset == EP_STATUS_STALL_NAK:
             return self._ep_status_stall_nak
+        if offset == USB_MUXING:
+            return self._usb_muxing
         if offset == USB_PWR:
             return self._usb_pwr
+        if offset == USBPHY_DIRECT:
+            return self._usbphy_direct
+        if offset == USBPHY_DIRECT_OVERRIDE:
+            return self._usbphy_direct_override
+        if offset == USBPHY_TRIM:
+            return self._usbphy_trim
         if offset == INTR:
             return self._int_raw
         if offset == INTE:
@@ -359,14 +451,11 @@ class RPUSBController(BasePeripheral):
         # Handle interrupt endpoint address registers (ADDR_ENDP1 through ADDR_ENDP15)
         if ADDR_ENDP1 <= offset <= ADDR_ENDP15 and (offset & 0x3) == 0:
             ep_index = (offset - ADDR_ENDP1) >> 2
-            self._int_ep_addr_ctrl[ep_index] = value
+            self._int_ep_addr_ctrl[ep_index] = value & ADDR_ENDPN_MASK
             return
 
         if offset == ADDR_ENDP:
-            if self._host_mode:
-                self._dev_addr_ctrl = value
-            else:
-                self._addr_endp = value
+            self._addr_endp = value & ADDR_ENDP_MASK
         elif offset == MAIN_CTRL:
             self._main_ctrl = value & (SIM_TIMING | CONTROLLER_EN | HOST_NDEVICE)
             self._host_mode = bool(value & HOST_NDEVICE)
@@ -379,44 +468,64 @@ class RPUSBController(BasePeripheral):
                 elif self.on_usb_enabled:
                     self.on_usb_enabled()
         elif offset == SOF_WR:
-            self._sof_frame_number = value & 0x7FF
+            self._sof_frame_number = value & SOF_COUNT_MASK
         elif offset == SIE_CTRL:
-            self._handle_sie_ctrl_write(value)
+            self._handle_sie_ctrl_write(value & SIE_CTRL_MASK)
         elif offset == INT_EP_CTRL:
-            self._int_ep_ctrl = value
+            self._int_ep_ctrl = value & INT_EP_CTRL_MASK
         elif offset == BUFF_STATUS:
-            self._buff_status &= ~self.raw_write_value
+            # write 1 to clear: the oldest completed buffer of the endpoint is handled; the bit comes back at once if another one is waiting
+            for index in range(ENDPOINT_COUNT * 2):
+                if self.raw_write_value & (1 << index) and self._buff_done[index]:
+                    self._buff_done[index].pop(0)
             self._buff_status_updated()
         elif offset == EP_ABORT:
             self._ep_abort = value
             # Immediately mark as done
             self._ep_abort_done |= value
+            self._abort_done_updated()
         elif offset == EP_ABORT_DONE:
             self._ep_abort_done &= ~self.raw_write_value
+            self._abort_done_updated()
         elif offset == EP_STALL_ARM:
-            self._ep_stall_arm = value
+            self._ep_stall_arm = value & EP_STALL_ARM_MASK
         elif offset == NAK_POLL:
-            self._nak_poll = value
+            self._nak_poll = value & NAK_POLL_MASK
         elif offset == EP_STATUS_STALL_NAK:
             self._ep_status_stall_nak &= ~self.raw_write_value
+            self._stall_nak_updated()
         elif offset == USB_MUXING:
+            self._usb_muxing = value & USB_MUXING_MASK
             # Workaround for busy wait in hw_enumeration_fix_force_ls_j() / hw_enumeration_fix_finish():
             if value & TO_DIGITAL_PAD and not (value & TO_PHY):
                 self._set_connected(True)
         elif offset == USB_PWR:
-            self._usb_pwr = value
-            # VBUS detect override - set VBUS detected in SIE_STATUS
-            if value & PWR_VBUS_DETECT_OVERRIDE_EN:
-                if value & PWR_VBUS_DETECT:
-                    self._sie_status |= SIE_VBUS_DETECTED
-                else:
-                    self._sie_status &= ~SIE_VBUS_DETECTED
+            self._usb_pwr = value & PWR_MASK
+            # the override values stand in for the VBUS pins that are not wired
+            if self._usb_pwr & PWR_VBUS_DETECT_OVERRIDE_EN and self._usb_pwr & PWR_VBUS_DETECT:
+                self._sie_status |= SIE_VBUS_DETECTED
+            else:
+                self._sie_status &= ~SIE_VBUS_DETECTED
+            if self._usb_pwr & PWR_OVERCURR_DETECT_EN and self._usb_pwr & PWR_OVERCURR_DETECT:
+                self._sie_status |= SIE_VBUS_OVER_CURR
+            else:
+                self._sie_status &= ~SIE_VBUS_OVER_CURR
+            self._sie_status_updated()
+        elif offset == USBPHY_DIRECT:
+            self._usbphy_direct = value & USBPHY_DIRECT_MASK
+        elif offset == USBPHY_DIRECT_OVERRIDE:
+            self._usbphy_direct_override = value & USBPHY_DIRECT_OVERRIDE_MASK
+        elif offset == USBPHY_TRIM:
+            self._usbphy_trim = value & USBPHY_TRIM_MASK
         elif offset == SIE_STATUS:
             self._sie_status &= ~(self.raw_write_value & SIE_WRITECLEAR_MASK)
             if self.raw_write_value & SIE_CONNECTED:
                 # Write-1-to-clear acknowledges the connect/disconnect *event*. It does not
                 # unplug anything - see `_set_connected()`.
                 self._connect_event = False
+            if self.raw_write_value & SIE_SPEED_MASK:
+                # likewise the host's connect/disconnect event; SPEED itself is the attached device's speed
+                self._host_connect_event = False
             if self.raw_write_value & SIE_BUS_RESET:
                 if not self._host_mode and self.on_reset_received:
                     self.on_reset_received()
@@ -427,82 +536,100 @@ class RPUSBController(BasePeripheral):
                 self._sie_status |= SIE_CONNECTED
             self._sie_status_updated()
         elif offset == INTE:
-            self._int_enable = value & 0xFFFFF
+            self._int_enable = value & INT_MASK
             self.check_interrupts()
         elif offset == INTF:
-            self._int_force = value & 0xFFFFF
+            self._int_force = value & INT_MASK
             self.check_interrupts()
         else:
             super().write_uint32(offset, value)
 
+    # ============ Device mode: the DPRAM ============
+
     def _read_endpoint_control_reg(self, endpoint: int, out: bool) -> int:
+        if endpoint == 0:
+            return 0  # EP0 has no endpoint control register: SIE_CTRL carries its interrupt and double-buffer bits
         control_reg_offset = EP1_IN_CONTROL + 8 * (endpoint - 1) + (4 if out else 0)
         return _get_uint32_le(self.rp2040.usb_dpram, control_reg_offset)
 
     def _get_endpoint_buffer_offset(self, endpoint: int, out: bool) -> int:
         if endpoint == 0:
-            return 0x100
-        return self._read_endpoint_control_reg(endpoint, out) & 0xFFC0
+            return EP0_IN_DATA_BUFFER
+        return self._read_endpoint_control_reg(endpoint, out) & EP_CTRL_BUFFER_ADDRESS_MASK
+
+    def _is_double_buffered(self, endpoint: int, out: bool) -> bool:
+        if endpoint == 0:
+            return bool(self._sie_ctrl & SIE_CTRL_EP0_DOUBLE_BUF)
+        return bool(self._read_endpoint_control_reg(endpoint, out) & USB_CTRL_DOUBLE_BUF)
+
+    @staticmethod
+    def _half_state(word: int, half: int) -> int:
+        """The 16 bits of a buffer-control word that belong to buffer `half`. Buffer 1 has no STALL or reset-select bit: in its half those two positions are the isochronous offset (table 396)."""
+        state = (word >> (USB_BUF1_SHIFT * half)) & 0xFFFF
+        if half:
+            state &= ~(USB_BUF_CTRL_STALL | USB_BUF_CTRL_RESET_SELECT)
+        return state
+
+    def _buffer_address(self, endpoint: int, out: bool, half: int, buffer_control: int) -> int:
+        """Where buffer `half` of the endpoint sits in the DPRAM: 64 bytes after buffer 0, or - on an isochronous endpoint - the offset the buffer-control word names."""
+        base = self._get_endpoint_buffer_offset(endpoint, out)
+        if half == 0:
+            return base
+        control = self._read_endpoint_control_reg(endpoint, out)
+        if endpoint != 0 and ((control >> EP_CTRL_TYPE_SHIFT) & 0x3) == EP_CTRL_TYPE_ISOCHRONOUS:
+            return base + (128 << ((buffer_control >> USB_BUF_CTRL_ISO_OFFSET_SHIFT) & 0x3))
+        return base + USB_BUF1_OFFSET
 
     def dpram_updated(self, offset: int, value: int) -> None:
         # Skip device-mode buffer control handling in host mode
         if self._host_mode:
             return
-        if value & USB_BUF_CTRL_AVAILABLE and EP0_IN_BUFFER_CONTROL <= offset <= EP15_OUT_BUFFER_CONTROL:
+        if EP0_IN_BUFFER_CONTROL <= offset <= EP15_OUT_BUFFER_CONTROL:
             endpoint = (offset - EP0_IN_BUFFER_CONTROL) >> 3
-            buffer_out = bool(offset & 4)
-            double_buffer = False
-            interrupt = True
-            if endpoint != 0:
-                control = self._read_endpoint_control_reg(endpoint, buffer_out)
-                double_buffer = bool(control & USB_CTRL_DOUBLE_BUF)
-                interrupt = bool(control & USB_CTRL_INTERRUPT_PER_TRANSFER)
+            out = bool(offset & 4)
+            if _get_uint32_le(self.rp2040.usb_dpram, offset) & USB_BUF_CTRL_RESET_SELECT:
+                self._buf_select[endpoint * 2 + out] = 0
+            self._service_endpoint(endpoint, out)
 
-            # Buffer 0 first, then buffer 1 - the order the hardware transfers them, and the
-            # order the host must see them in. They used to run the other way round, which put a
-            # 116-byte raw-REPL response on the wire as [second packet, first packet] and split a
-            # traceback across the protocol's own \x04 boundary; it showed up as MicroPython
-            # 1.19.1 failing tests/hard_reset_run.py while every other version passed, because
-            # only a response long enough to need both buffers can expose it.
-            buffer_length = value & USB_BUF_CTRL_LEN_MASK
-            buffer_offset = self._get_endpoint_buffer_offset(endpoint, buffer_out)
+    def _service_endpoint(self, endpoint: int, out: bool) -> None:
+        """Start the transfer of every buffer the firmware has made AVAILABLE, in the order the controller takes them (buffer 0, then buffer 1 of a double-buffered endpoint).
+
+        A buffer moves only if the token would be answered with data: an IN needs FULL as well as AVAILABLE, an OUT needs FULL clear (4.1.2.8.2/3); otherwise the host would get a NAK and the
+        buffer stays as the firmware left it. A STALL bit does the same (the STALL handshake itself is not modelled). The controller owns a buffer from here: AVAILABLE is cleared at once, the
+        status is written back when the transfer is done (`_finish_write` / `_finish_read`)."""
+        offset = EP0_IN_BUFFER_CONTROL + endpoint * 8 + (4 if out else 0)
+        slot = endpoint * 2 + out
+        double = self._is_double_buffered(endpoint, out)
+        for _ in range(2 if double else 1):
+            word = _get_uint32_le(self.rp2040.usb_dpram, offset)
+            half = self._buf_select[slot] if double else 0
+            state = self._half_state(word, half)
+            if not state & USB_BUF_CTRL_AVAILABLE or state & USB_BUF_CTRL_STALL:
+                return
+            if bool(state & USB_BUF_CTRL_FULL) == out:
+                return
+            length = state & USB_BUF_CTRL_LEN_MASK
+            address = self._buffer_address(endpoint, out, half, word)
             self.debug(
-                f"Start USB transfer, endPoint={endpoint}, "
-                f"direction={'out' if buffer_out else 'in'} "
-                f"buffer={buffer_offset:x} length={buffer_length}"
+                f"Start USB transfer, endPoint={endpoint}, direction={'out' if out else 'in'} buffer={address:x} length={length}"
             )
-            value &= ~USB_BUF_CTRL_AVAILABLE
-            _set_uint32_le(self.rp2040.usb_dpram, offset, value)
-            if buffer_out:
+            word &= ~(USB_BUF_CTRL_AVAILABLE << (USB_BUF1_SHIFT * half))
+            _set_uint32_le(self.rp2040.usb_dpram, offset, word)
+            if double:
+                self._buf_select[slot] ^= 1
+            if out:
+                self._pending_reads[endpoint].append(half)
                 if self.on_endpoint_read:
-                    self.on_endpoint_read(endpoint, buffer_length)
+                    self.on_endpoint_read(endpoint, length)
             else:
-                value &= ~USB_BUF_CTRL_FULL
-                _set_uint32_le(self.rp2040.usb_dpram, offset, value)
-                buffer = bytes(self.rp2040.usb_dpram[buffer_offset : buffer_offset + buffer_length])
-                if interrupt or not double_buffer:
-                    self._indicate_buffer_ready(endpoint, False)
-                self.endpoint_write_alarms[endpoint].schedule(buffer, self.write_delay_microseconds * 1000)
+                buffer = bytes(self.rp2040.usb_dpram[address : address + length])
+                self.endpoint_write_alarms[endpoint].schedule(buffer, self.write_delay_microseconds * 1000, half)
 
-            if double_buffer and (value >> USB_BUF1_SHIFT) & USB_BUF_CTRL_AVAILABLE:
-                buffer_length = (value >> USB_BUF1_SHIFT) & USB_BUF_CTRL_LEN_MASK
-                buffer_offset = self._get_endpoint_buffer_offset(endpoint, buffer_out) + USB_BUF1_OFFSET
-                self.debug(
-                    f"Start USB transfer, endPoint={endpoint}, "
-                    f"direction={'out' if buffer_out else 'in'} "
-                    f"buffer={buffer_offset:x} length={buffer_length}"
-                )
-                value &= ~(USB_BUF_CTRL_AVAILABLE << USB_BUF1_SHIFT)
-                _set_uint32_le(self.rp2040.usb_dpram, offset, value)
-                if buffer_out:
-                    if self.on_endpoint_read:
-                        self.on_endpoint_read(endpoint, buffer_length)
-                else:
-                    value &= ~(USB_BUF_CTRL_FULL << USB_BUF1_SHIFT)
-                    _set_uint32_le(self.rp2040.usb_dpram, offset, value)
-                    buffer = bytes(self.rp2040.usb_dpram[buffer_offset : buffer_offset + buffer_length])
-                    self._indicate_buffer_ready(endpoint, False)
-                    self.endpoint_write_alarms[endpoint].schedule(buffer, self.write_delay_microseconds * 1000)
+    def _finish_write(self, endpoint: int, buffer: bytes | bytearray, half: int) -> None:
+        """An IN buffer reached the host and was acknowledged: the host callback, then the status phase (4.1.2.8.2)."""
+        if self.on_endpoint_write:
+            self.on_endpoint_write(endpoint, buffer)
+        self._buffer_done(endpoint, False, half, 0)
 
     def endpoint_read_done(self, endpoint: int, buffer: bytes | bytearray, delay: int | None = None) -> None:
         if delay is None:
@@ -510,16 +637,56 @@ class RPUSBController(BasePeripheral):
         self.endpoint_read_alarms[endpoint].schedule(buffer, delay * 1000)
 
     def _finish_read(self, endpoint: int, buffer: bytes | bytearray) -> None:
-        buffer_offset = self._get_endpoint_buffer_offset(endpoint, True)
-        buf_control_reg = EP0_OUT_BUFFER_CONTROL + endpoint * 8
-        buf_control = _get_uint32_le(self.rp2040.usb_dpram, buf_control_reg)
-        requested_length = buf_control & USB_BUF_CTRL_LEN_MASK
-        new_length = min(len(buffer), requested_length)
-        buf_control |= USB_BUF_CTRL_FULL
-        buf_control = (buf_control & ~USB_BUF_CTRL_LEN_MASK) | (new_length & USB_BUF_CTRL_LEN_MASK)
-        _set_uint32_le(self.rp2040.usb_dpram, buf_control_reg, buf_control)
-        self.rp2040.usb_dpram[buffer_offset : buffer_offset + new_length] = buffer[:new_length]
-        self._indicate_buffer_ready(endpoint, True)
+        """The host's data for an OUT buffer arrives: it is stored in the buffer the controller was waiting to fill, then the status phase (4.1.2.8.3)."""
+        pending = self._pending_reads[endpoint]
+        half = pending.pop(0) if pending else 0
+        offset = EP0_OUT_BUFFER_CONTROL + endpoint * 8
+        word = _get_uint32_le(self.rp2040.usb_dpram, offset)
+        state = self._half_state(word, half)
+        length = min(len(buffer), state & USB_BUF_CTRL_LEN_MASK)
+        address = self._buffer_address(endpoint, True, half, word)
+        self.rp2040.usb_dpram[address : address + length] = buffer[:length]
+        self._buffer_done(endpoint, True, half, length)
+
+    def _buffer_done(self, endpoint: int, out: bool, half: int, received: int) -> None:
+        """The status phase of a transfer: the controller writes the buffer's half of the buffer-control word back as length, pid and last-buffer, everything else zero (FULL set for an OUT, which
+        has filled the buffer), raises TRANS_COMPLETE for a last buffer, and BUFF_STATUS if the endpoint's interrupt enable asks for it."""
+        offset = EP0_IN_BUFFER_CONTROL + endpoint * 8 + (4 if out else 0)
+        word = _get_uint32_le(self.rp2040.usb_dpram, offset)
+        shift = USB_BUF1_SHIFT * half
+        state = self._half_state(word, half)
+        length = received if out else state & USB_BUF_CTRL_LEN_MASK
+        done = (
+            (length & USB_BUF_CTRL_LEN_MASK)
+            | (state & (USB_BUF_CTRL_DATA1_PID | USB_BUF_CTRL_LAST))
+            | (USB_BUF_CTRL_FULL if out else 0)
+        )
+        word = (word & ~(0xFFFF << shift)) | (done << shift)
+        _set_uint32_le(self.rp2040.usb_dpram, offset, word)
+        if state & USB_BUF_CTRL_LAST:
+            self._sie_status |= SIE_TRANS_COMPLETE
+        if not out:
+            self._sie_status |= SIE_ACK_REC
+        self._sie_status_updated()
+
+        slot = endpoint * 2 + out
+        if endpoint == 0:
+            per_buffer = bool(self._sie_ctrl & SIE_CTRL_EP0_INT_1BUF)
+            per_two = bool(self._sie_ctrl & SIE_CTRL_EP0_INT_2BUF)
+        else:
+            control = self._read_endpoint_control_reg(endpoint, out)
+            per_buffer = bool(control & USB_CTRL_INTERRUPT_PER_TRANSFER)
+            per_two = bool(control & EP_CTRL_INTERRUPT_PER_DOUBLE_BUFFER)
+        if per_buffer:
+            self._buff_done[slot].append(half)
+        elif per_two and self._is_double_buffered(endpoint, out):
+            self._two_buffer_count[slot] += 1
+            if self._two_buffer_count[slot] == 2:
+                self._two_buffer_count[slot] = 0
+                self._buff_done[slot].append(half)
+        self._buff_status_updated()
+        # the other buffer of a double-buffered endpoint may already be waiting
+        self._service_endpoint(endpoint, out)
 
     def check_interrupts(self) -> None:
         self.rp2040.set_interrupt(IRQ.USBCTRL, bool(self.int_status))
@@ -542,16 +709,26 @@ class RPUSBController(BasePeripheral):
         self._sie_status = 0
         self._connected = False
         self._connect_event = False
-        self._buff_status = 0
+        self._host_connect_event = False
+        for done in self._buff_done:
+            done.clear()
+        for slot in range(ENDPOINT_COUNT * 2):
+            self._buf_select[slot] = 0
+            self._two_buffer_count[slot] = 0
+        for pending in self._pending_reads:
+            pending.clear()
 
         self._sie_ctrl = 0
         self._sof_frame_number = 0
-        self._dev_addr_ctrl = 0
         for i in range(len(self._int_ep_addr_ctrl)):
             self._int_ep_addr_ctrl[i] = 0
         self._int_ep_ctrl = 0
         self._usb_pwr = 0
-        self._nak_poll = 0
+        self._usb_muxing = 0
+        self._usbphy_direct = 0
+        self._usbphy_direct_override = 0
+        self._usbphy_trim = USBPHY_TRIM_RESET
+        self._nak_poll = NAK_POLL_RESET
         self._ep_abort = 0
         self._ep_abort_done = 0
         self._ep_stall_arm = 0
@@ -568,7 +745,7 @@ class RPUSBController(BasePeripheral):
             alarm.cancel()
         for endpoint_alarm in (*self.endpoint_read_alarms, *self.endpoint_write_alarms):
             endpoint_alarm.alarm.cancel()
-            endpoint_alarm.buffers = []
+            endpoint_alarm.clear()
 
         self.check_interrupts()
 
@@ -577,6 +754,7 @@ class RPUSBController(BasePeripheral):
 
     def send_setup_packet(self, setup_packet: bytes | bytearray) -> None:
         self.rp2040.usb_dpram[: len(setup_packet)] = setup_packet
+        self._ep_stall_arm = 0  # a SETUP clears any STALL on EP0, so the arm bits go with it (4.1.2.8.1)
         self._sie_status |= SIE_SETUP_REC
         self._sie_status_updated()
 
@@ -608,57 +786,59 @@ class RPUSBController(BasePeripheral):
             # whatever else happens to refresh the status next.
             self._sie_status_updated()
 
-    def _indicate_buffer_ready(self, endpoint: int, out: bool) -> None:
-        self._buff_status |= 1 << (endpoint * 2 + (1 if out else 0))
-        self._buff_status_updated()
-
     def _buff_status_updated(self) -> None:
-        if self._buff_status:
+        if any(self._buff_done):
             self._int_raw |= INTR_BUFF_STATUS
         else:
             self._int_raw &= ~INTR_BUFF_STATUS
         self.check_interrupts()
 
-    def _sie_status_updated(self) -> None:
-        if self._host_mode:
-            # Host mode interrupt mapping
-            int_register_map = [
-                (SIE_TRANS_COMPLETE, INTR_TRANS_COMPLETE),
-                (SIE_STALL_REC, INTR_STALL),
-                (SIE_CRC_ERROR, INTR_ERROR_CRC),
-                (SIE_BIT_STUFF_ERROR, INTR_ERROR_BIT_STUFF),
-                (SIE_RX_OVERFLOW, INTR_ERROR_RX_OVERFLOW),
-                (SIE_RX_TIMEOUT, INTR_ERROR_RX_TIMEOUT),
-                (SIE_DATA_SEQ_ERROR, INTR_ERROR_DATA_SEQ),
-            ]
+    def _abort_done_updated(self) -> None:
+        if self._ep_abort_done:
+            self._int_raw |= INTR_ABORT_DONE
         else:
-            # Device mode interrupt mapping
-            int_register_map = [
-                (SIE_SETUP_REC, INTR_SETUP_REQ),
-                (SIE_RESUME, INTR_DEV_RESUME_FROM_HOST),
-                (SIE_SUSPENDED, INTR_DEV_SUSPEND),
-                (SIE_BUS_RESET, INTR_BUS_RESET),
-                (SIE_VBUS_DETECTED, INTR_VBUS_DETECT),
-                (SIE_STALL_REC, INTR_STALL),
-                (SIE_CRC_ERROR, INTR_ERROR_CRC),
-                (SIE_BIT_STUFF_ERROR, INTR_ERROR_BIT_STUFF),
-                (SIE_RX_OVERFLOW, INTR_ERROR_RX_OVERFLOW),
-                (SIE_RX_TIMEOUT, INTR_ERROR_RX_TIMEOUT),
-                (SIE_DATA_SEQ_ERROR, INTR_ERROR_DATA_SEQ),
-            ]
+            self._int_raw &= ~INTR_ABORT_DONE
+        self.check_interrupts()
+
+    def _stall_nak_updated(self) -> None:
+        if self._ep_status_stall_nak:
+            self._int_raw |= INTR_EP_STALL_NAK
+        else:
+            self._int_raw &= ~INTR_EP_STALL_NAK
+        self.check_interrupts()
+
+    def _sie_status_updated(self) -> None:
+        # What each interrupt is the raw state of: a SIE_STATUS bit (level: the interrupt follows it), or an event the register's write-1-to-clear acknowledges. The resume interrupt is the
+        # device's or the host's, by mode.
+        int_register_map = [
+            (SIE_SETUP_REC, INTR_SETUP_REQ),
+            (SIE_RESUME, INTR_HOST_RESUME if self._host_mode else INTR_DEV_RESUME_FROM_HOST),
+            (SIE_SUSPENDED, INTR_DEV_SUSPEND),
+            (SIE_BUS_RESET, INTR_BUS_RESET),
+            (SIE_VBUS_DETECTED, INTR_VBUS_DETECT),
+            (SIE_TRANS_COMPLETE, INTR_TRANS_COMPLETE),
+            (SIE_STALL_REC, INTR_STALL),
+            (SIE_CRC_ERROR, INTR_ERROR_CRC),
+            (SIE_BIT_STUFF_ERROR, INTR_ERROR_BIT_STUFF),
+            (SIE_RX_OVERFLOW, INTR_ERROR_RX_OVERFLOW),
+            (SIE_RX_TIMEOUT, INTR_ERROR_RX_TIMEOUT),
+            (SIE_DATA_SEQ_ERROR, INTR_ERROR_DATA_SEQ),
+        ]
         for sie_bit, int_raw_bit in int_register_map:
             if self._sie_status & sie_bit:
                 self._int_raw |= int_raw_bit
             else:
                 self._int_raw &= ~int_raw_bit
-        if not self._host_mode:
-            # Device mode's connect/disconnect interrupt is the *edge*, which is why it is not in
-            # the table above: its status bit is a level that survives being written to
-            # (`_set_connected()`), so deriving the interrupt from it would re-raise forever.
-            if self._connect_event:
-                self._int_raw |= INTR_DEV_CONN_DIS
-            else:
-                self._int_raw &= ~INTR_DEV_CONN_DIS
+        # The connect/disconnect interrupts are the *edge*, which is why they are not in the table above: the status bit is a level that survives being written to (`_set_connected()`),
+        # so deriving the interrupt from it would re-raise forever.
+        if self._connect_event:
+            self._int_raw |= INTR_DEV_CONN_DIS
+        else:
+            self._int_raw &= ~INTR_DEV_CONN_DIS
+        if self._host_connect_event:
+            self._int_raw |= INTR_HOST_CONN_DIS
+        else:
+            self._int_raw &= ~INTR_HOST_CONN_DIS
         self.check_interrupts()
 
     # ============ Host Mode Methods ============
@@ -674,17 +854,17 @@ class RPUSBController(BasePeripheral):
         if self.connected_device and self._host_mode:
             self.connected_device = None
             # Clear speed bits to indicate disconnection
-            self._sie_status &= ~(0x3 << 8)  # Clear speed bits
-            self._int_raw |= INTR_HOST_CONN_DIS
-            self.check_interrupts()
+            self._sie_status &= ~SIE_SPEED_MASK
+            self._host_connect_event = True
+            self._sie_status_updated()
         self.connected_device = None
 
     def _on_device_connected(self) -> None:
         # Set full-speed device connected (value 2 in speed field, bits 9:8)
-        self._sie_status &= ~(0x3 << 8)
+        self._sie_status &= ~SIE_SPEED_MASK
         self._sie_status |= SIE_SPEED_FS_VALUE << 8
-        self._int_raw |= INTR_HOST_CONN_DIS
-        self.check_interrupts()
+        self._host_connect_event = True
+        self._sie_status_updated()
         self.debug("USB device connected (full-speed)")
 
     def _handle_sie_ctrl_write(self, value: int) -> None:
@@ -791,7 +971,7 @@ class RPUSBController(BasePeripheral):
 
                     # Set buffer status for this interrupt endpoint
                     # Interrupt EPs use bits 2+ in buff_status (bit 0 is epx IN, bit 1 is epx OUT)
-                    self._buff_status |= 1 << ((i + 1) * 2)
+                    self._buff_done[(i + 1) * 2].append(0)
                     self._buff_status_updated()
 
     def _start_host_transaction(self) -> None:
@@ -906,7 +1086,7 @@ class RPUSBController(BasePeripheral):
             _set_uint32_le(self.rp2040.usb_dpram, HOST_EPX_BUF_CTRL, buf_ctrl)
 
             # Set buffer status
-            self._buff_status |= 1  # Bit 0 for EPX
+            self._buff_done[0].append(0)  # Bit 0 for EPX
             self._buff_status_updated()
 
             self._sie_status |= SIE_ACK_REC
@@ -947,7 +1127,7 @@ class RPUSBController(BasePeripheral):
 
         if result.status == "ack":
             self._sie_status |= SIE_ACK_REC
-            self._buff_status |= 1  # Bit 0 for EPX
+            self._buff_done[0].append(0)  # Bit 0 for EPX
             self._buff_status_updated()
         elif result.status == "nak":
             self._sie_status |= SIE_NAK_REC

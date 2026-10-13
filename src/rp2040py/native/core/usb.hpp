@@ -37,7 +37,8 @@
 namespace rp2040core {
 
 // Result codes of the device end in host mode (the reference's USBTransferResult.status strings).
-constexpr uint32_t kUsbAck = 0, kUsbNak = 1, kUsbStall = 2, kUsbOther = 3;
+[[maybe_unused]] constexpr uint32_t kUsbOther = 3;  // (read by the shells and the checks; the block itself only tells the other answers apart from ACK / NAK / STALL)
+constexpr uint32_t kUsbAck = 0, kUsbNak = 1, kUsbStall = 2;
 
 constexpr uint32_t kUsbWarnRead = kRegWarnRead, kUsbWarnReadAtomicArea = kRegWarnReadAtomicArea, kUsbWarnWrite = kRegWarnWrite;
 
@@ -67,7 +68,8 @@ constexpr uint32_t kHostInterruptEndpoints = 15;
 constexpr uint32_t kDpramSize = 4096;
 constexpr uint32_t kFifoDepth = 64;
 
-constexpr uint32_t EP1_IN_CONTROL = 0x8, EP1_OUT_CONTROL = 0xC, EP0_IN_BUFFER_CONTROL = 0x80, EP0_OUT_BUFFER_CONTROL = 0x84, EP15_OUT_BUFFER_CONTROL = 0xFC;
+[[maybe_unused]] constexpr uint32_t EP1_OUT_CONTROL = 0xC;  // (the shells' and checks' view of the endpoint control words)
+constexpr uint32_t EP1_IN_CONTROL = 0x8, EP0_IN_BUFFER_CONTROL = 0x80, EP0_OUT_BUFFER_CONTROL = 0x84, EP15_OUT_BUFFER_CONTROL = 0xFC;
 constexpr uint32_t HOST_SETUP_PACKET = 0x00, HOST_INT_EP_CTRL_BASE = 0x08, HOST_INT_EP_BUF_CTRL_BASE = 0x88, HOST_EPX_BUF_CTRL = 0x80, HOST_EPX_DATA = 0x180;
 
 constexpr uint32_t USB_CTRL_DOUBLE_BUF = 1u << 30, USB_CTRL_INTERRUPT_PER_TRANSFER = 1u << 29, EP_CTRL_INTERRUPT_PER_DOUBLE_BUFFER = 1u << 28;

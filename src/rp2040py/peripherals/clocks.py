@@ -5,7 +5,14 @@ Held to identical behaviour by `tests/test_clocks_diff.py` (docs/tasks/clocks-po
 """
 
 from rp2040py._native_gate import native_disabled
-from rp2040py.peripherals._clocks import DEFAULT_CLK, _set_clk_peri, _set_clk_sys, reset_clock_tree, update_clocks, xosc_hz
+from rp2040py.peripherals._clocks import (
+    DEFAULT_CLK,
+    _set_clk_peri,
+    _set_clk_sys,
+    reset_clock_tree,
+    update_clocks,
+    xosc_hz,
+)
 
 try:
     if native_disabled():

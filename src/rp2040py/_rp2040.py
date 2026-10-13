@@ -16,6 +16,7 @@ from rp2040py.memory_map import (
 )
 from rp2040py.peripherals._adc import RPADC  # the pure chip's own ADC: the native one is the native chip's
 from rp2040py.peripherals._busctrl import RPBUSCTRL
+from rp2040py.peripherals._clocks import RPClocks
 from rp2040py.peripherals._dma import (  # the pure chip's own DMA: the native one works on the native chip's C++ bus
     RPDMA,
     DREQChannel,
@@ -23,6 +24,7 @@ from rp2040py.peripherals._dma import (  # the pure chip's own DMA: the native o
 from rp2040py.peripherals._i2c import RPI2C  # the pure chip's own I2C: the native one is the native chip's
 from rp2040py.peripherals._io import RPIO
 from rp2040py.peripherals._pads import RPPADS
+from rp2040py.peripherals._pll import RPPLL
 from rp2040py.peripherals._ppb import RPPPB  # the pure chip's own PPB: the native one is the native chip's
 from rp2040py.peripherals._psm import (
     PSM_BITS_MASK,
@@ -83,10 +85,8 @@ from rp2040py.peripherals._xip_ctrl import (  # the pure chip's own XIP: the nat
     RPXIPCtrl,
 )
 from rp2040py.peripherals._xosc import RPXOSC
-from rp2040py.peripherals._clocks import RPClocks
 from rp2040py.peripherals.peripheral import Peripheral
 from rp2040py.peripherals.pio import RPPIO
-from rp2040py.peripherals._pll import RPPLL
 from rp2040py.peripherals.timer import RPTimer
 from rp2040py.qspi_pads import QSPI_PAD_RESET_VALUES
 from rp2040py.sio import RPSIO

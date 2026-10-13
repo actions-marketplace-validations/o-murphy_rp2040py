@@ -8,6 +8,7 @@
 #
 # usage: run_suite.sh <micropython checkout> <image tag> <output .md> [test glob relative to tests/ ...]
 #        (default globs: ports/rp2/*.py extmod/machine_*.py; GROUP_TITLE names the group in the summary; STRICT=1 gates, see above)
+#        RETRY_HANG=0 turns off the one retry a hanging file gets (default 1): see the loop.
 #        EXCLUDE="io/file1.py ..." marks tests that cannot pass on a board for a reason that is not the emulator's as SKIP (platform), and never runs them.
 #        PUSH="io/data: import/*:" copies those paths (relative to tests/, "src:destination on the board") onto the board after every emulator start: the tests that open
 #        files ("data/file1") or import helper modules expect them next to the test, as they are on the host.
@@ -52,8 +53,10 @@ stop_emulator() {
 
 ROWS=$WORK/rows.md      # every file
 BAD=$WORK/bad.md        # only the files that did not pass: this is what the run summary shows
+RETRIED=$WORK/retried.md  # the files that hung once and then ran
 : >"$ROWS"
 : >"$BAD"
+: >"$RETRIED"
 
 start_emulator
 cd "$MP_DIR/tests" || exit 0
@@ -76,6 +79,15 @@ for t in $(for g in "${GLOBS[@]}"; do ls $g 2>/dev/null; done | sort); do
   fi
   timeout "$PER_TEST_TIMEOUT" "$VIRTUAL_ENV/bin/python" run-tests.py -t "$DEV" -r "$WORK/res" "$t" >"$log" 2>&1
   rc=$?
+  if [ $rc = 124 ] && [ "${RETRY_HANG:-1}" = 1 ]; then
+    # A hang on a shared CI runner is not always the test's: one (misc/non_compliant_lexer.py, 6 s on a workstation, passed on the re-run of the same commit) stopped a gating group. The emulator is
+    # restarted and the file run once more; a file that hangs twice is a HANG, one that passes the second time is reported as retried so the flake stays visible.
+    echo "$t: HANG, retrying once on a fresh emulator"
+    stop_emulator; start_emulator
+    timeout "$PER_TEST_TIMEOUT" "$VIRTUAL_ENV/bin/python" run-tests.py -t "$DEV" -r "$WORK/res" "$t" >"$log" 2>&1
+    rc=$?
+    [ $rc != 124 ] && echo "| $t | hung once, then ran |" >>"$RETRIED"
+  fi
   if [ $rc = 124 ]; then
     r=":hourglass: HANG"; hang=$((hang + 1)); stop_emulator; start_emulator
   elif grep -q "^pass " "$log"; then r=":white_check_mark: PASS"; pass=$((pass + 1))
@@ -100,6 +112,14 @@ stop_emulator
     cat "$BAD"
   else
     echo "Every file passed."
+  fi
+  if [ -s "$RETRIED" ]; then
+    echo
+    echo "Hung once and ran on a fresh emulator (counted by how they ran; a flake to watch, not a pass to trust blindly):"
+    echo
+    echo "| test | note |"
+    echo "|---|---|"
+    cat "$RETRIED"
   fi
   echo
   echo "Why the failures happen: see \`docs/records/0098-datasheet-conformance-audit.md\` (section on MicroPython's own test suite). The full per-file list is in the job's artifact."

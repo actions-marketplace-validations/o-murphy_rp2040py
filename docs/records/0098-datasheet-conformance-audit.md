@@ -871,3 +871,5 @@ The hang was real and mine, though it moved between small files (`random_seed_de
 - `io/file_stdio.py`, `file_stdio2.py` use `sys.stdout.fileno()`, `io/argv.py` `sys.argv` (unix-port features), and `import/import_file.py` prints the host path of `__file__`.
 `cmdline/*` tests the unix binary's command line (`-c`, `-v`, `sys.exit` codes) and is not run. Total in CI now: 870 + 22+13+5 + 10 + 29 = 949 passing, 0 failed, 0 hung.
 
+One CI run of the new gating group `unicode, stress, misc` (commit 13ef791) ended with `misc/non_compliant_lexer.py` as a HANG (the 90 s limit) although it takes 6 s on a workstation, passes in four parallel local runs under load, and passed on the re-run of the very same commit. Not reproduced, so not explained; to keep a flake of a shared runner from failing a gating group, `run_suite.sh` now runs a file that hangs **once more on a fresh emulator** (`RETRY_HANG=0` turns it off): a file that hangs twice is still a HANG, one that runs the second time is listed in the summary under "Hung once and ran" so the flake stays visible.
+

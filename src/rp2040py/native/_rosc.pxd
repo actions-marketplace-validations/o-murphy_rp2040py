@@ -47,7 +47,7 @@ cdef extern from "rosc.hpp" namespace "rp2040core":
         cppbool enabled
         uint32_t last_bit
         uint32_t count
-        double count_epoch
+        int64_t count_epoch
         double hz
         cppbool read(uint32_t offset, uint32_t* out) noexcept
         cppbool write(uint32_t offset, int64_t value) noexcept

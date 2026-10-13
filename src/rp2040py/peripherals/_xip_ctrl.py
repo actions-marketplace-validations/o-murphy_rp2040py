@@ -19,6 +19,7 @@ access of the model's CPU is one count (a halfword fetch is an access), where th
 
 from typing import TYPE_CHECKING
 
+from rp2040py.clock._simulation_clock import nanos_to_ticks
 from rp2040py.peripherals.peripheral import BasePeripheral
 
 if TYPE_CHECKING:
@@ -94,11 +95,11 @@ class RPXIPCtrl(BasePeripheral):
 
     def _start_flush(self) -> None:
         self.tags = [[INVALID, INVALID] for _ in range(SETS)]
-        self.flush_done_ns = self.rp2040.clock.nanos + FLUSH_CYCLES * 1e9 / self.rp2040.clk_sys
+        self.flush_done_ticks = self.rp2040.clock.ticks + nanos_to_ticks(FLUSH_CYCLES * 1e9 / self.rp2040.clk_sys)
 
     @property
     def flush_ready(self) -> bool:
-        return self.rp2040.clock.nanos >= self.flush_done_ns
+        return self.rp2040.clock.ticks >= self.flush_done_ticks
 
     def access(self, address: int) -> None:
         """One read of an XIP alias (`0x10…0x13`): counted, looked up and (the alias allowing it) allocated."""
@@ -222,7 +223,7 @@ class RPXIPCtrl(BasePeripheral):
             return self.ctrl
         if offset == FLUSH:
             # "Reading will hold the bus (stall the processor) until the flush completes": the model has no stall, so the flush completes now. SC: the bit reads 0.
-            self.flush_done_ns = min(self.flush_done_ns, self.rp2040.clock.nanos)
+            self.flush_done_ticks = min(self.flush_done_ticks, self.rp2040.clock.ticks)
             return 0
         if offset == STAT:
             return self.stat

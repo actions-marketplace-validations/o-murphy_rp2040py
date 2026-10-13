@@ -27,7 +27,7 @@ cdef extern from "timer32.hpp" namespace "rp2040core":
         uint32_t mode_raw() noexcept
         void set_mode_raw(uint32_t value) noexcept
         int64_t base_value() noexcept
-        double base_nanos() noexcept
+        int64_t base_ticks() noexcept
 
     cdef cppclass Timer32PeriodicAlarm:
         cppbool enable() noexcept

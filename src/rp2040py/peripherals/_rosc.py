@@ -2,6 +2,7 @@ import random
 from collections.abc import Callable
 from typing import TYPE_CHECKING
 
+from rp2040py.clock._simulation_clock import TICKS_PER_NANO
 from rp2040py.peripherals.peripheral import BasePeripheral
 
 if TYPE_CHECKING:
@@ -119,7 +120,7 @@ class RPROSC(BasePeripheral):
         self._enabled = True  # "started automatically during RP2040 power up"
         self._last_bit = 1  # RANDOMBIT resets to 1
         self._count = 0
-        self._count_epoch = 0.0
+        self._count_epoch = 0  # in ticks of 1/16 ns
 
     def reset(self) -> None:
         """Back to power-on: enabled, div 16, LOW range, no drive. Gated on `PSM.WDSEL`'s ROSC bit by `RP2040.reset()`: `watchdog_reboot()` clears it ("everything apart from ROSC and XOSC"),
@@ -143,11 +144,13 @@ class RPROSC(BasePeripheral):
     def _rebase_count(self) -> None:
         """Folds the time that passed into COUNT before anything that changes its rate (frequency, ENABLE) or its value."""
         self._count = self._count_now()
-        self._count_epoch = self.rp2040.clock.nanos
+        self._count_epoch = self.rp2040.clock.ticks
 
     def _count_now(self) -> int:
         if self._count and self._enabled:
-            elapsed = self.rp2040.clock.nanos - self._count_epoch
+            elapsed = (
+                self.rp2040.clock.ticks - self._count_epoch
+            ) / TICKS_PER_NANO  # the difference is taken in ticks: exact however far into the run
             done = int(elapsed * self._hz / 1e9)
             return max(self._count - done, 0)
         return self._count
@@ -241,7 +244,7 @@ class RPROSC(BasePeripheral):
 
         elif offset == ROSC_COUNT:
             self._count = value & COUNT_MASK  # "To start the counter write a non-zero value"
-            self._count_epoch = self.rp2040.clock.nanos
+            self._count_epoch = self.rp2040.clock.ticks
 
         elif offset == ROSC_RANDOMBIT:
             return  # read only

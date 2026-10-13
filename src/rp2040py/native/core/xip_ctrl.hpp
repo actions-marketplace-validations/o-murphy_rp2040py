@@ -84,7 +84,7 @@ public:
     uint32_t fifo[xip_regs::FIFO_DEPTH] = {0, 0};
     uint32_t fifo_len = 0;
     bool stream_in_flight = false;
-    double flush_done_ns = 0.0;
+    int64_t flush_done_ticks = 0;
     int16_t tags[xip_regs::SETS][2];
     uint8_t recent[xip_regs::SETS];
     uint8_t sram[xip_regs::SRAM_SIZE] = {};  // the cache's data RAM: it keeps its contents through a flush and a reset
@@ -103,7 +103,7 @@ public:
         return update_dreq();
     }
 
-    bool flush_ready() const noexcept { return clock_->nanos() >= flush_done_ns; }
+    bool flush_ready() const noexcept { return clock_->ticks() >= flush_done_ticks; }
 
     // One read of an XIP alias: counted, looked up and (the alias allowing it) allocated.
     void access(uint32_t address) noexcept {
@@ -190,7 +190,7 @@ public:
             case REG_CTRL: return ctrl;
             case REG_FLUSH:
                 // "Reading will hold the bus (stall the processor) until the flush completes": the model has no stall, so the flush completes now. SC: the bit reads 0.
-                if (clock_->nanos() < flush_done_ns) flush_done_ns = clock_->nanos();
+                if (clock_->ticks() < flush_done_ticks) flush_done_ticks = clock_->ticks();
                 return 0;
             case REG_STAT: return stat();
             case REG_CTR_HIT: return ctr_hit;
@@ -271,7 +271,7 @@ private:
         for (uint32_t i = 0; i < SETS; ++i) tags[i][0] = tags[i][1] = static_cast<int16_t>(INVALID);
         double hz = 0.0;
         if (!host_.clk_sys(host_.ctx, &hz)) return false;
-        flush_done_ns = clock_->nanos() + FLUSH_CYCLES * 1e9 / hz;
+        flush_done_ticks = clock_->ticks() + nanos_to_ticks(FLUSH_CYCLES * 1e9 / hz);
         return true;
     }
 

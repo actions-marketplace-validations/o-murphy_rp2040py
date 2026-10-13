@@ -79,7 +79,7 @@ public:
     bool enabled = true;  // "started automatically during RP2040 power up"
     uint32_t last_bit = 1;
     uint32_t count = 0;
-    double count_epoch = 0.0;
+    int64_t count_epoch = 0;  // the clock's time, in ticks, when COUNT was last set or folded
     double hz = rosc_regs::NOMINAL_HZ;  // the frequency this block last gave the chip
 
     // Back to power-on; tells the chip when that changes the frequency. False: a failure is pending.
@@ -94,7 +94,7 @@ public:
         enabled = true;
         last_bit = 1;
         count = 0;
-        count_epoch = 0.0;
+        count_epoch = 0;
         return apply_frequency();
     }
 
@@ -103,7 +103,7 @@ public:
     // The remaining COUNT: the written value less the ROSC cycles that passed since, while the oscillator is enabled.
     uint32_t count_now() const noexcept {
         if (count != 0 && enabled) {
-            const double elapsed = clock_->nanos() - count_epoch;
+            const double elapsed = static_cast<double>(clock_->ticks() - count_epoch) / static_cast<double>(kTicksPerNano);  // the difference is taken in ticks
             const int64_t done = static_cast<int64_t>(elapsed * hz / 1e9);
             return done >= static_cast<int64_t>(count) ? 0u : count - static_cast<uint32_t>(done);
         }
@@ -213,7 +213,7 @@ public:
                 return true;
             case REG_COUNT:
                 count = v & COUNT_MASK;  // "To start the counter write a non-zero value"
-                count_epoch = clock_->nanos();
+                count_epoch = clock_->ticks();
                 return true;
             case REG_RANDOMBIT: return true;  // read only
             default: break;
@@ -266,7 +266,7 @@ private:
 
     void rebase_count() noexcept {
         count = count_now();
-        count_epoch = clock_->nanos();
+        count_epoch = clock_->ticks();
     }
 
     // Tells the chip when the output frequency changed. False: a failure is pending.

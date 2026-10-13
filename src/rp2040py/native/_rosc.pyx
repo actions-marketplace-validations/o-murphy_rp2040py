@@ -202,7 +202,7 @@ cdef class RPROSC:
 
     @_count_epoch.setter
     def _count_epoch(self, value):
-        self._block.count_epoch = <double> value
+        self._block.count_epoch = <int64_t> value
 
     @property
     def _hz(self):

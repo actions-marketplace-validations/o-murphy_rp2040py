@@ -1,7 +1,7 @@
 // A 32-bit prescaled counter and its periodic alarms, in C++ (docs/records/0096-cpp-mcu-core.md, Phase 4): a faithful translation of utils/timer32.py, which stays as the
 // pure-Python reference. It is the counter of the PWM's eight channels, and of the watchdog and the PPB's SysTick, which will sit on it too.
 //
-// What it is: a counter that is not stepped but *computed* - `raw_counter` derives the value from the clock's time since the counter was last set (`base_value` at `base_nanos`), the
+// What it is: a counter that is not stepped but *computed* - `raw_counter` derives the value from the clock's time since the counter was last set (`base_value` at `base_ticks`), the
 // frequency, the prescaler, the mode (INCREMENT, DECREMENT, ZIGZAG) and TOP. A `Timer32PeriodicAlarm` is a compare value on such a counter: it keeps one alarm on the chip's `Clock`
 // pointed at the next time the counter reaches `target`, and moves it whenever the counter is changed (the timer tells its alarms, in the order they were attached).
 //
@@ -9,7 +9,7 @@
 // what the reference's exception leaves (the clock stops ticking at that alarm's time).
 //
 // Quirks of the reference that are kept (each pinned by tests/cpp/test_timer32.cpp and, through the PWM, by tests/test_pwm_diff.py):
-//   - the counter starts at `base_nanos` 0, not at the clock's time; a timer made late counts from time zero until it is `set()`/`reset()`;
+//   - the counter starts at `base_ticks` 0, not at the clock's time; a timer made late counts from time zero until it is `set()`/`reset()`;
 //   - setting the PRESCALER also writes `enabled`, from the *old* prescaler (`enabled = old != 0`): a prescaler write can switch a stopped timer on;
 //   - `raw_counter` of a stopped timer (or one with no frequency or prescaler) is `base_value` untouched - no modulo, so it can lie outside 0..TOP;
 //   - ZIGZAG with TOP == 0 has a period of 0: the counter reads 0 (the reference's guard against a modulo by zero; rp2040js computes NaN there, which `& 0xFFFFFFFF` turns into 0);
@@ -71,14 +71,14 @@ public:
 
     // ---- the counter ------------------------------------------------------------------------------------------------
     void reset() noexcept {
-        base_nanos_ = clock_->nanos();
+        base_ticks_ = clock_->ticks();
         base_value_ = 0;
         updated();
     }
 
     void set(int64_t value, bool zig_zag_down = false) noexcept {
         base_value_ = zig_zag_down ? top_value_ * 2 - value : value;
-        base_nanos_ = clock_->nanos();
+        base_ticks_ = clock_->ticks();
         updated();
     }
 
@@ -96,7 +96,7 @@ public:
     int64_t raw_counter() const noexcept {
         if (base_freq_ == 0.0 || prescaler_ == 0.0 || !enabled_) return base_value_;
         const bool zigzag = mode_ == TimerMode::kZigzag;
-        const double ticks = ((clock_->nanos() - base_nanos_) / 1e9) * (base_freq_ / prescaler_);
+        const double ticks = (static_cast<double>(clock_->ticks() - base_ticks_) / (1e9 * static_cast<double>(kTicksPerNano))) * (base_freq_ / prescaler_);
         const int64_t top_modulo = zigzag ? top_value_ * 2 : top_value_ + 1;
         if (top_modulo == 0) return 0;  // ZIGZAG with TOP == 0: one state
         const double delta = mode_ == TimerMode::kDecrement ? static_cast<double>(top_modulo) - timer32_detail::float_mod(ticks, top_modulo) : ticks;
@@ -121,7 +121,7 @@ public:
     double frequency() const noexcept { return base_freq_; }
     void set_frequency(double value) noexcept {
         base_value_ = counter();
-        base_nanos_ = clock_->nanos();
+        base_ticks_ = clock_->ticks();
         base_freq_ = value;
         updated();
     }
@@ -129,7 +129,7 @@ public:
     double prescaler() const noexcept { return prescaler_; }
     void set_prescaler(double value) noexcept {
         base_value_ = counter();
-        base_nanos_ = clock_->nanos();
+        base_ticks_ = clock_->ticks();
         enabled_ = prescaler_ != 0.0;  // from the OLD prescaler, as in the reference
         prescaler_ = value;
         updated();
@@ -141,7 +141,7 @@ public:
     void set_enable(bool value) noexcept {
         if (value == enabled_) return;
         if (value) {
-            base_nanos_ = clock_->nanos();
+            base_ticks_ = clock_->ticks();
         } else {
             base_value_ = counter();
         }
@@ -161,7 +161,7 @@ public:
 
     // The raw state, for the shells and the checks.
     int64_t base_value() const noexcept { return base_value_; }
-    double base_nanos() const noexcept { return base_nanos_; }
+    int64_t base_ticks() const noexcept { return base_ticks_; }
 
     // Attaches an alarm to be told (in attach order) whenever the counter is changed. Called by `Timer32PeriodicAlarm::init`.
     void attach(Timer32PeriodicAlarm* alarm) noexcept;
@@ -172,7 +172,7 @@ private:
     Clock* clock_ = nullptr;
     double base_freq_ = 0.0;
     int64_t base_value_ = 0;
-    double base_nanos_ = 0.0;
+    int64_t base_ticks_ = 0;  // the clock's time, in ticks, when the counter was last set
     int64_t top_value_ = kNoTop;
     double prescaler_ = 1.0;
     TimerMode mode_ = TimerMode::kIncrement;

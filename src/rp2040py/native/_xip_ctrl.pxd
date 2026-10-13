@@ -40,7 +40,7 @@ cdef extern from "xip_ctrl.hpp" namespace "rp2040core":
         uint32_t fifo[2]
         uint32_t fifo_len
         cppbool stream_in_flight
-        double flush_done_ns
+        int64_t flush_done_ticks
         int16_t tags[1024][2]
         uint8_t recent[1024]
         uint8_t sram[16384]

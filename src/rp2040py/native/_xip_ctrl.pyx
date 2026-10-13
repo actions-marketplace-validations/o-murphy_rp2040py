@@ -181,12 +181,12 @@ cdef class RPXIPCtrl:
         return bool(self._block.stream_in_flight)
 
     @property
-    def flush_done_ns(self):
-        return self._block.flush_done_ns
+    def flush_done_ticks(self):
+        return self._block.flush_done_ticks
 
-    @flush_done_ns.setter
-    def flush_done_ns(self, value):
-        self._block.flush_done_ns = <double> value
+    @flush_done_ticks.setter
+    def flush_done_ticks(self, value):
+        self._block.flush_done_ticks = <int64_t> value
 
     @property
     def flush_ready(self):

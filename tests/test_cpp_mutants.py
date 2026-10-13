@@ -3,8 +3,13 @@
 import importlib.util
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[1]
-SPEC = importlib.util.spec_from_file_location("cpp_mutants", ROOT / "scripts" / "audit" / "cpp_mutants.py")
+SCRIPT = ROOT / "scripts" / "audit" / "cpp_mutants.py"
+if not SCRIPT.exists():  # cibuildwheel's Android and Pyodide runs copy only tests/ next to the wheel
+    pytest.skip("scripts/ is not part of this test environment", allow_module_level=True)
+SPEC = importlib.util.spec_from_file_location("cpp_mutants", SCRIPT)
 assert SPEC is not None and SPEC.loader is not None
 cpp_mutants = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(cpp_mutants)

@@ -55,7 +55,7 @@ from rp2040py.memory_map import (
 )
 from rp2040py.peripherals.adc import RPADC
 from rp2040py.peripherals.busctrl import RPBUSCTRL
-from rp2040py.peripherals.clocks import RPClocks, reset_clock_tree, update_clocks
+from rp2040py.peripherals.clocks import RPClocks
 from rp2040py.peripherals.pll import RPPLL
 from rp2040py.peripherals.dma import RPDMA, DREQChannel
 from rp2040py.peripherals.i2c import RPI2C
@@ -454,9 +454,9 @@ cdef class RP2040:
 
         # Named, not just entries in `peripherals` below - see _rp2040.py's identical block for
         # why reset() needs each of them by name (0089 Phase 5).
-        self.clocks = RPClocks(self, "CLOCKS_BASE")
         self.pll_sys = RPPLL(self, "PLL_SYS_BASE")
         self.pll_usb = RPPLL(self, "PLL_USB_BASE")
+        self.clocks = RPClocks(self, "CLOCKS_BASE")  # after the PLLs: the native tree points at their C++ blocks
         self.resets = RPReset(self, "RESETS_BASE")
         self.psm = RPPSM(self, "PSM_BASE")
         self.pads_bank0 = RPPADS(self, "PADS_BANK0_BASE", "bank0")
@@ -706,7 +706,7 @@ cdef class RP2040:
             self.sio.reset()
         if psm_wdsel & WDSEL_CLOCKS:
             self.clocks.reset()
-            reset_clock_tree(self)
+            self.clocks.reset_tree()
 
         if resets_wdsel & RESET_IO_BANK0:
             for pin in self.gpio:
@@ -782,7 +782,7 @@ cdef class RP2040:
             memset(<uint8_t*> &self._flash[0], 0xFF, len(self._flash))
     def update_clocks(self):
         """Re-derives `clk_sys`/`clk_peri` from the PLL and CLOCKS registers and retunes what runs from them (see `peripherals.clocks.update_clocks`)."""
-        update_clocks(self)
+        self.clocks.update()
 
     def add_clock_listener(self, listener):
         """Calls `listener(clk_sys, old_clk_sys)` whenever clk_sys changes - for anything that derives a rate from it (a PIO clock divider, say). Returns the

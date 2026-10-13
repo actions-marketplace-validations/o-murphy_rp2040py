@@ -83,10 +83,10 @@ from rp2040py.peripherals._xip_ctrl import (  # the pure chip's own XIP: the nat
     RPXIPCtrl,
 )
 from rp2040py.peripherals._xosc import RPXOSC
-from rp2040py.peripherals.clocks import RPClocks, reset_clock_tree, update_clocks
+from rp2040py.peripherals._clocks import RPClocks
 from rp2040py.peripherals.peripheral import Peripheral
 from rp2040py.peripherals.pio import RPPIO
-from rp2040py.peripherals.pll import RPPLL
+from rp2040py.peripherals._pll import RPPLL
 from rp2040py.peripherals.timer import RPTimer
 from rp2040py.qspi_pads import QSPI_PAD_RESET_VALUES
 from rp2040py.sio import RPSIO
@@ -468,7 +468,7 @@ class RP2040:
             self.sio.reset()
         if psm_wdsel & WDSEL_CLOCKS:
             self.clocks.reset()
-            reset_clock_tree(self)
+            self.clocks.reset_tree()
 
         if resets_wdsel & RESET_IO_BANK0:
             for pin in self.gpio:
@@ -543,7 +543,7 @@ class RP2040:
 
     def update_clocks(self) -> None:
         """Re-derives `clk_sys`/`clk_peri` from the PLL and CLOCKS registers and retunes what runs from them (see `peripherals.clocks.update_clocks`)."""
-        update_clocks(self)
+        self.clocks.update()
 
     def add_clock_listener(self, listener: "Callable[[float, float], None]") -> "Callable[[], None]":
         """Calls `listener(clk_sys, old_clk_sys)` whenever clk_sys changes - for anything that derives a rate from it (a PIO clock divider, say). Returns the

@@ -217,6 +217,14 @@ class RPClocks(BasePeripheral):
         self._stored = {offset: reset for offset, (_mask, reset) in STORED_REGISTERS.items()}
         self._fc_reset()
 
+    def update(self) -> None:
+        """Re-derives `clk_sys` / `clk_peri` and retunes what runs from them (the chip's `update_clocks()`); the native block has the same method."""
+        update_clocks(self.rp2040)
+
+    def reset_tree(self) -> None:
+        """The CLOCKS domain was reset (after `reset()`): both PLLs to power-on, clk_sys / clk_peri back to 125 MHz; the native block has the same method."""
+        reset_clock_tree(self.rp2040)
+
     @property
     def ref_freq(self) -> float:
         """clk_ref in Hz. GPIN0/GPIN1 are not modelled and give 0."""

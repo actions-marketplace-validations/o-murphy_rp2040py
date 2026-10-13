@@ -134,7 +134,8 @@ build-frontend = "build[uv]"
 # free-threaded minor version needs its own non-abi3 wheel.
 build = "cp310-* cp311-* cp314t-* cp315t-*"
 test-extras = "fs"
-test-requires = "pytest"
+# pytest-xdist: the project's addopts is `-rf -n auto` (the Android and Pyodide sections below drop it: neither can fork workers)
+test-requires = "pytest pytest-xdist"
 # cibuildwheel runs tests from a scratch directory (not the repo checkout) so only the built
 # wheel's contents are ever imported - {project} is substituted with the repo root so pytest can
 # still find the test suite itself (tests/ isn't part of the wheel).
@@ -142,8 +143,9 @@ test-command = "pytest {project}/tests"
 
 [tool.cibuildwheel.android]
 test-extras = ""
+test-requires = "pytest"
 test-sources = ["tests", "pyproject.toml"]
-test-command = "python -m pytest tests"
+test-command = "python -m pytest -o addopts=-rf tests"
 build = "cp313-android_* cp314-android_* cp315-android_*"
 
 [tool.cibuildwheel.pyodide]
@@ -151,11 +153,12 @@ build = "cp313-pyodide_* cp314-pyodide_* cp315-pyodide_*"
 # Not "fs": littlefs-python has no wasm32/emscripten wheel, so installing it here fails outright
 # (confirmed 2026-10-05) - same reason as the android section's own test-extras override above.
 test-extras = ""
+test-requires = "pytest"
 # The whole suite, as on every other platform: tests that need what Emscripten/WASM does not have (real sockets, subprocesses, OS threads, network firmware fetches) must skip or fail
 # loudly here rather than be left out of the command. record 0096's thread-free engine is the fix for the "no pthreads" problem that kept this platform disabled; the native
 # extension compiles and loads for wasm32-emscripten (not a silent pure-Python fallback). wasm32 is a 32-bit address space whose memory never shrinks, so it shares the 32-bit
 # targets' memory limits (see tests/conftest.py).
-test-command = "python -m pytest {project}/tests"
+test-command = "python -m pytest -o addopts=-rf {project}/tests"
 
 [dependency-groups]
 dev = [

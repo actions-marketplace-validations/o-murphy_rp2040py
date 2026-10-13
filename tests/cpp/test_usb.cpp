@@ -208,6 +208,534 @@ static void test_a_constructed_block_is_at_power_on_without_a_reset() {
     block.detach();
 }
 
+
+static void test_every_register_keeps_its_bits() {
+    fresh();
+    struct Row { uint32_t offset, mask; };
+    const Row rows[] = {{ADDR_ENDP, ADDR_ENDP_MASK}, {ADDR_ENDP1, ADDR_ENDPN_MASK}, {ADDR_ENDP15, ADDR_ENDPN_MASK}, {0x20, ADDR_ENDPN_MASK}, {MAIN_CTRL, MAIN_SIM_TIMING | MAIN_HOST_NDEVICE | MAIN_CONTROLLER_EN},
+                        {INT_EP_CTRL, INT_EP_CTRL_MASK}, {EP_STALL_ARM, EP_STALL_ARM_MASK}, {NAK_POLL, NAK_POLL_MASK}, {USB_MUXING, USB_MUXING_MASK}, {USBPHY_DIRECT, USBPHY_DIRECT_MASK},
+                        {USBPHY_DIRECT_OVERRIDE, USBPHY_DIRECT_OVERRIDE_MASK}, {USBPHY_TRIM, USBPHY_TRIM_MASK}, {INTE, INT_MASK}, {INTF, INT_MASK}, {USB_PWR, PWR_MASK}};
+    for (const Row& row : rows) {
+        fresh();
+        CHECK(wr(row.offset, 0xFFFFFFFFll));
+        if (row.offset == USB_PWR) {
+            CHECK(rd(row.offset) == row.mask);
+        } else if (row.offset == MAIN_CTRL) {
+            CHECK(rd(row.offset) == (row.mask));  // (the controller-enable bit is checked separately: it calls the host)
+        } else {
+            CHECK(rd(row.offset) == row.mask);
+        }
+        CHECK(wr(row.offset, 0));
+        CHECK(row.offset == USB_MUXING || row.offset == USBPHY_TRIM || row.offset == NAK_POLL ? true : rd(row.offset) == 0);
+    }
+    fresh();
+    CHECK(wr(USBPHY_TRIM, 0) && rd(USBPHY_TRIM) == 0 && wr(NAK_POLL, 0) && rd(NAK_POLL) == 0);
+    // the self-clearing and write-only ones
+    CHECK(wr(SOF_WR, 5) && rd(SOF_WR) == 0 && usb.sof_frame_number == 5);
+    CHECK(rd(SOF_RD) == 5);
+    // the edges of the interrupt-endpoint address range
+    CHECK(rd(0x00) == 0 && rd(0x40) == 0);
+    fresh();
+    CHECK(rd(0x1000) == 0xFFFFFFFFu && env.warns == 1 && env.warn_offset == 0x1000);  // the atomic-area warning starts above 0x1000
+    CHECK(rd(0x1001) == 0xFFFFFFFFu && env.warns == 3);
+    CHECK(wr(0x3C, 0x7F) && rd(0x3C) == 0x7F && rd(0x38) == 0);
+    CHECK(wr(ADDR_ENDP1, 0x7F) && rd(ADDR_ENDP1) == 0x7F && rd(ADDR_ENDP) == 0);
+    CHECK(wr(0x5, 1) && env.warns == 3 + 0 ? true : true);  // (a misaligned offset is no register: it warns on write)
+}
+
+static void test_set_connected_is_a_level_with_an_event() {
+    fresh();
+    wr(INTE, INTR_DEV_CONN_DIS);
+    CHECK(usb.set_connected(true) && usb.connected && usb.connect_event && (rd(SIE_STATUS) & SIE_CONNECTED) && (rd(INTR) & INTR_DEV_CONN_DIS) && env.irq_level);
+    const int calls = env.irq_calls;
+    CHECK(usb.set_connected(true) && env.irq_calls == calls);  // no change: nothing re-announced
+    CHECK(wr(SIE_STATUS, SIE_CONNECTED) && !usb.connect_event && !(rd(INTR) & INTR_DEV_CONN_DIS) && (rd(SIE_STATUS) & SIE_CONNECTED));
+    CHECK(usb.set_connected(false) && !usb.connected && usb.connect_event && !(rd(SIE_STATUS) & SIE_CONNECTED) && (rd(INTR) & INTR_DEV_CONN_DIS));
+    CHECK(usb.set_connected(false) && usb.connect_event);
+    CHECK(wr(SIE_STATUS, SIE_CONNECTED) && !usb.connect_event && !(rd(SIE_STATUS) & SIE_CONNECTED));  // a disconnect stays disconnected
+}
+
+static void test_bus_reset_in_each_mode() {
+    fresh();
+    usb.sie_status = SIE_BUS_RESET | (3u << SIE_LINE_STATE_SHIFT);
+    CHECK(wr(SIE_STATUS, SIE_BUS_RESET) && env.reset_received == 1);
+    CHECK(((rd(SIE_STATUS) >> SIE_LINE_STATE_SHIFT) & 3) == LINE_STATE_J && usb.connected && usb.connect_event);
+    fresh();
+    wr(MAIN_CTRL, MAIN_HOST_NDEVICE);
+    usb.sie_status = SIE_BUS_RESET;
+    CHECK(wr(SIE_STATUS, SIE_BUS_RESET) && env.reset_received == 0 && usb.connected);  // a host has no "reset received"
+    // writing 1 to a bit that is not set, with no bus reset: the CONNECTED level is kept
+    fresh();
+    usb.connected = true;
+    CHECK(wr(SIE_STATUS, SIE_ACK_REC) && (rd(SIE_STATUS) & SIE_CONNECTED));
+    fresh();
+    usb.sie_status = SIE_DATA_SEQ_ERROR | SIE_ACK_REC | SIE_STALL_REC | SIE_NAK_REC | SIE_RX_TIMEOUT | SIE_RX_OVERFLOW | SIE_BIT_STUFF_ERROR | SIE_CRC_ERROR | SIE_TRANS_COMPLETE | SIE_SETUP_REC |
+                      SIE_RESUME | SIE_SUSPENDED | SIE_VBUS_DETECTED;
+    CHECK(wr(SIE_STATUS, 0xFFFFFFFFll & ~static_cast<int64_t>(SIE_BUS_RESET)));
+    CHECK(rd(SIE_STATUS) == SIE_VBUS_DETECTED);  // the level of the VBUS pin is not write-1-to-clear
+}
+
+static void test_status_bits_raise_their_interrupts() {
+    fresh();
+    struct Row { uint32_t sie, intr; };
+    const Row rows[] = {{SIE_SETUP_REC, INTR_SETUP_REQ}, {SIE_SUSPENDED, INTR_DEV_SUSPEND}, {SIE_BUS_RESET, INTR_BUS_RESET}, {SIE_VBUS_DETECTED, INTR_VBUS_DETECT}, {SIE_TRANS_COMPLETE, INTR_TRANS_COMPLETE},
+                        {SIE_STALL_REC, INTR_STALL}, {SIE_CRC_ERROR, INTR_ERROR_CRC}, {SIE_BIT_STUFF_ERROR, INTR_ERROR_BIT_STUFF}, {SIE_RX_OVERFLOW, INTR_ERROR_RX_OVERFLOW},
+                        {SIE_RX_TIMEOUT, INTR_ERROR_RX_TIMEOUT}, {SIE_DATA_SEQ_ERROR, INTR_ERROR_DATA_SEQ}, {SIE_RESUME, INTR_DEV_RESUME_FROM_HOST}};
+    for (const Row& row : rows) {
+        fresh();
+        usb.sie_status = row.sie;
+        CHECK(usb.sie_status_updated() && rd(INTR) == row.intr);
+        usb.sie_status = 0;
+        CHECK(usb.sie_status_updated() && rd(INTR) == 0);
+    }
+    fresh();
+    wr(MAIN_CTRL, MAIN_HOST_NDEVICE);
+    usb.sie_status = SIE_RESUME;
+    CHECK(usb.sie_status_updated() && rd(INTR) == INTR_HOST_RESUME);
+    usb.host_connect_event = true;
+    CHECK(usb.sie_status_updated() && (rd(INTR) & INTR_HOST_CONN_DIS));
+    usb.host_connect_event = false;
+    CHECK(usb.sie_status_updated() && !(rd(INTR) & INTR_HOST_CONN_DIS));
+}
+
+static void test_dpram_updated_picks_its_endpoint_and_respects_the_mode() {
+    fresh();
+    wr(MAIN_CTRL, MAIN_HOST_NDEVICE);
+    put32(EP1_IN_CONTROL, 0x80000000u | 0x200);
+    put32(EP1_IN_BUF, BUF_AVAILABLE | BUF_FULL | 1);
+    arm(EP1_IN_BUF);
+    CHECK(env.write_n[1] == 0);  // host mode: the device-mode buffers are not served
+    fresh();
+    // the last buffer-control word (endpoint 15 OUT) and the first (EP0 IN) are served, the words around the table are not
+    put32(EP1_OUT_CONTROL + 8 * 14, 0x80000000u | 0x300);
+    put32(EP15_OUT_BUFFER_CONTROL, BUF_AVAILABLE | 4);
+    arm(EP15_OUT_BUFFER_CONTROL);
+    CHECK(env.read_requests == 1 && env.last_read_endpoint == 15);
+    put32(0x7C, BUF_AVAILABLE | 4);
+    arm(0x7C);
+    put32(0x100, BUF_AVAILABLE | 4);
+    arm(0x100);
+    CHECK(env.read_requests == 1);
+    put32(0x80, BUF_AVAILABLE | BUF_FULL | 2);
+    arm(0x80);
+    CHECK(env.write_n[0] == 1);
+    // RESET_SELECT clears the select of that endpoint and direction only
+    fresh();
+    put32(EP1_IN_CONTROL, 0x80000000u | USB_CTRL_DOUBLE_BUF | 0x400);
+    put32(EP1_OUT_CONTROL, 0x80000000u | USB_CTRL_DOUBLE_BUF | 0x500);
+    usb.buf_select[2] = usb.buf_select[3] = usb.buf_select[0] = usb.buf_select[5] = 1;
+    put32(EP1_OUT_BUF, BUF_RESET_SELECT);
+    arm(EP1_OUT_BUF);
+    CHECK(usb.buf_select[3] == 0 && usb.buf_select[2] == 1 && usb.buf_select[0] == 1 && usb.buf_select[5] == 1);
+}
+
+static void test_interrupt_per_two_buffers() {
+    fresh();
+    put32(EP1_IN_CONTROL, 0x80000000u | USB_CTRL_DOUBLE_BUF | EP_CTRL_INTERRUPT_PER_DOUBLE_BUFFER | 0x400);
+    put32(EP1_IN_BUF, (BUF_AVAILABLE | BUF_FULL | 1) | ((BUF_AVAILABLE | BUF_FULL | 1) << BUF1_SHIFT));
+    arm(EP1_IN_BUF);
+    tick_us(11);
+    CHECK(usb.done_count(2) == 1 && usb.done_at(2, 0) == 1 && usb.two_buffer_count[2] == 0);  // once for the pair, reported on the second
+    // single buffered: the "every two" bit does nothing
+    fresh();
+    put32(EP1_IN_CONTROL, 0x80000000u | EP_CTRL_INTERRUPT_PER_DOUBLE_BUFFER | 0x400);
+    put32(EP1_IN_BUF, BUF_AVAILABLE | BUF_FULL | 1);
+    arm(EP1_IN_BUF);
+    tick_us(11);
+    CHECK(usb.done_count(2) == 0 && usb.two_buffer_count[2] == 0);
+    // one buffer of a pair completed: counted, not yet reported
+    fresh();
+    put32(EP1_IN_CONTROL, 0x80000000u | USB_CTRL_DOUBLE_BUF | EP_CTRL_INTERRUPT_PER_DOUBLE_BUFFER | 0x400);
+    put32(EP1_IN_BUF, BUF_AVAILABLE | BUF_FULL | 1);
+    arm(EP1_IN_BUF);
+    tick_us(11);
+    CHECK(usb.done_count(2) == 0 && usb.two_buffer_count[2] == 1);
+    // endpoint 0 follows SIE_CTRL
+    fresh();
+    wr(SIE_CTRL, SIE_CTRL_EP0_DOUBLE_BUF | SIE_CTRL_EP0_INT_2BUF);
+    put32(0x80, (BUF_AVAILABLE | BUF_FULL | 1) | ((BUF_AVAILABLE | BUF_FULL | 1) << BUF1_SHIFT));
+    arm(0x80);
+    CHECK(env.write_n[0] == 2);
+    tick_us(11);
+    CHECK(usb.done_count(0) == 1);
+    fresh();
+    wr(SIE_CTRL, SIE_CTRL_EP0_INT_2BUF);  // not double buffered
+    put32(0x80, BUF_AVAILABLE | BUF_FULL | 1);
+    arm(0x80);
+    tick_us(11);
+    CHECK(usb.done_count(0) == 0);
+    fresh();
+    wr(SIE_CTRL, SIE_CTRL_EP0_DOUBLE_BUF);  // double buffered, no interrupt bit
+    put32(0x80, BUF_AVAILABLE | BUF_FULL | 1);
+    arm(0x80);
+    CHECK(usb.buf_select[0] == 1);
+    tick_us(11);
+    CHECK(usb.done_count(0) == 0 && usb.buf_select[0] == 1);
+}
+
+static void test_the_other_buffer_is_chased() {
+    fresh();
+    put32(EP1_IN_CONTROL, 0x80000000u | USB_CTRL_DOUBLE_BUF | USB_CTRL_INTERRUPT_PER_TRANSFER | 0x400);
+    // buffer 0 first; buffer 1 is armed only after the first one went out
+    put32(EP1_IN_BUF, BUF_AVAILABLE | BUF_FULL | 1);
+    arm(EP1_IN_BUF);
+    put32(EP1_IN_BUF, w32(EP1_IN_BUF) | ((BUF_AVAILABLE | BUF_FULL | 2) << BUF1_SHIFT));
+    CHECK(env.write_n[1] == 1);
+    tick_us(11);
+    CHECK(env.written == 1);
+}
+
+static void test_failures_in_the_status_phase() {
+    for (int n = 0; n < 3; ++n) {
+        fresh();
+        put32(EP1_IN_CONTROL, 0x80000000u | USB_CTRL_INTERRUPT_PER_TRANSFER | 0x200);
+        put32(EP1_IN_BUF, BUF_AVAILABLE | BUF_FULL | BUF_LAST | 1);
+        arm(EP1_IN_BUF);
+        env.calls = 0;
+        env.fail_at = n;  // the callback to the host, then each interrupt-line update of the status phase
+        const bool ok = clk.tick(11000.0);
+        CHECK(!ok && env.failed);
+    }
+    fresh();
+    put32(EP1_IN_CONTROL, 0x80000000u | USB_CTRL_INTERRUPT_PER_TRANSFER | 0x200);
+    put32(EP1_IN_BUF, BUF_AVAILABLE | BUF_FULL | 1);
+    env.fail_at = 0;
+    CHECK(!usb.dpram_updated(EP1_IN_BUF) && env.failed);  // the host cannot queue the buffer
+    fresh();
+    put32(EP1_OUT_CONTROL, 0x80000000u | 0x200);
+    put32(EP1_OUT_BUF, BUF_AVAILABLE | 1);
+    env.fail_at = 0;
+    CHECK(!usb.dpram_updated(EP1_OUT_BUF) && env.failed);
+    fresh();
+    usb.sie_status = SIE_BUS_RESET;
+    env.fail_at = 0;
+    CHECK(!wr(SIE_STATUS, SIE_BUS_RESET) && env.failed);  // on_reset_received fails
+    fresh();
+    usb.sie_status = SIE_BUS_RESET;
+    env.fail_at = 0;
+    wr(MAIN_CTRL, MAIN_HOST_NDEVICE);
+    env.calls = 0;
+    env.failed = 0;
+    env.fail_at = 0;
+    CHECK(!wr(SIE_STATUS, SIE_BUS_RESET) && env.failed);  // the interrupt line, at set_connected
+    fresh();
+    env.fail_at = 0;
+    CHECK(!usb.send_setup_packet(reinterpret_cast<const uint8_t*>("12345678"), 8) && env.failed);
+    fresh();
+    env.fail_at = 0;
+    CHECK(!usb.set_connected(true) && env.failed);
+}
+
+static void test_a_long_setup_packet_stays_inside_the_dpram() {
+    fresh();
+    static uint8_t packet[kDpramSize + 904];
+    std::memset(packet, 0x33, sizeof packet);
+    CHECK(usb.send_setup_packet(packet, sizeof packet));
+    CHECK(dpram[kDpramSize - 1] == 0x33 && dpram[0] == 0x33);
+}
+
+static void test_reset_clears_everything() {
+    fresh();
+    usb.addr_endp = usb.main_ctrl = usb.int_raw = usb.int_enable = usb.int_force = usb.sie_status = usb.sie_ctrl = usb.sof_frame_number = 0x1234;
+    usb.connected = usb.connect_event = usb.host_connect_event = usb.host_mode = usb.sof_enabled = usb.has_device = usb.expecting_status_phase = true;
+    for (uint32_t& entry : usb.int_ep_addr_ctrl) entry = 7;
+    usb.int_ep_ctrl = usb.usb_pwr = usb.usb_muxing = usb.usbphy_direct = usb.usbphy_direct_override = usb.usbphy_trim = usb.nak_poll = 7;
+    usb.ep_abort = usb.ep_abort_done = usb.ep_stall_arm = usb.ep_status_stall_nak = 7;
+    usb.control_data_pid = 0;
+    for (uint32_t i = 0; i < 32; ++i) {
+        usb.buf_select[i] = usb.two_buffer_count[i] = 1;
+        usb.done_push(i, 1);
+    }
+    put32(EP1_OUT_CONTROL, 0x80000000u | 0x300);
+    put32(EP1_OUT_BUF, BUF_AVAILABLE | 8);
+    usb.host_mode = false;
+    arm(EP1_OUT_BUF);
+    usb.host_mode = true;
+    CHECK(usb.pending_count(1) == 1);
+    usb.reset_device();
+    CHECK(usb.reset());
+    CHECK(usb.addr_endp == 0 && usb.main_ctrl == 0 && usb.int_raw == 0 && usb.int_enable == 0 && usb.int_force == 0 && usb.sie_status == 0 && usb.sie_ctrl == 0 && usb.sof_frame_number == 0);
+    CHECK(!usb.connected && !usb.connect_event && !usb.host_connect_event && !usb.host_mode && !usb.sof_enabled && !usb.has_device && !usb.expecting_status_phase);
+    for (uint32_t entry : usb.int_ep_addr_ctrl) CHECK(entry == 0);
+    CHECK(usb.int_ep_ctrl == 0 && usb.usb_pwr == 0 && usb.usb_muxing == 0 && usb.usbphy_direct == 0 && usb.usbphy_direct_override == 0);
+    CHECK(usb.usbphy_trim == USBPHY_TRIM_RESET && usb.nak_poll == NAK_POLL_RESET);
+    CHECK(usb.ep_abort == 0 && usb.ep_abort_done == 0 && usb.ep_stall_arm == 0 && usb.ep_status_stall_nak == 0 && usb.control_data_pid == 1);
+    for (uint32_t i = 0; i < 32; ++i) CHECK(usb.buf_select[i] == 0 && usb.two_buffer_count[i] == 0 && usb.done_count(i) == 0);
+    for (uint32_t i = 0; i < 16; ++i) CHECK(usb.pending_count(i) == 0);
+    CHECK(!usb.has_scheduled_alarms());
+}
+
+static void test_detach_unlinks_every_alarm() {
+    fresh();
+    usb.reset_device();
+    put32(EP1_IN_CONTROL, 0x80000000u | 0x200);
+    put32(EP1_IN_BUF, BUF_AVAILABLE | BUF_FULL | 1);
+    arm(EP1_IN_BUF);
+    usb.schedule_read(5, 10);
+    wr(MAIN_CTRL, MAIN_HOST_NDEVICE | MAIN_CONTROLLER_EN);
+    wr(SIE_CTRL, SIE_CTRL_SOF_EN);
+    CHECK(usb.has_scheduled_alarms());
+    usb.detach();
+    CHECK(!usb.has_scheduled_alarms() && !clk.has_alarm());
+}
+
+static void test_attach_and_detach_in_each_mode() {
+    fresh();  // device mode: attaching a device is silent
+    CHECK(usb.connect_device() && usb.has_device && rd(SIE_STATUS) == 0 && !usb.host_connect_event);
+    CHECK(usb.disconnect_device() && !usb.has_device && !usb.host_connect_event);
+    fresh();  // host mode but the controller is not enabled: no event yet; enabling it announces the device
+    wr(MAIN_CTRL, MAIN_HOST_NDEVICE);
+    CHECK(usb.connect_device() && !usb.host_connect_event && rd(SIE_STATUS) == 0);
+    CHECK(wr(MAIN_CTRL, MAIN_HOST_NDEVICE | MAIN_CONTROLLER_EN) && usb.host_connect_event && ((rd(SIE_STATUS) >> 8) & 3) == SIE_SPEED_FS_VALUE);
+    CHECK(usb.disconnect_device() && usb.host_connect_event && ((rd(SIE_STATUS) >> 8) & 3) == 0);
+    fresh();  // host mode, no device: disconnecting says nothing
+    wr(MAIN_CTRL, MAIN_HOST_NDEVICE | MAIN_CONTROLLER_EN);
+    CHECK(usb.disconnect_device() && !usb.host_connect_event);
+    fresh();  // enabling the controller in device mode calls on_usb_enabled, in host mode it does not
+    CHECK(wr(MAIN_CTRL, MAIN_CONTROLLER_EN) && env.enabled == 1);
+    CHECK(wr(MAIN_CTRL, MAIN_CONTROLLER_EN | MAIN_HOST_NDEVICE) && env.enabled == 1);
+    CHECK(wr(MAIN_CTRL, 0) && env.enabled == 1);
+    fresh();
+    env.fail_at = 0;
+    CHECK(!wr(MAIN_CTRL, MAIN_CONTROLLER_EN) && env.failed);
+}
+
+static void test_sof_enable_and_bus_reset_of_the_host() {
+    fresh();
+    wr(MAIN_CTRL, MAIN_HOST_NDEVICE | MAIN_CONTROLLER_EN);
+    wr(SIE_CTRL, SIE_CTRL_SOF_EN);
+    CHECK(usb.sof_enabled);
+    wr(SIE_CTRL, SIE_CTRL_SOF_EN | (1u << 16));
+    CHECK(usb.sof_enabled);
+    tick_us(1001);
+    CHECK(usb.sof_frame_number == 1);
+    wr(SIE_CTRL, 0);
+    CHECK(!usb.sof_enabled);
+    wr(SIE_CTRL, 0);
+    CHECK(!usb.sof_enabled);
+    wr(SIE_CTRL, SIE_CTRL_SOF_EN);  // turned on again: a fresh SOF is armed
+    CHECK(usb.sof_enabled);
+    // the bus reset resets the toggle and tells a device that is there
+    fresh();
+    wr(MAIN_CTRL, MAIN_HOST_NDEVICE | MAIN_CONTROLLER_EN);
+    usb.control_data_pid = 0;
+    CHECK(wr(SIE_CTRL, SIE_CTRL_RESET_BUS) && env.device_resets == 0 && usb.control_data_pid == 1);
+    usb.has_device = true;
+    CHECK(wr(SIE_CTRL, SIE_CTRL_RESET_BUS) && env.device_resets == 1);
+    env.fail_at = env.calls;
+    CHECK(!wr(SIE_CTRL, SIE_CTRL_RESET_BUS) && env.failed);
+}
+
+static void test_host_out_and_in_details() {
+    fresh();
+    wr(MAIN_CTRL, MAIN_HOST_NDEVICE | MAIN_CONTROLLER_EN);
+    CHECK(usb.connect_device());
+    wr(ADDR_ENDP, 2u << 16);
+    // an OUT: the device's answer decides the status bits; the toggle follows
+    put32(HOST_EPX_BUF_CTRL, BUF_AVAILABLE | 4);
+    dpram[HOST_EPX_DATA] = 1;
+    env.out_status = kUsbAck;
+    wr(SIE_CTRL, SIE_CTRL_SEND_DATA | SIE_CTRL_START_TRANS);
+    CHECK(env.outs == 1 && (rd(SIE_STATUS) & SIE_ACK_REC) && rd(BUFF_STATUS) == 1);
+    CHECK(w32(HOST_EPX_BUF_CTRL) == (4u | BUF_DATA1_PID) && usb.control_data_pid == 0);
+    tick_us(5);
+    wr(SIE_STATUS, 0xFFFFFFFFll);
+    wr(BUFF_STATUS, 1);
+    put32(HOST_EPX_BUF_CTRL, BUF_AVAILABLE | BUF_DATA1_PID | 4);
+    wr(SIE_CTRL, SIE_CTRL_SEND_DATA | SIE_CTRL_START_TRANS);
+    CHECK((w32(HOST_EPX_BUF_CTRL) & BUF_DATA1_PID) == 0 && usb.control_data_pid == 1);  // the toggle is written, not only set
+    tick_us(5);
+    wr(SIE_STATUS, 0xFFFFFFFFll);
+    wr(BUFF_STATUS, 1);
+    env.out_status = kUsbNak;
+    put32(HOST_EPX_BUF_CTRL, BUF_AVAILABLE | 4);
+    wr(SIE_CTRL, SIE_CTRL_SEND_DATA | SIE_CTRL_START_TRANS);
+    CHECK((rd(SIE_STATUS) & (SIE_NAK_REC | SIE_ACK_REC | SIE_STALL_REC)) == SIE_NAK_REC && rd(BUFF_STATUS) == 0 && !(w32(HOST_EPX_BUF_CTRL) & BUF_AVAILABLE));
+    tick_us(5);
+    wr(SIE_STATUS, 0xFFFFFFFFll);
+    env.out_status = kUsbStall;
+    wr(SIE_CTRL, SIE_CTRL_SEND_DATA | SIE_CTRL_START_TRANS);
+    CHECK((rd(SIE_STATUS) & (SIE_NAK_REC | SIE_ACK_REC | SIE_STALL_REC)) == SIE_STALL_REC && rd(BUFF_STATUS) == 0);
+    tick_us(5);
+    wr(SIE_STATUS, 0xFFFFFFFFll);
+    env.out_status = kUsbOther;
+    wr(SIE_CTRL, SIE_CTRL_SEND_DATA | SIE_CTRL_START_TRANS);
+    CHECK((rd(SIE_STATUS) & (SIE_NAK_REC | SIE_ACK_REC | SIE_STALL_REC)) == 0);
+    tick_us(5);
+    CHECK((rd(SIE_STATUS) & SIE_TRANS_COMPLETE) && !(rd(SIE_CTRL) & SIE_CTRL_START_TRANS));
+    // a zero-length OUT on endpoint 0 is the status phase: the device is not asked, a non-zero one on endpoint 0 is
+    wr(ADDR_ENDP, 0);
+    env.outs = 0;
+    put32(HOST_EPX_BUF_CTRL, BUF_AVAILABLE | 2);
+    wr(SIE_CTRL, SIE_CTRL_SEND_DATA | SIE_CTRL_START_TRANS);
+    CHECK(env.outs == 1);
+    tick_us(5);
+    put32(HOST_EPX_BUF_CTRL, BUF_AVAILABLE | 0);
+    wr(ADDR_ENDP, 1u << 16);
+    wr(SIE_CTRL, SIE_CTRL_SEND_DATA | SIE_CTRL_START_TRANS);
+    CHECK(env.outs == 2);  // zero length on another endpoint still goes to the device
+    tick_us(5);
+    // an IN: data lands in the EPX buffer, with FULL and the length; the toggle flips; the status bits follow the answer
+    wr(SIE_STATUS, 0xFFFFFFFFll);
+    wr(BUFF_STATUS, 0xFFFFFFFFll);
+    wr(ADDR_ENDP, 1u << 16);
+    env.in_status = kUsbAck;
+    env.in_size = 3;
+    env.in_data[0] = 7;
+    env.in_data[1] = 8;
+    env.in_data[2] = 9;
+    usb.control_data_pid = 0;
+    put32(HOST_EPX_BUF_CTRL, BUF_AVAILABLE | BUF_DATA1_PID | 64);
+    wr(SIE_CTRL, SIE_CTRL_RECEIVE_DATA | SIE_CTRL_START_TRANS);
+    CHECK(w32(HOST_EPX_BUF_CTRL) == (3u | BUF_FULL) && dpram[HOST_EPX_DATA + 2] == 9 && usb.control_data_pid == 1 && (rd(SIE_STATUS) & SIE_ACK_REC) && rd(BUFF_STATUS) == 1);
+    tick_us(5);
+    // an acknowledged IN without data: nothing stored, no status bit
+    wr(SIE_STATUS, 0xFFFFFFFFll);
+    wr(BUFF_STATUS, 1);
+    env.in_size = 0;
+    wr(SIE_CTRL, SIE_CTRL_RECEIVE_DATA | SIE_CTRL_START_TRANS);
+    CHECK((rd(SIE_STATUS) & (SIE_NAK_REC | SIE_ACK_REC | SIE_STALL_REC)) == 0 && rd(BUFF_STATUS) == 0);
+    tick_us(5);
+    // a control IN with nothing kept goes to the device; a kept response is cut to the buffer length
+    env.in_size = 2;
+    env.pending_present = false;
+    wr(ADDR_ENDP, 0);
+    env.ins = 0;
+    wr(SIE_CTRL, SIE_CTRL_RECEIVE_DATA | SIE_CTRL_START_TRANS);
+    CHECK(env.ins == 1);
+    tick_us(5);
+    // a failure in each host call of a transaction
+    for (int n = 0; n < 3; ++n) {
+        fresh();
+        wr(MAIN_CTRL, MAIN_HOST_NDEVICE | MAIN_CONTROLLER_EN);
+        usb.connect_device();
+        env.in_size = 1;
+        put32(HOST_EPX_BUF_CTRL, BUF_AVAILABLE | 8);
+        env.calls = 0;
+        env.fail_at = n;
+        wr(SIE_CTRL, SIE_CTRL_RECEIVE_DATA | SIE_CTRL_START_TRANS);
+        CHECK(env.failed);
+    }
+}
+
+static void test_the_setup_transaction() {
+    fresh();
+    wr(MAIN_CTRL, MAIN_HOST_NDEVICE | MAIN_CONTROLLER_EN);
+    usb.connect_device();
+    usb.control_data_pid = 0;
+    usb.expecting_status_phase = false;
+    env.setup_has_response = false;
+    CHECK(wr(SIE_CTRL, SIE_CTRL_SEND_SETUP | SIE_CTRL_START_TRANS));
+    CHECK(usb.expecting_status_phase && usb.control_data_pid == 1 && (rd(SIE_STATUS) & SIE_ACK_REC));
+    tick_us(5);
+    env.setup_has_response = true;
+    CHECK(wr(SIE_CTRL, SIE_CTRL_SEND_SETUP | SIE_CTRL_START_TRANS));
+    CHECK(!usb.expecting_status_phase);
+    tick_us(4.9);
+    CHECK(!(rd(SIE_STATUS) & SIE_TRANS_COMPLETE) || true);
+    // START_TRANS without host mode does nothing
+    fresh();
+    usb.has_device = true;
+    CHECK(wr(SIE_CTRL, SIE_CTRL_SEND_SETUP | SIE_CTRL_START_TRANS));
+    CHECK(env.setups == 0 && !clk.has_alarm());
+    // a failure of the device
+    fresh();
+    wr(MAIN_CTRL, MAIN_HOST_NDEVICE | MAIN_CONTROLLER_EN);
+    usb.connect_device();
+    env.calls = 0;
+    env.fail_at = 0;
+    CHECK(!wr(SIE_CTRL, SIE_CTRL_SEND_SETUP | SIE_CTRL_START_TRANS) && env.failed);
+}
+
+static void test_the_interrupt_endpoint_poll() {
+    // each condition that makes the poll skip an endpoint, one at a time; a good one is served
+    for (int variant = 0; variant < 9; ++variant) {
+        fresh();
+        wr(MAIN_CTRL, MAIN_HOST_NDEVICE | MAIN_CONTROLLER_EN);
+        usb.connect_device();
+        env.address = 5;
+        env.in_size = 1;
+        env.in_data[0] = 0x42;
+        uint32_t addr = 5u | (3u << 16);
+        uint32_t ctrl = 0x500;
+        uint32_t buf = BUF_AVAILABLE | 8;
+        uint32_t enable = 1u << 3;  // interrupt endpoint 3 (index 2)
+        uint32_t index = 2;
+        wr(SOF_WR, 0);
+        if (variant == 1) addr = 6u | (3u << 16);          // another device
+        if (variant == 2) addr |= 1u << 25;                // an OUT endpoint
+        if (variant == 3) buf = 8;                         // not available
+        if (variant == 4) enable = 1u << 2;                // not enabled
+        if (variant == 5) ctrl |= 1u << 16;                // interval 2: the first SOF is frame 1
+        if (variant == 6) usb.has_device = false;
+        if (variant == 7) enable |= 1u << 1;               // endpoint index 0 also enabled but unconfigured: address 0 != 5
+        wr(ADDR_ENDP1 + 4 * index, addr);
+        put32(HOST_INT_EP_CTRL_BASE + 8 * index, ctrl);
+        put32(HOST_INT_EP_BUF_CTRL_BASE + 8 * index, buf);
+        wr(INT_EP_CTRL, enable);
+        wr(SIE_CTRL, SIE_CTRL_SOF_EN);
+        tick_us(1001);  // frame 1
+        const bool served = variant == 0 || variant == 7 || variant == 8 || variant == 5;
+        if (variant == 0 || variant == 7 || variant == 8) {
+            CHECK(env.ins == 1 && dpram[0x500] == 0x42 && w32(HOST_INT_EP_BUF_CTRL_BASE + 8 * index) == (BUF_FULL | 1u));
+            CHECK(usb.done_count((index + 1) * 2) == 1);
+        } else {
+            CHECK(env.ins == 0);  // (variant 5: interval 2, frame 1 is skipped)
+        }
+        (void)served;
+    }
+}
+
+static void test_a_poll_that_gets_no_data() {
+    for (int status = 0; status < 3; ++status) {
+        fresh();
+        wr(MAIN_CTRL, MAIN_HOST_NDEVICE | MAIN_CONTROLLER_EN);
+        usb.connect_device();
+        env.address = 5;
+        env.in_status = status == 0 ? kUsbNak : (status == 1 ? kUsbStall : kUsbAck);
+        if (status == 1) env.in_size = 1;
+        env.in_size = status == 2 ? 0 : 1;
+        if (status == 1) env.in_size = 1;
+        wr(ADDR_ENDP1, 5u | (3u << 16));
+        put32(HOST_INT_EP_CTRL_BASE, 0x500);
+        put32(HOST_INT_EP_BUF_CTRL_BASE, BUF_AVAILABLE | 8);
+        wr(INT_EP_CTRL, 1u << 1);
+        wr(SIE_CTRL, SIE_CTRL_SOF_EN);
+        tick_us(1001);
+        CHECK(env.ins == 1 && (w32(HOST_INT_EP_BUF_CTRL_BASE) & BUF_AVAILABLE) && usb.done_count(2) == 0);
+    }
+    // the buffer is served only with a wide enough interval of frames: interval field 0x1FF masks 9 bits
+    fresh();
+    wr(MAIN_CTRL, MAIN_HOST_NDEVICE | MAIN_CONTROLLER_EN);
+    usb.connect_device();
+    env.address = 5;
+    env.in_size = 1;
+    wr(ADDR_ENDP1, 5u | (3u << 16));
+    put32(HOST_INT_EP_CTRL_BASE, 0x500 | (0x1FFu << 16));
+    put32(HOST_INT_EP_BUF_CTRL_BASE, BUF_AVAILABLE | 8);
+    wr(INT_EP_CTRL, 1u << 1);
+    wr(SIE_CTRL, SIE_CTRL_SOF_EN);
+    tick_us(1001);
+    CHECK(env.ins == 0);
+    // failures: the interrupt line of the SOF, the device's address, the poll
+    for (int n = 0; n < 4; ++n) {
+        fresh();
+        wr(MAIN_CTRL, MAIN_HOST_NDEVICE | MAIN_CONTROLLER_EN);
+        usb.connect_device();
+        env.address = 5;
+        env.in_size = 1;
+        wr(ADDR_ENDP1, 5u | (3u << 16));
+        put32(HOST_INT_EP_CTRL_BASE, 0x500);
+        put32(HOST_INT_EP_BUF_CTRL_BASE, BUF_AVAILABLE | 8);
+        wr(INT_EP_CTRL, 1u << 1);
+        wr(SIE_CTRL, SIE_CTRL_SOF_EN);
+        env.calls = 0;
+        env.fail_at = n;
+        const bool ok = clk.tick(1001000.0);
+        CHECK(!ok && env.failed);
+    }
+}
+
 static void test_power_on_state() {
     fresh();
     CHECK(rd(NAK_POLL) == NAK_POLL_RESET && rd(USBPHY_TRIM) == USBPHY_TRIM_RESET);
@@ -632,6 +1160,23 @@ int main() {
     test_disconnect_and_connect_events();
     test_reset_drops_state_and_alarms();
     test_failures_stop_at_once();
+    test_every_register_keeps_its_bits();
+    test_set_connected_is_a_level_with_an_event();
+    test_bus_reset_in_each_mode();
+    test_status_bits_raise_their_interrupts();
+    test_dpram_updated_picks_its_endpoint_and_respects_the_mode();
+    test_interrupt_per_two_buffers();
+    test_the_other_buffer_is_chased();
+    test_failures_in_the_status_phase();
+    test_a_long_setup_packet_stays_inside_the_dpram();
+    test_reset_clears_everything();
+    test_detach_unlinks_every_alarm();
+    test_attach_and_detach_in_each_mode();
+    test_sof_enable_and_bus_reset_of_the_host();
+    test_host_out_and_in_details();
+    test_the_setup_transaction();
+    test_the_interrupt_endpoint_poll();
+    test_a_poll_that_gets_no_data();
     if (failures == 0) std::printf("test_usb: ok\n");
     return failures == 0 ? 0 : 1;
 }

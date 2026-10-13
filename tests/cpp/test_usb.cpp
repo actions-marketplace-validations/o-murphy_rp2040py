@@ -1070,7 +1070,9 @@ static void test_ep0_uses_the_sie_ctrl_bits() {
     arm(0x80);
     CHECK(env.write_n[0] == 1 && env.writes[0][0].size == 3);
     tick_us(11);
-    CHECK(rd(BUFF_STATUS) == 1 && (rd(SIE_STATUS) & SIE_TRANS_COMPLETE));
+    CHECK(rd(BUFF_STATUS) == 1 && (rd(SIE_STATUS) & SIE_TRANS_COMPLETE) && env.written == 0);
+    tick_us(10);
+    CHECK(env.written == 1 && env.last_write_endpoint == 0 && env.last_write_size == 3);  // endpoint 0's own reaction alarm
 }
 
 static void test_setup_packet() {

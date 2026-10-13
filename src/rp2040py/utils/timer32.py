@@ -36,6 +36,13 @@ class Timer32:
 
     def _rebased(self, delta: int) -> None:
         self._base_ticks -= delta
+        # Folded into the base value, so that `_base_ticks` stays at the clock's time instead of drifting away from it by `delta` every move (it would overflow in C++)
+        top_modulo = self._top_value * 2 if self._timer_mode == TimerMode.ZIGZAG else self._top_value + 1
+        if (
+            top_modulo and self._base_freq and self._prescaler_value and self._enabled
+        ):  # (a stopped counter has no time in it to fold)
+            self._base_value = self.raw_counter % top_modulo
+        self._base_ticks = self.clock.ticks
 
     def reset(self) -> None:
         self._base_ticks = self.clock.ticks

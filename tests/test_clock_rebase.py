@@ -14,6 +14,7 @@ from rp2040py.clock.mock_clock import MockClock
 from rp2040py.clock.simulation_clock import SimulationClock
 
 TIMERAWL = 0x40054028
+TIMERRAWH = 0x40054024
 ALARM0 = 0x40054010
 INTR = 0x40054034
 ROSC_COUNT = 0x40060020
@@ -186,3 +187,17 @@ def test_a_listener_that_is_a_bound_method_does_not_keep_its_holder_alive(clock)
     clock.rebase(0)  # nothing to do, and a dead listener is simply dropped
     clock.tick_ticks(REBASE_AT)
     assert clock.rebased_ticks > 0
+
+
+def test_a_block_that_holds_a_time_for_years_never_runs_away_from_the_clock(rp2040_factory):
+    """The failure that remained after the first rebase fix (found on the MicroPython `extmod` sequence, ~3 minutes in): each move subtracted its `delta` from a block's stored epoch and never
+    refreshed it, so after ~32 moves (9 simulated years) the epoch passed the int64 range and the TIMER read a negative time. The blocks fold their count at each move instead."""
+    chip = rp2040_factory()
+    start_tick(chip)
+    expected = chip.read_uint32(TIMERAWL)
+    for i in range(300):  # 100 simulated years
+        step = REBASE_AT // 3 + i * 12345
+        chip.clock.tick_ticks(step)
+        expected += step / 16000.0
+        raw = (chip.read_uint32(TIMERRAWH) << 32) | chip.read_uint32(TIMERAWL)
+        assert abs(raw - expected) < 50, (i, raw, expected)

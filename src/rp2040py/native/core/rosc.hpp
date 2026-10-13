@@ -244,7 +244,11 @@ public:
     WindowHandler window_handler() noexcept { return BlockWindow<RoscBlock>::handler(this); }
 
 private:
-    static void on_rebase(void* ctx, int64_t delta) noexcept { static_cast<RoscBlock*>(ctx)->count_epoch -= delta; }
+    static void on_rebase(void* ctx, int64_t delta) noexcept {
+        auto* self = static_cast<RoscBlock*>(ctx);
+        self->count_epoch -= delta;
+        self->rebase_count();  // folded into COUNT: the epoch stays at the clock's time instead of drifting away from it by `delta` every move (it would overflow)
+    }
 
     // 2.17.3's ratios of the ranges to LOW (0 for a value that is not a range); 0xAA0, the reset value, is LOW.
     static double range_ratio(uint32_t freq_range) noexcept {

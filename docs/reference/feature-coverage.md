@@ -182,7 +182,7 @@ Introduction (1), electrical and mechanical (5): n/a.
 | Suite | What it checks | Where | State |
 |---|---|---|---|
 | MicroPython `tests/` against the emulated board (CI: *MicroPython official tests*, four parallel report-only groups; `tests/micropython_official/run_suite.sh`) | peripherals (`ports/rp2`, `extmod/machine_*`; gating) and the interpreter (`micropython/` gating; `float`, `basics`, `inlineasm/thumb` report-only) | 0098, "MicroPython's own test suite" and "The interpreter tests" | interpreter: 0 failures; peripherals: the DMA copy time and the UART timing tests (UART now passes), `machine_spi_rate` (not diagnosed; probably the missing transmitter time), and core 1 (`_thread` files are skipped) |
-| MicroPython `tests/` measured, not in CI | `extmod` beyond `machine_*` (139 pass / 0 fail / 50 skip locally; one unexplained pty-side HANG per run, 0098) | 0098 | Open: the HANG, then add as a group |
+| MicroPython `tests/` (CI, gating) | `extmod` beyond `machine_*` (140 pass / 0 fail / 50 skip) | 0098 | Done; the 50 skips are modules the Pico build does not have |
 | MicroPython `tests/` not yet run | `import`, `misc`, `io`, `stress`, `cmdline`, `thread` (needs core 1) | - | Missing: scan locally, then add as a group (Go-ahead) |
 | pico-sdk / pico-examples | firmware boots and prints (`hello_usb`), eight SDK versions | CI: *Test Pi Pico SDK* | passing |
 | CircuitPython, Kaluma | boot and run a script, several releases | CI | passing |

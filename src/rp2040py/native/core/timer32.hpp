@@ -173,7 +173,14 @@ public:
     void attach(Timer32PeriodicAlarm* alarm) noexcept;
 
 private:
-    static void on_rebase(void* ctx, int64_t delta) noexcept { static_cast<Timer32*>(ctx)->base_ticks_ -= delta; }
+    static void on_rebase(void* ctx, int64_t delta) noexcept {
+        auto* self = static_cast<Timer32*>(ctx);
+        self->base_ticks_ -= delta;
+        // Folded into the base value, so that `base_ticks_` stays at the clock's time instead of drifting away from it by `delta` every move (it would overflow)
+        const int64_t top_modulo = self->mode_ == TimerMode::kZigzag ? self->top_value_ * 2 : self->top_value_ + 1;
+        if (top_modulo != 0 && self->base_freq_ != 0.0 && self->prescaler_ != 0.0 && self->enabled_) self->base_value_ = timer32_detail::floor_mod(self->raw_counter(), top_modulo);
+        self->base_ticks_ = self->clock_->ticks();
+    }
 
     void updated() noexcept;
 

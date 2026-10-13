@@ -257,7 +257,10 @@ public:
     XipHooks hooks() noexcept { return XipHooks{&XipBlock::hook_access, &XipBlock::hook_write_access, &XipBlock::hook_sram_read, &XipBlock::hook_sram_write, this}; }
 
 private:
-    static void on_rebase(void* ctx, int64_t delta) noexcept { static_cast<XipBlock*>(ctx)->flush_done_ticks -= delta; }
+    static void on_rebase(void* ctx, int64_t delta) noexcept {
+        auto* self = static_cast<XipBlock*>(ctx);
+        self->flush_done_ticks = self->flush_done_ticks > delta ? self->flush_done_ticks - delta : 0;  // a deadline long past is just "done": it must not drift negative without bound
+    }
     static bool on_stream_alarm(void* ctx) noexcept {
         XipBlock* self = static_cast<XipBlock*>(ctx);
         self->on_stream_word();

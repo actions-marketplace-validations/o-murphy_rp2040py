@@ -171,6 +171,7 @@ public:
     // (the simulation clock itself is never rewound). Returns false if an interrupt-line call failed.
     bool reset() noexcept {
         epoch_ticks_ = clock_->ticks();
+        base_micros_ = 0.0;
         latched_high_ = 0;
         int_raw_ = int_enable_ = int_force_ = 0;
         paused_ = false;
@@ -240,7 +241,7 @@ private:
     double nanos_for(double counts) const noexcept { return counts * 1000.0 / scale(); }
     // This block's own count - one per tick - since its epoch, not the simulation's clock. Every read and every
     // alarm arming goes through here, so the two cannot disagree about what "now" is. Frozen while PAUSE is set or the tick is stopped.
-    double micros() const noexcept { return frozen() ? frozen_micros_ : static_cast<double>(clock_->ticks() - epoch_ticks_) / (1000.0 * static_cast<double>(kTicksPerNano)) * scale(); }
+    double micros() const noexcept { return frozen() ? frozen_micros_ : base_micros_ + static_cast<double>(clock_->ticks() - epoch_ticks_) / (1000.0 * static_cast<double>(kTicksPerNano)) * scale(); }
     static int64_t high_word(double time) noexcept { return static_cast<int64_t>(time / 4294967296.0); }  // time >= 0
     // Python's `int(value) & 0xFFFFFFFF` for any finite double - truncate toward zero, then the low 32 bits of the two's-complement integer - read from the bits of the double, so that
     // a count beyond int64 (a TIMEHW write can put the 64-bit time anywhere) has no undefined behaviour and no libm is needed.
@@ -279,7 +280,8 @@ private:
                 for (int i = 0; i < kAlarms; ++i) clock_->cancel(&alarms_[i]);
             }
         } else {
-            epoch_ticks_ = clock_->ticks() - nanos_to_ticks(nanos_for(now_micros));
+            base_micros_ = now_micros;
+            epoch_ticks_ = clock_->ticks();
             reschedule_armed_alarms();
         }
     }
@@ -290,7 +292,8 @@ private:
             frozen_micros_ = micros_value;
             return;
         }
-        epoch_ticks_ = clock_->ticks() - nanos_to_ticks(nanos_for(micros_value));
+        base_micros_ = micros_value;
+        epoch_ticks_ = clock_->ticks();
         reschedule_armed_alarms();
     }
 
@@ -324,10 +327,16 @@ private:
 
     Clock* clock_ = nullptr;
     TimerHost host_;
-    static void on_rebase(void* ctx, int64_t delta) noexcept { static_cast<TimerBlock*>(ctx)->epoch_ticks_ -= delta; }
+    static void on_rebase(void* ctx, int64_t delta) noexcept {
+        auto* self = static_cast<TimerBlock*>(ctx);
+        self->epoch_ticks_ -= delta;  // (the epoch is always near the clock's time, so this cannot run away)
+        if (!self->frozen()) self->base_micros_ = self->micros();
+        self->epoch_ticks_ = self->clock_->ticks();
+    }
 
     RebaseListener rebase_listener_;
-    int64_t epoch_ticks_ = 0;  // the clock's time, in ticks, at which this block's count was zero
+    int64_t epoch_ticks_ = 0;  // the clock's time, in ticks, at which this block's count was `base_micros_`
+    double base_micros_ = 0.0;  // the count at the epoch (folded into whenever the clock's origin moves, so the epoch never drifts away from the clock's time)
     int64_t latched_high_ = 0;
     uint32_t int_raw_ = 0, int_enable_ = 0, int_force_ = 0;
     bool paused_ = false;

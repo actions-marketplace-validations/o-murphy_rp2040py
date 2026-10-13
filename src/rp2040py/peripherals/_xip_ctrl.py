@@ -80,7 +80,9 @@ class RPXIPCtrl(BasePeripheral):
         self.reset()
 
     def _rebased(self, delta: int) -> None:
-        self.flush_done_ticks -= delta
+        self.flush_done_ticks = max(
+            self.flush_done_ticks - delta, 0
+        )  # a deadline long past is just "done": it must not drift negative without bound (it would overflow in C++)
 
     def reset(self) -> None:
         """The XIP domain, which is a `PSM.WDSEL` bit rather than a `RESETS` one - there is no `RESETS_RESET_XIP` (0089 Phase 5): the registers back to power-on, the stream stopped and its FIFO

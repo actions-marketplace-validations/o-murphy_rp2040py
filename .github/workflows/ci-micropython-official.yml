@@ -37,6 +37,9 @@ jobs:
           - name: micropython/ (interpreter internals)
             globs: "micropython/*.py"
             strict: true
+          - name: extmod (modules beyond machine)
+            globs: "extmod/[a-l]*.py extmod/[n-z]*.py"
+            strict: true
           - name: CPU - float, inline assembly
             globs: "float/*.py inlineasm/thumb/*.py"
           - name: CPU - basics a-l

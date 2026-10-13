@@ -114,6 +114,7 @@ class RPROSC(BasePeripheral):
 
     def _rebased(self, delta: int) -> None:
         self._count_epoch -= delta
+        self._rebase_count()  # folded into COUNT: the epoch stays at the clock's time instead of drifting away from it by `delta` every move (it would overflow in C++)
 
     def _load_power_on_state(self) -> None:
         self._ctrl = CTRL_RESET

@@ -1,0 +1,46 @@
+# CLOCKS and PLL: audit against the datasheet, then the C++ port (working note)
+
+Status: audit read, port not started (2026-10-13). Recipe: [core-block-recipe.md](../reference/core-block-recipe.md), section A first. Folded into record 0098 (a CLOCKS/PLL section, as for USB) when done.
+
+Why this is in the C++ plan at all: record 0096's rule (2026-10-06) is that the core owns every behaviour firmware can observe with no host attached, and it lists the clock tree among the debt (item 2): "a core that is to run alone has to own `clk_sys`/`clk_peri` itself - the DMA already asks the host for `clk_sys` through a callback, which a headless host cannot answer". The 2026-10-05 entry that left the tree in Python "on purpose" predates the rule.
+
+Sources read: RP2040 datasheet 2.15 (clocks: 2.15.1-2.15.6, tables 205-252) and 2.18 (PLL, tables 274-278), pico-sdk `hardware_clocks`/`hardware_pll` (`clock_configure`, `pll_init`, `frequency_count_khz`), `python scripts/audit/datasheet_conformance.py rp2040.txt CLOCKS` / `PLL` (48 + 4 registers: only `ENABLED0/1` missing; the PLL notes are the usual placeholder-reset false alarms).
+
+## What the model is
+
+`peripherals/clocks.py` (`RPClocks`: the registers, the frequency of each generator from its mux and divider, the frequency counter FC0) and `peripherals/pll.py` (`RPPLL`: `f = xosc / REFDIV * FBDIV / (POSTDIV1 * POSTDIV2)`, BYPASS gives `xosc / REFDIV`). `update_clocks()` (in `clocks.py`, called by both chip classes through `RP2040.update_clocks()`) re-derives `clk_sys` and `clk_peri` after every relevant write and retunes the consumers: `ppb.clk_sys_changed` (SysTick), the PWM channel timers, the registered `add_clock_listener` callbacks (PIO dividers and the like), every UART (`clk_peri_changed`), `watchdog.clk_ref_changed` (the tick that drives the TIMER), `rtc.clk_rtc_changed`. `rp2040.clk_sys` / `clk_peri` / `xosc_freq` (12 MHz constant) / `rosc_freq` (the ROSC block pushes it) are plain attributes of the chip. A frequency of 0 (a stopped generator, an unmodelled source) keeps the last value and notifies nobody.
+
+## Findings (datasheet / SDK vs. the reference), by decision
+
+Fix in the reference first (each gets a test citing its source):
+1. **The PLL's power bits do nothing.** `PWR` resets to `0x2D` (PD, DSMPD, POSTDIVPD, VCOPD all 1: table 276, "To save power set high when PLL output not required"); the reference computes a frequency whatever they say. A PLL with PD or VCOPD set has no VCO, one with POSTDIVPD set has no output unless BYPASS. The consequence in the model: `CLK_SYS_CTRL.AUXSRC = PLL_SYS` before `pll_init` already reports 125 MHz of PLL.
+2. **`CS.LOCK` is always 1.** It is a status ("PLL is locked", RO reset 0): 0 while the VCO is powered down, 1 once PD and VCOPD are clear. `pll_init` clears them and then polls LOCK, so the polling sequence stays valid; the existing "do not disrupt a PLL that is already correctly configured" test (`pll.c`) reads LOCK as well.
+3. **`ENABLED0` / `ENABLED1` (0xB0, 0xB4) are absent** (RO, reset 0, one bit per destination clock: tables 251, 252). Reading them warns.
+4. Nothing else in the register layer differs: the masks and resets of every CTRL / DIV / SELECTED register, the AUXSRC encodings (REF: PLL_USB 0, GPIN0 1, GPIN1 2; SYS and PERI as in 0098), the INT-only dividers of clk_ref / clk_usb / clk_adc, `SELECTED` one-hot, `FC0_*` were read in 0098.
+
+Document, do not implement (each needs its own go-ahead):
+- the **resus** (2.15.5): needs a stopped-clock model; `CLK_SYS_RESUS_CTRL` is stored, `RESUS_STATUS` reads 0, `INTR` reads 0 (0098 backlog).
+- the **time the generators take**: the glitchless mux "does not switch instantaneously" (SELECTED "may briefly show all-0s"), an aux clock needs 2 cycles of its source to stop and 2 to restart; the model switches at once and `SELECTED` follows `CTRL.SRC` immediately.
+- **WAKE_EN / SLEEP_EN / ENABLED** as real clock gating (stored only), the fractional divider's jitter (the average frequency is used), duty-cycle correction.
+- PLL constraints outside their range (reference 5-800 MHz, FBDIV 16-320, VCO 750-1600 MHz): the datasheet gives no behaviour for them, so none is invented (LOCK follows the power bits only).
+
+Not independently sourced: BYPASS passing `xosc / REFDIV` rather than the undivided reference (the port of rp2040js 1.4.0 did it that way; the datasheet says only "the reference clock"); the 12 MHz XOSC and 6.5 MHz ROSC defaults.
+
+## What a stand-alone C++ tree needs (design, nothing built)
+
+- A `ClocksBlock` and a `PllBlock` (or one header with both - to be decided), the registers and the frequency derivation moved from Python, with the sources (`xosc`, `rosc`, the two PLLs, the GPIN stubs at 0) as inputs the tree reads from the other C++ blocks instead of the chip's attributes.
+- The retune: today a Python function that calls into six blocks. In C++ the tree needs a `ClockSink` list (function pointers + ctx), like `RebaseListener`: SysTick, the PWM counters, the UARTs, the watchdog tick, the RTC, the PIO dividers, the DMA's pacing, the SPI/I2C/ADC rates, and the host's own listeners (`add_clock_listener`). The shells register the Python callbacks in the same list.
+- `clk_sys` / `clk_peri` / `clk_ref` / `clk_rtc` / `clk_usb` / `clk_adc` as values the tree owns and every block reads through it - which is what makes the DMA's `clk_sys` host callback and the XIP's disappear.
+
+## Open decisions (for the maintainer)
+
+1. **One header or two** (`core/clocks.hpp` with `ClocksBlock` + `PllBlock`, or `clocks.hpp` + `pll.hpp`)? They are two peripherals at two addresses but the tree is one thing.
+2. **Should clk_sys retune the CPU's instruction time base?** Today it stays 125 MHz (`CYCLE_NANOS`, record 0096's "same as upstream" note): firmware at 200 MHz executes its instructions in 8 ns of simulated time, not 5. The integer clock's `advance_cycles(cycles, ticks_per_cycle)` can carry a fractional period already. Changing it makes simulated time follow the configured frequency (a behaviour change, and every timing in tests and CI would move).
+3. **XOSC as an input**: its 12 MHz is a constant; the XOSC block has `CTRL.ENABLE` and `STATUS.STABLE`. Should a disabled XOSC give 0 (so a PLL with no crystal does not lock)? That is the datasheet's behaviour, but firmware that never enables the XOSC (the bare `RP2040()` chip, many tests) would see 0 Hz unless the "0 keeps the last value" rule is kept.
+
+## Plan
+
+1. This note + the tracker row; the PLL / ENABLED fixes in the reference with `tests/test_clocks_datasheet.py`, in their own commit.
+2. `peripherals/clocks.py` -> `_clocks.py` + facade (and `pll.py` -> `_pll.py`); oracle `tests/utils/clocks_diff.py` with source-text mutants, covering the retune order as an ordered log of the sinks.
+3. `core/clocks.hpp` (+ `pll`) + `tests/cpp/test_clocks.cpp` + `scripts/audit/cpp_mutants.py clocks`; shells; the chip's `clk_*` attributes become views of the tree.
+4. Live boots (MicroPython `machine.freq()`, CircuitPython, Kaluma, the pico-sdk examples of the oldest SDK), docs, register coverage, tracker.

@@ -9,18 +9,19 @@ assert SPEC is not None and SPEC.loader is not None
 cpp_mutants = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(cpp_mutants)
 
-SOURCE = """\
-constexpr int kBefore = 1 | 2;
-class Block {
-public:
-    bool ready(int a, int b) {
-        if (a == b && a < 4) return true;  // a comment with == in it
-        count_ = a + b;
-        return false;
-    }
-    int count_ = 0;
-};
-""".split("\n")
+SOURCE = [
+    "constexpr int kBefore = 1 | 2;",
+    "class Block {",
+    "public:",
+    "    bool ready(int a, int b) {",
+    "        if (a == b && a < 4) return true;  // a comment with == in it",
+    "        count_ = a + b;",
+    "        return false;",
+    "    }",
+    "    int count_ = 0;",
+    "};",
+    "",
+]
 
 
 def test_only_lines_from_the_first_class_on_are_mutated():

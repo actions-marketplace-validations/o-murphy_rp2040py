@@ -176,7 +176,11 @@ static void fresh() {
     env.calls = 0;
 }
 static uint32_t rd(uint32_t offset) { return usb.read(offset); }
-static bool wr(uint32_t offset, int64_t value, uint32_t atomic = kAtomicNormal) { return usb.write_atomic(offset, value, atomic); }
+static bool wr(uint32_t offset, int64_t value, uint32_t atomic = kAtomicNormal) {
+    const bool ok = usb.write_atomic(offset, value, atomic);
+    CHECK(ok || env.failed);  // a write only reports failure when a host function failed
+    return ok;
+}
 static uint32_t w32(uint32_t offset) {
     return dpram[offset] | (dpram[offset + 1] << 8) | (dpram[offset + 2] << 16) | (static_cast<uint32_t>(dpram[offset + 3]) << 24);
 }
@@ -186,6 +190,23 @@ static void put32(uint32_t offset, uint32_t value) {
 static void arm(uint32_t offset) { CHECK(usb.dpram_updated(offset)); }  // the firmware's write to a buffer-control word has landed
 static const uint32_t EP1_IN_BUF = 0x88, EP1_OUT_BUF = 0x8C;
 static void tick_us(double us) { CHECK(clk.tick(us * 1000.0)); }
+
+static void test_a_constructed_block_is_at_power_on_without_a_reset() {
+    static UsbBlock block;  // what the shell makes: init() only, no reset()
+    static uint8_t memory[kDpramSize];
+    UsbHost host;
+    host.irq = h_irq;
+    host.warn = h_warn;
+    host.failed = &env.failed;
+    block.init(&clk, memory, host);
+    CHECK(!block.connected && !block.connect_event && !block.host_connect_event && !block.host_mode && !block.sof_enabled && !block.has_device && !block.expecting_status_phase);
+    CHECK(block.control_data_pid == 1 && block.nak_poll == NAK_POLL_RESET && block.usbphy_trim == USBPHY_TRIM_RESET && block.addr_endp == 0 && block.main_ctrl == 0 && block.sie_ctrl == 0);
+    CHECK(block.int_raw == 0 && block.int_enable == 0 && block.int_force == 0 && block.sie_status == 0 && block.ep_abort == 0 && block.ep_abort_done == 0 && block.ep_stall_arm == 0);
+    CHECK(block.read_delay_microseconds == 10 && block.write_delay_microseconds == 10 && block.host_transaction_delay_microseconds == 5);
+    CHECK(block.buff_status() == 0 && block.cpu_should_handle() == 0 && !block.has_scheduled_alarms());
+    for (uint32_t i = 0; i < 32; ++i) CHECK(block.buf_select[i] == 0 && block.two_buffer_count[i] == 0 && block.done_count(i) == 0);
+    block.detach();
+}
 
 static void test_power_on_state() {
     fresh();
@@ -586,6 +607,7 @@ static void test_failures_stop_at_once() {
 }
 
 int main() {
+    test_a_constructed_block_is_at_power_on_without_a_reset();
     test_power_on_state();
     test_masks();
     test_interrupt_registers_and_aliases();

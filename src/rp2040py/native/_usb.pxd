@@ -116,6 +116,7 @@ cdef extern from "usb.hpp" namespace "rp2040core":
         WindowHandler window_handler() noexcept
 
 cdef class RPUSBController:
+    cdef dict __dict__  # tests and boards replace methods (`dpram_updated`) with instance attributes, as on the pure-Python class
     cdef UsbBlock _block
     cdef public object rp2040
     cdef public object clock

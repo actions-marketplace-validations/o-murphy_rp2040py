@@ -69,8 +69,9 @@ a hole in the generator - widen it.
 ## 4. C++ checks and mutation testing
 
 `tests/cpp/test_X.cpp`: directed tests of every behaviour, with a recording host (and failure injection per host function).
-Then a textual mutation pass over the header (swap, drop, off-by-one every line of logic, compile with `-fsanitize=bounds`):
-every mutant killed or argued equivalent in the record.
+Then the textual mutation pass over the header, `python scripts/audit/cpp_mutants.py X` (swap, drop, off-by-one every line of logic; built with address + undefined sanitizers and `-fno-sanitize-recover`, so an
+out-of-bounds index a mutant introduces is a failure): every survivor is a gap in the checks to close, or an *equivalent* change recorded with its reason in `scripts/audit/cpp_mutants_equivalents.json`
+(the script exits 1 on an unlisted survivor and on a stale entry). Run it when the header or its checks change - hundreds of compiles, so not per push.
 
 ## 5. The shell (`native/_X.pxd/.pyx/.pyi`)
 

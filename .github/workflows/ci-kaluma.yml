@@ -32,6 +32,7 @@ jobs:
         with:
           python-version: "3.10"
           github-token: ${{ github.token }}
+          enable-cache: true
 
       - name: Install dependencies
         run: uv sync
@@ -76,6 +77,7 @@ jobs:
         with:
           python-version: "3.10"
           github-token: ${{ github.token }}
+          enable-cache: true
 
       - name: Install dependencies
         run: uv sync
@@ -90,6 +92,7 @@ jobs:
         with:
           python-version: ${{ matrix.python_runtime }}
           github-token: ${{ github.token }}
+          enable-cache: true
 
       # Downloads (and caches) this version's UF2 outside the timed test steps below, so a slow
       # kaluma-project/kaluma GitHub-release fetch doesn't get counted as (or blow the budget of)

@@ -116,7 +116,7 @@ and `reference/` for those). The structure itself is decided in
 - [x] [0047] CYW43 pure-Python hot path + `GPIOPin`/`RPPIO` Cython ports | ~2.6x to `scan()`; closes [0031]'s last gap
 - [x] [0050] CircuitPython 10.x boot stall root cause + fix | `PADS_QSPI` reset values - `GPIO_QSPI_SS` needs its pull-up
 - [x] [0054] CYW43 `disconnect()` root cause + fix | closes the only correctness bug among [0048]'s gaps
-- [x] [0052] XIP_CTRL: implement the registers, not the cache | no cache modelled on purpose
+- [x] [0052] XIP_CTRL: implement the registers, not the cache | no cache modelled on purpose - superseded by the XIP_CTRL port of [0098]
 - [x] [0051] BOOTSEL button as an `ExternalDevice` | on `GPIO_QSPI_SS`, active-low, released via `release_input()`
 - [x] [0046] `epd2in9g` virtual e-paper promoted to `ExternalDevice` | ported off a stale branch, no Pillow in `src/`
 - [x] [0040] `native/_simulator.pyx`: `libc.math.INFINITY` for `float("inf")` | kept; the `cpython.time` half was reverted (limited-API floor)

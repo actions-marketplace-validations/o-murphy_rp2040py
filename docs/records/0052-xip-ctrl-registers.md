@@ -1,6 +1,6 @@
 # 0052. XIP_CTRL: implement the registers, not the cache
 
-- Status: Implemented (2026-08-16)
+- Status: Implemented (2026-08-16); **the "no cache" decision is superseded** (2026-10-12) by the XIP_CTRL port of [0098](0098-datasheet-conformance-audit.md) and [0096](0096-cpp-mcu-core.md), which models the cache (as tags), the aliases, the cache-as-SRAM and the stream
 - Conceived: 2026-08-16
 - Related: 0050 (found this block unimplemented while root-causing the CircuitPython 10.x stall,
   and established that an all-ones read of a status register is an active hazard, not a gap)
@@ -48,3 +48,7 @@ trap rather than a live bug, on the same reasoning that kept 0050's `VREG_AND_CH
 zeroed counters, the all-ones-avoidance for unknown offsets, and that writes past the block do not
 fall through to the "undefined address" path. `pre-commit run --all-files` clean; CircuitPython
 10.2.1 and MicroPython both still boot.
+
+## Superseded (2026-10-12)
+
+The decision above - registers with correct values, no cache - held while nothing needed more. The XIP_CTRL port (0098, "XIP_CTRL and the XIP subsystem") reads datasheet 2.6.3 and models what a program can observe: the performance counters (`flash_cache_perfctr`), the aliases, the cache as SRAM, the stream and its DREQ. The reasoning that kept the stub honest still stands for what is *not* modelled (no bus fault is raised; the data always comes from the flash image). The old stub's `STAT` bit positions were wrong and are fixed there.

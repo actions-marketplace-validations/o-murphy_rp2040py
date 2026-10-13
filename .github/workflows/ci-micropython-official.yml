@@ -34,6 +34,9 @@ jobs:
           - name: peripherals (ports/rp2, machine)
             globs: "ports/rp2/*.py extmod/machine_*.py"
             strict: true
+          - name: micropython/ (interpreter internals)
+            globs: "micropython/*.py"
+            strict: true
           - name: CPU - float, inline assembly
             globs: "float/*.py inlineasm/thumb/*.py"
           - name: CPU - basics a-l

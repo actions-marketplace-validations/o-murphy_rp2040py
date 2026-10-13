@@ -679,7 +679,8 @@ static void test_the_interrupt_endpoint_poll() {
         tick_us(1001);  // frame 1
         const bool served = variant == 0 || variant == 7 || variant == 8 || variant == 5;
         if (variant == 0 || variant == 7 || variant == 8) {
-            CHECK(env.ins == 1 && dpram[0x500] == 0x42 && w32(HOST_INT_EP_BUF_CTRL_BASE + 8 * index) == (BUF_FULL | 1u));
+            CHECK(env.last_in_address == 0x83u);
+        CHECK(env.ins == 1 && dpram[0x500] == 0x42 && w32(HOST_INT_EP_BUF_CTRL_BASE + 8 * index) == (BUF_FULL | 1u));
             CHECK(usb.done_count((index + 1) * 2) == 1);
         } else {
             CHECK(env.ins == 0);  // (variant 5: interval 2, frame 1 is skipped)
@@ -836,7 +837,41 @@ static void test_the_remaining_corners() {
     usb.has_device = false;
     env.calls = 0;
     env.fail_at = 0;
-    CHECK(!wr(SIE_CTRL, SIE_CTRL_RECEIVE_DATA | SIE_CTRL_START_TRANS) && env.failed);
+    const int ins_before = env.ins, irq_before = env.irq_calls;
+    CHECK(!wr(SIE_CTRL, SIE_CTRL_RECEIVE_DATA | SIE_CTRL_START_TRANS) && env.failed && env.ins == ins_before && env.calls == 1 && env.irq_calls == irq_before + 1);
+
+    // the interrupt line failing under a disconnect, and under the bus-reset alarm
+    fresh();
+    wr(MAIN_CTRL, MAIN_HOST_NDEVICE | MAIN_CONTROLLER_EN);
+    usb.connect_device();
+    env.calls = 0;
+    env.fail_at = 0;
+    CHECK(!usb.disconnect_device() && env.failed);
+    fresh();
+    usb.reset_device();
+    env.calls = 0;
+    env.fail_at = 0;
+    CHECK(!clk.tick(10000000.0) && env.failed && usb.sie_status == SIE_BUS_RESET);
+    // the status of a double-buffered OUT lands in the right halves and leaves the word before it alone
+    fresh();
+    put32(EP1_IN_BUF, 0x5A5A5A5Au);
+    put32(EP1_OUT_CONTROL, 0x80000000u | USB_CTRL_DOUBLE_BUF | 0x500);
+    put32(EP1_OUT_BUF, (BUF_AVAILABLE | 8) | ((BUF_AVAILABLE | 8) << BUF1_SHIFT));
+    arm(EP1_OUT_BUF);
+    for (int i = 0; i < 2; ++i) {
+        std::memset(env.reads[1][i], 0x22, 4);
+        env.read_size[1][i] = 4;
+    }
+    env.read_n[1] = 2;
+    usb.schedule_read(1, 10);
+    tick_us(10);
+    CHECK(w32(EP1_OUT_BUF) == ((4u | BUF_FULL) | ((4u | BUF_FULL) << BUF1_SHIFT)) && w32(EP1_IN_BUF) == 0x5A5A5A5Au);
+    // one buffer of a double-buffered OUT: its select moves in its own slot
+    fresh();
+    put32(EP1_OUT_CONTROL, 0x80000000u | USB_CTRL_DOUBLE_BUF | 0x500);
+    put32(EP1_OUT_BUF, BUF_AVAILABLE | 8);
+    arm(EP1_OUT_BUF);
+    CHECK(usb.buf_select[3] == 1 && usb.buf_select[2] == 0 && usb.buf_select[1] == 0);
     // every host call of every transaction kind, failing in turn
     for (int kind = 0; kind < 3; ++kind) {
         for (int n = 0; n < 8; ++n) {

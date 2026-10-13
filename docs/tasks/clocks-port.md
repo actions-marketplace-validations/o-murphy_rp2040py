@@ -44,3 +44,15 @@ Not independently sourced: BYPASS passing `xosc / REFDIV` rather than the undivi
 2. `peripherals/clocks.py` -> `_clocks.py` + facade (and `pll.py` -> `_pll.py`); oracle `tests/utils/clocks_diff.py` with source-text mutants, covering the retune order as an ordered log of the sinks.
 3. `core/clocks.hpp` (+ `pll`) + `tests/cpp/test_clocks.cpp` + `scripts/audit/cpp_mutants.py clocks`; shells; the chip's `clk_*` attributes become views of the tree.
 4. Live boots (MicroPython `machine.freq()`, CircuitPython, Kaluma, the pico-sdk examples of the oldest SDK), docs, register coverage, tracker.
+
+## Retune surface as it stands (read 2026-10-13, for the oracle and the C++ tree)
+
+What the oracle has to log, in order, and what the C++ tree has to call. All of it is `update_clocks()` in `_clocks.py`; the reference calls it after every write to CLOCKS (CLK_REF/SYS/PERI/RTC CTRL and DIV, not USB / ADC / GPOUT), every PLL register write (`_pll.py`), and a ROSC change (`_rosc.py`, `native/_rosc.pyx`).
+
+1. `clk_sys` changed (non-zero, differs): `_set_clk_sys` -> chip attribute, `ppb.clk_sys_changed`, every PWM channel timer (`pwm.clock_freq`), then the host listeners as `(new, old)`.
+2. `clk_peri` changed (non-zero, differs): chip attribute, every `uart.clk_peri_changed()`.
+3. **Always, changed or not:** `watchdog.clk_ref_changed(clk_ref)` and `rtc.clk_rtc_changed(clk_rtc)`. So the sink contract differs: sys / peri sinks are called on a change only, the watchdog and RTC on every retune (they compare themselves). The oracle must log the calls, not only the end state, so a candidate that "optimises" this away is seen.
+4. `reset_clock_tree` (CLOCKS domain reset): both PLLs `reset()`, then clk_sys / clk_peri back to 125 MHz through the same two setters when they differ, then (reference line 582) the watchdog is told clk_ref again.
+
+Already C++ and with their own `clk_*_changed`: watchdog (`native/_watchdog.pyx`), PPB (`_ppb.pyx`), RTC (`_rtc.pyx`), UART (`_uart.pyx`), ROSC, XOSC, PLL status read through `xosc_hz()`. So the C++ tree's sinks are calls between C++ blocks (function pointer + ctx, like `RebaseListener`), with the shells adding the Python host listeners to the same list. PWM still holds its timer frequency in Python (`channel.timer.frequency`), to be checked before the tree is ported.
+The oracle's candidate is the facade (pure and native selected by `native_disabled`), its log the ordered sink calls; until the C++ tree exists it can only check the reference against its own mutants, which is the part that can be written now.

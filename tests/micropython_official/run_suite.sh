@@ -23,15 +23,24 @@ EMU_LOG=$WORK/emu.log
 EMU_PID=
 
 start_emulator() {
-  uv run rp2040py micropython --image "$TAG" --pty >"$EMU_LOG" 2>&1 &
+  # its own process group, so stop_emulator can kill everything it started; run from the environment's bin/ (not `uv run`): after the `cd` into MicroPython's tests/ a restart
+  # (HANG) would otherwise run `uv run` in a directory that is not this project and fail to find `rp2040py`, turning every later file into an ERROR
+  setsid "$VIRTUAL_ENV/bin/rp2040py" micropython --image "$TAG" --pty >"$EMU_LOG" 2>&1 &
   EMU_PID=$!
   for _ in $(seq 60); do grep -q "PTY REPL listening" "$EMU_LOG" && break; sleep 1; done
   DEV=$(grep -o "/dev/pts/[0-9]*" "$EMU_LOG" | head -1)
   # mip downloads on the host and copies to the device, so the board needs no network
-  timeout 180 uv run mpremote connect "$DEV" mip install unittest >/dev/null 2>&1 || true
+  timeout 180 "$VIRTUAL_ENV/bin/mpremote" connect "$DEV" mip install unittest >/dev/null 2>&1 || true
 }
 
-stop_emulator() { [ -n "$EMU_PID" ] && kill "$EMU_PID" 2>/dev/null; wait "$EMU_PID" 2>/dev/null; true; }
+stop_emulator() {
+  [ -n "$EMU_PID" ] || return 0
+  kill -TERM -- "-$EMU_PID" 2>/dev/null  # the whole group (setsid made the wrapper its leader)
+  for _ in 1 2 3 4 5; do kill -0 "$EMU_PID" 2>/dev/null || break; sleep 1; done
+  kill -KILL -- "-$EMU_PID" 2>/dev/null  # an emulator that ignores SIGTERM must not hang the run
+  wait "$EMU_PID" 2>/dev/null
+  true
+}
 
 ROWS=$WORK/rows.md      # every file
 BAD=$WORK/bad.md        # only the files that did not pass: this is what the run summary shows

@@ -8,6 +8,9 @@
 #
 # usage: run_suite.sh <micropython checkout> <image tag> <output .md> [test glob relative to tests/ ...]
 #        (default globs: ports/rp2/*.py extmod/machine_*.py; GROUP_TITLE names the group in the summary; STRICT=1 gates, see above)
+#        EXCLUDE="io/file1.py ..." marks tests that cannot pass on a board for a reason that is not the emulator's as SKIP (platform), and never runs them.
+#        PUSH="io/data: import/*:" copies those paths (relative to tests/, "src:destination on the board") onto the board after every emulator start: the tests that open
+#        files ("data/file1") or import helper modules expect them next to the test, as they are on the host.
 set -u
 MP_DIR=$1
 TAG=$2
@@ -31,6 +34,11 @@ start_emulator() {
   DEV=$(grep -o "/dev/pts/[0-9]*" "$EMU_LOG" | head -1)
   # mip downloads on the host and copies to the device, so the board needs no network
   timeout 180 "$VIRTUAL_ENV/bin/mpremote" connect "$DEV" mip install unittest >/dev/null 2>&1 || true
+  for pair in ${PUSH:-}; do
+    for src in "$MP_DIR"/tests/${pair%%:*}; do  # (the source may be a glob: import/*)
+      timeout 180 "$VIRTUAL_ENV/bin/mpremote" connect "$DEV" fs cp -r "$src" ":${pair#*:}" >/dev/null 2>&1 || true
+    done
+  done
 }
 
 stop_emulator() {
@@ -55,6 +63,12 @@ for t in $(for g in "${GLOBS[@]}"; do ls $g 2>/dev/null; done | sort); do
   log=$WORK/$(echo "$t" | tr / _).log
   # `_thread` starts the second core (multicore_launch_core1 waits for the bootrom FIFO handshake): the emulator has no core 1 yet (record 0096, dual-core seams), so
   # the file would only hang until the timeout and cost an emulator restart
+  case " ${EXCLUDE:-} " in
+    *" $t "*)
+      echo "| $t | :fast_forward: SKIP (platform, see the workflow) |" >>"$ROWS"
+      echo "| $t | :fast_forward: SKIP (platform, see the workflow) |" >>"$BAD"
+      echo "$t: SKIP (platform)"; skip=$((skip + 1)); continue ;;
+  esac
   if grep -q "_thread" "$t"; then
     echo "| $t | :fast_forward: SKIP (needs core 1) |" >>"$ROWS"
     echo "| $t | :fast_forward: SKIP (needs core 1) |" >>"$BAD"

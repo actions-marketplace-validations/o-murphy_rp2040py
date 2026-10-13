@@ -104,9 +104,9 @@ STUBS: dict[str, tuple[object, str]] = {
     ),
     "CLOCKS": (
         set(clocks.STORED_REGISTERS)
-        | {clocks.CLK_SYS_RESUS_STATUS, clocks.INTR, clocks.INTS}
+        | {clocks.CLK_SYS_RESUS_STATUS, clocks.INTR, clocks.INTS, clocks.ENABLED0, clocks.ENABLED1}
         | {0x00, 0x04, 0x0C, 0x10, 0x18, 0x1C, 0x24, 0x28},
-        "clock gating, the resus and its interrupt are not modelled (`STORED_REGISTERS` in peripherals/clocks.py, and the status reads constant 0); the four GPOUT clock outputs (CLK_GPOUT0-3 CTRL/DIV) are stored: nothing is driven onto a pin",
+        "clock gating, the resus and its interrupt are not modelled (`STORED_REGISTERS` in peripherals/clocks.py, and the status reads constant 0; ENABLED0/1 read their reset value 0); the four GPOUT clock outputs (CLK_GPOUT0-3 CTRL/DIV) are stored: nothing is driven onto a pin",
     ),
     "I2C": (
         {

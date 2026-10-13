@@ -1,6 +1,8 @@
 """CLOCKS and PLL register behaviour the datasheet pins down (docs/records/0098-datasheet-conformance-audit.md): which bits of the dividers exist, the reset values, the
 widths of the PLL registers. Pure Python blocks: the same on both builds."""
 
+from utils.tick import start_crystal
+
 CLOCKS = 0x40008000
 PLL_SYS = 0x40028000
 
@@ -34,8 +36,8 @@ def test_pll_registers_keep_only_their_datasheet_bits(rp2040_factory):
     for offset, kept in ((0x04, 0x2D), (0x08, 0xFFF), (0x0C, 0x77000)):
         chip.write_uint32(PLL_SYS + offset, 0xFFFFFFFF)
         assert chip.read_uint32(PLL_SYS + offset) == kept, hex(offset)
-    chip.write_uint32(PLL_SYS + 0x00, 0xFFFFFFFF)  # CS: BYPASS 8 and REFDIV 5:0 (LOCK 31 is read only)
-    assert chip.read_uint32(PLL_SYS + 0x00) == 0x80000000 | 0x13F
+    chip.write_uint32(PLL_SYS + 0x00, 0xFFFFFFFF)  # CS: BYPASS 8 and REFDIV 5:0 (LOCK 31 is read only, and clear while PWR has PD set)
+    assert chip.read_uint32(PLL_SYS + 0x00) == 0x13F
 
 
 # ---- the frequency counter: datasheet 2.15.4, 2.15.6.2 and tables 238-246; pico-sdk `frequency_count_khz()` ----
@@ -107,6 +109,7 @@ def test_the_frequency_counter_registers_have_their_widths_and_reset_values(rp20
 
 def test_a_count_runs_for_the_interval_and_reports_the_frequency_in_khz_with_five_fraction_bits(rp2040_factory):
     chip = rp2040_factory()
+    start_crystal(chip)  # xosc_init(): a stopped crystal has no frequency
     chip.write_uint32(CLOCKS + FC0_REF_KHZ, 12000)
     chip.write_uint32(CLOCKS + FC0_SRC, XOSC_SRC)  # the default interval, 8: 250 us
     chip.clock.tick(1e6 / 12000 + 250_880 - 1)  # one reference period of delay, then 0.98 us * 2**8
@@ -126,6 +129,7 @@ def test_a_count_runs_for_the_interval_and_reports_the_frequency_in_khz_with_fiv
 
 def test_every_source_of_the_counter_reads_what_the_clock_tree_says(rp2040_factory):
     chip = rp2040_factory()
+    start_crystal(chip)  # xosc_init(): a stopped crystal has no frequency
     assert _measure(chip, PLL_SYS_SRC)[1] == 0 and _measure(chip, PLL_SYS_SRC)[0] & DIED  # a PLL that is not running
     assert _measure(chip, CLK_SYS_SRC)[1] >> 5 == 125_000  # 125 MHz until firmware configures the tree
     assert _measure(chip, CLK_PERI_SRC)[1] >> 5 == 125_000
@@ -145,6 +149,7 @@ def test_every_source_of_the_counter_reads_what_the_clock_tree_says(rp2040_facto
 
 def test_a_stopped_clock_a_null_source_and_gpin_set_died_and_fail_but_the_count_still_completes(rp2040_factory):
     chip = rp2040_factory()
+    start_crystal(chip)  # xosc_init(): a stopped crystal has no frequency
     for src in (0, GPIN0_SRC, 0x7F):  # NULL, a GPIO clock (not modelled), a value that selects nothing
         status, result = _measure(chip, src)
         assert status == DONE | DIED | FAIL and result == 0, hex(src)
@@ -153,6 +158,7 @@ def test_a_stopped_clock_a_null_source_and_gpin_set_died_and_fail_but_the_count_
 
 def test_min_and_max_make_the_counter_a_pass_fail_test(rp2040_factory):
     chip = rp2040_factory()
+    start_crystal(chip)  # xosc_init(): a stopped crystal has no frequency
     chip.write_uint32(CLOCKS + FC0_REF_KHZ, 12000)
 
     def run(minimum, maximum):

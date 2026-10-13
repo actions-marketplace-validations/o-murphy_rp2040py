@@ -4,7 +4,7 @@ The sixteen cases of rp2040js 1.4.0's `clocks.spec.ts` are ported one to one, wi
 reset). Each runs on the chip the facade gives, so it holds for the pure-Python and the native chip alike.
 """
 
-from utils.tick import start_tick
+from utils.tick import start_crystal, start_tick
 
 from rp2040py.rp2040 import RP2040
 
@@ -37,10 +37,18 @@ CLK_PERI_AUXSRC_PLL_USB = 0x2 << 5
 WATCHDOG_RESET_ALL = {"preserve_flash": True}
 
 
+def _chip() -> RP2040:
+    """A chip whose crystal runs, as after pico-sdk's `xosc_init()`: nothing clocked from XOSC has a clock before that."""
+    chip = RP2040()
+    start_crystal(chip)
+    return chip
+
+
 def _init_pll(chip: RP2040, base: int, refdiv: int = 1, fbdiv: int = 125, postdiv1: int = 6, postdiv2: int = 2) -> None:
     """Configures a PLL the way pico-sdk's `pll_init()` does."""
     chip.write_uint32(base + PLL_CS, refdiv)
     chip.write_uint32(base + PLL_FBDIV_INT, fbdiv)
+    chip.write_uint32(base + PLL_PWR, 0)  # PD, VCOPD and POSTDIVPD all cleared (the SDK does it in two steps around PRIM)
     chip.write_uint32(base + PLL_PRIM, (postdiv1 << 16) | (postdiv2 << 12))
 
 
@@ -60,33 +68,33 @@ def test_clk_sys_defaults_to_125_mhz_until_the_firmware_configures_the_clock_tre
 
 
 def test_a_200_mhz_clk_sys_the_arduino_pico_default():
-    chip = RP2040()
+    chip = _chip()
     _set_sys_clock(chip, **_arduino_pico_200())
     assert chip.clk_sys == 200 * MHZ
 
 
 def test_clk_sys_div_integer_and_fractional_divisor():
-    chip = RP2040()
+    chip = _chip()
     _set_sys_clock(chip)
     chip.write_uint32(CLK_SYS_DIV, (2 << 8) | 128)  # divide by 2.5
     assert chip.clk_sys == 50 * MHZ
 
 
 def test_a_clk_sys_div_integer_part_of_zero_divides_by_two_to_the_sixteen():
-    chip = RP2040()
+    chip = _chip()
     _set_sys_clock(chip)
     chip.write_uint32(CLK_SYS_DIV, 0)
     assert chip.clk_sys == (125 * MHZ) / 0x10000
 
 
 def test_clk_sys_runs_straight_off_the_crystal_when_auxsrc_selects_xosc():
-    chip = RP2040()
+    chip = _chip()
     chip.write_uint32(CLK_SYS_CTRL, CLK_SYS_SRC_AUX | CLK_SYS_AUXSRC_XOSC)
     assert chip.clk_sys == 12 * MHZ
 
 
 def test_clk_sys_follows_clk_ref_when_src_selects_it():
-    chip = RP2040()
+    chip = _chip()
     chip.write_uint32(CLK_REF_CTRL, CLK_REF_SRC_XOSC)
     chip.write_uint32(CLK_REF_DIV, 2 << 8)
     chip.write_uint32(CLK_SYS_CTRL, 0)  # SRC = clk_ref
@@ -94,14 +102,14 @@ def test_clk_sys_follows_clk_ref_when_src_selects_it():
 
 
 def test_the_last_good_clk_sys_is_kept_for_a_source_that_is_not_modelled():
-    chip = RP2040()
+    chip = _chip()
     _set_sys_clock(chip, **_arduino_pico_200())
     chip.write_uint32(CLK_SYS_CTRL, CLK_SYS_SRC_AUX | CLK_SYS_AUXSRC_GPIN0)
     assert chip.clk_sys == 200 * MHZ
 
 
 def test_clock_listeners_are_told_when_clk_sys_changes():
-    chip = RP2040()
+    chip = _chip()
     calls: list[tuple[float, float]] = []
     chip.add_clock_listener(lambda clk_sys, old: calls.append((clk_sys, old)))
     _set_sys_clock(chip, **_arduino_pico_200())
@@ -109,7 +117,7 @@ def test_clock_listeners_are_told_when_clk_sys_changes():
 
 
 def test_clock_listeners_are_not_told_when_clk_sys_is_unchanged():
-    chip = RP2040()
+    chip = _chip()
     _set_sys_clock(chip, **_arduino_pico_200())
     calls = []
     chip.add_clock_listener(lambda *args: calls.append(args))
@@ -118,7 +126,7 @@ def test_clock_listeners_are_not_told_when_clk_sys_is_unchanged():
 
 
 def test_a_clock_listener_that_unsubscribed_is_not_told():
-    chip = RP2040()
+    chip = _chip()
     calls = []
     unsubscribe = chip.add_clock_listener(lambda *args: calls.append(args))
     unsubscribe()
@@ -130,7 +138,7 @@ SYST_CSR = 0xE000E010
 
 
 def test_systick_and_the_pwm_counters_are_retuned_when_clk_sys_changes():
-    chip = RP2040()
+    chip = _chip()
     chip.write_uint32(
         SYST_CSR, 1 << 2
     )  # CLKSOURCE = processor clock; 0 is the 1 MHz reference clock, which clk_sys does not move
@@ -140,14 +148,14 @@ def test_systick_and_the_pwm_counters_are_retuned_when_clk_sys_changes():
 
 
 def test_clk_peri_follows_clk_sys_when_auxsrc_selects_it():
-    chip = RP2040()
+    chip = _chip()
     _set_sys_clock(chip, **_arduino_pico_200())
     chip.write_uint32(CLK_PERI_CTRL, CLK_PERI_ENABLE | CLK_PERI_AUXSRC_CLK_SYS)
     assert chip.clk_peri == 200 * MHZ
 
 
 def test_clk_peri_runs_at_48_mhz_off_the_usb_pll_as_arduino_pico_does_above_125_mhz():
-    chip = RP2040()
+    chip = _chip()
     _init_pll(chip, PLL_USB_BASE, fbdiv=40, postdiv1=5, postdiv2=2)  # 12 / 1 * 40 / (5 * 2)
     _set_sys_clock(chip, **_arduino_pico_200())
     chip.write_uint32(CLK_PERI_CTRL, CLK_PERI_ENABLE | CLK_PERI_AUXSRC_PLL_USB)
@@ -155,13 +163,13 @@ def test_clk_peri_runs_at_48_mhz_off_the_usb_pll_as_arduino_pico_does_above_125_
 
 
 def test_the_last_good_clk_peri_is_kept_while_the_clock_generator_is_stopped():
-    chip = RP2040()
+    chip = _chip()
     chip.write_uint32(CLK_PERI_CTRL, CLK_PERI_AUXSRC_PLL_USB)  # ENABLE clear
     assert chip.clk_peri == 125 * MHZ
 
 
 def test_the_uart_is_told_again_when_clk_peri_changes_after_its_divider_is_set():
-    chip = RP2040()
+    chip = _chip()
     _init_pll(chip, PLL_USB_BASE, fbdiv=40, postdiv1=5, postdiv2=2)
     # uart_init(uart0, 115200) against a 48 MHz clk_peri: 48e6 / (16 * 115200) = 26.0417
     chip.write_uint32(UARTIBRD, 26)
@@ -173,7 +181,7 @@ def test_the_uart_is_told_again_when_clk_peri_changes_after_its_divider_is_set()
 
 
 def test_a_uart_whose_divider_is_not_set_is_not_told():
-    chip = RP2040()
+    chip = _chip()
     _init_pll(chip, PLL_USB_BASE, fbdiv=40, postdiv1=5, postdiv2=2)
     seen: list[int] = []
     chip.uart[0].on_baud_rate_change = seen.append
@@ -184,9 +192,9 @@ def test_a_uart_whose_divider_is_not_set_is_not_told():
 # --- ours, not upstream's ---------------------------------------------------------------------------------------------------
 
 
-def test_the_pll_registers_read_back_and_always_report_locked():
-    chip = RP2040()
-    assert chip.read_uint32(PLL_SYS_BASE + PLL_CS) == 0x8000_0001  # REFDIV = 1, LOCK
+def test_the_pll_registers_read_back_and_lock_follows_the_power_bits():
+    chip = _chip()
+    assert chip.read_uint32(PLL_SYS_BASE + PLL_CS) == 0x0000_0001  # REFDIV = 1, powered down: no LOCK
     assert chip.read_uint32(PLL_SYS_BASE + PLL_PWR) == 0x2D
     assert chip.read_uint32(PLL_SYS_BASE + PLL_PRIM) == 0x77000
     _init_pll(chip, PLL_SYS_BASE, refdiv=2, fbdiv=100, postdiv1=3, postdiv2=2)
@@ -196,14 +204,15 @@ def test_the_pll_registers_read_back_and_always_report_locked():
 
 
 def test_a_bypassed_pll_outputs_the_reference_divided_by_refdiv_alone():
-    chip = RP2040()
+    chip = _chip()
     chip.write_uint32(PLL_SYS_BASE + PLL_FBDIV_INT, 100)
+    chip.write_uint32(PLL_SYS_BASE + PLL_PWR, 0)
     chip.write_uint32(PLL_SYS_BASE + PLL_CS, (1 << 8) | 2)  # BYPASS, REFDIV = 2
     assert chip.pll_sys.frequency == 6 * MHZ
 
 
 def test_a_chip_reset_puts_the_clock_tree_back_to_its_defaults_and_retunes_what_ran_from_it():
-    chip = RP2040()
+    chip = _chip()
     start_tick(chip)  # clk_ref from the crystal, the watchdog tick at 1 us
     chip.write_uint32(SYST_CSR, 1 << 2)
     _set_sys_clock(chip, **_arduino_pico_200())

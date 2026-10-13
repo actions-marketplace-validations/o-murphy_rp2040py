@@ -26,7 +26,7 @@ One place to see, block by block and datasheet section by section, what is model
 | PIO0/1 | Partial | Yes + second pass | Ported | `OUT_STICKY`/`INLINE_OUT_EN`/`OUT_EN_SEL`, autopull timing |
 | SSI (XIP flash controller) | Partial | Yes + XIP_CTRL pass | Ported | a flash-command model with a 16-entry RX FIFO, the six interrupts (`XIP_IRQ`), DMA requests 38/39 and `TMOD` = transmit only; the TX FIFO is always empty (a frame shifts at once); 7 of 28 registers stored only |
 | CLOCKS | Partial | Yes + second pass | Python only | resus, clock enables / sleep, GPIN, the GPOUT clock outputs; 18 of 48 registers are stubs |
-| PLL | Partial | Yes | Python only | always locked |
+| PLL | Partial | Yes | Python only | power bits and LOCK follow the datasheet; no lock delay |
 | XOSC | Partial | Yes | Ported | DORMANT, the start-up delay and `COUNT` are stored; `STABLE` is set at once |
 | ROSC | Partial | Yes (read with the port) | Ported | the oscillator never stops (DORMANT and DISABLE are stored), STABLE is immediate, the drive strengths and the phase output do nothing |
 | PSM, RESETS, SYSINFO, TBMAN | Done | Yes | Ported | - |
@@ -89,12 +89,12 @@ Follows the datasheet's own table of contents (chapter.section), so a row is som
 | 2.12.6 | Rescue debug port reset | Missing | | - |
 | 2.13 | Power-on state machine (incl. the watchdog interaction) | Done | 0098 | - |
 | 2.14 | Subsystem resets | Done | 0098 | - |
-| 2.15.1-2.15.3 | Clocks: overview, multiplexers, dividers, generators | Done | | - |
-| 2.15.2 | Clock sources: XOSC, PLLs | Done | PLL always locked | - |
+| 2.15.1-2.15.3 | Clocks: overview, multiplexers, dividers, generators | Done | a disabled crystal gives 0 Hz as the source of clk_ref, clk_sys, clk_peri, clk_rtc and the frequency counter; the switch times of the muxes are not modelled | - |
+| 2.15.2 | Clock sources: XOSC, PLLs | Done | PLL LOCK and power bits modelled; no lock delay | - |
 | 2.15.2.1 | Clock source: ROSC | Done | `rosc_freq` follows `DIV` and `FREQ_RANGE`, the clock tree is retuned (0098) | - |
 | 2.15.2.3 | Clock source: external clocks (GPIN) | Missing | | Go-ahead |
 | 2.15.3.4 | Duty cycle correction | Unchecked | | - |
-| 2.15.3.5 | Clock enables (`WAKE_EN` / `SLEEP_EN` / `ENABLED0/1`), system sleep | Stub | stored; `ENABLED0/1` absent; needs the cores' sleep state | Go-ahead |
+| 2.15.3.5 | Clock enables (`WAKE_EN` / `SLEEP_EN` / `ENABLED0/1`), system sleep | Stub | stored; `ENABLED0/1` exist and read 0 (their reset value); needs the cores' sleep state | Go-ahead |
 | 2.15.4 | Frequency counter `FC0_*` | Done | 0098 | - |
 | 2.15.5 | Resus | Missing | the `FRCE` slice needs no stopped-clock model; the detection does | Go-ahead |
 | 2.15.6 | Programmer's model: configuring a generator | Done | | - |
@@ -109,7 +109,7 @@ Follows the datasheet's own table of contents (chapter.section), so a row is som
 | 2.17.5 | ROSC: random number generator | Done | `RANDOMBIT` from a hook (seeded generator by default) | - |
 | 2.17.6 | ROSC counter | Done | counts down at the ROSC frequency, stops at zero (the "ROSC frequency" is taken as the output frequency: not independently sourced) | - |
 | 2.17.7 | ROSC DORMANT | Stub | the register is stored; nothing goes dormant (see 2.11.3) | Go-ahead |
-| 2.18 | PLL | Partial | always locked, no start-up time | - |
+| 2.18 | PLL | Partial | LOCK follows power and reference; no start-up time | - |
 | 2.19.2 | GPIO function select | Done | | - |
 | 2.19.3 | GPIO interrupts | Partial | `INTR` level bits live, edges latch on a transition, `INTE` / `INTF` / `INTS` for proc 0; proc 1 and dormant wake are registers only (no line) | - |
 | 2.19.4 | Pads | Partial | reset `0x56`, reserved bits, SWCLK / SWD, PADS_QSPI order; drive / slew / Schmitt / `VOLTAGE_SELECT` are stored (no electrical model) | - |

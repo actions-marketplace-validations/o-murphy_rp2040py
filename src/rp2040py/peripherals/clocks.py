@@ -51,6 +51,8 @@ WAKE_EN0 = 0xA0
 WAKE_EN1 = 0xA4
 SLEEP_EN0 = 0xA8
 SLEEP_EN1 = 0xAC
+ENABLED0 = 0xB0
+ENABLED1 = 0xB4
 INTR = 0xB8
 INTE = 0xBC
 INTF = 0xC0
@@ -142,7 +144,15 @@ CLK_DIV_INT_ONLY_MASK = 0x300
 CLK_DIV_INT_SHIFT = 8
 CLK_DIV_FRAC_MASK = 0xFF
 
+XOSC_STATUS = 0x04  # the XOSC block's STATUS register, read through the bus-side interface (the block is C++ in a native chip)
+XOSC_STATUS_STABLE = 1 << 31
+
 DEFAULT_CLK = 125e6  # what clk_sys and clk_peri are until firmware configures the tree
+
+
+def xosc_hz(rp2040: "RP2040") -> float:
+    """What the crystal oscillator delivers: its frequency while the XOSC block is stable (enabled and not dormant), nothing otherwise (datasheet 2.16: the oscillator only runs once enabled)."""
+    return rp2040.xosc_freq if rp2040.xosc.read_uint32(XOSC_STATUS) & XOSC_STATUS_STABLE else 0.0
 
 
 def clock_divisor(div: int) -> float:
@@ -233,7 +243,7 @@ class RPClocks(BasePeripheral):
         if source == CLK_PERI_CTRL_AUXSRC_ROSC:
             return rp2040.rosc_freq
         if source == CLK_PERI_CTRL_AUXSRC_XOSC:
-            return rp2040.xosc_freq
+            return xosc_hz(rp2040)
         return 0
 
     def _aux_generator_freq(self, ctrl: int, div: int) -> float:
@@ -250,7 +260,7 @@ class RPClocks(BasePeripheral):
         elif source == CLK_RTC_CTRL_AUXSRC_ROSC:
             frequency = rp2040.rosc_freq
         elif source == CLK_RTC_CTRL_AUXSRC_XOSC:
-            frequency = rp2040.xosc_freq
+            frequency = xosc_hz(rp2040)
         else:
             return 0
         return frequency / clock_divisor(div)
@@ -278,7 +288,7 @@ class RPClocks(BasePeripheral):
             FC0_SRC_PLL_USB: lambda: rp2040.pll_usb.frequency,
             FC0_SRC_ROSC: lambda: rp2040.rosc_freq,
             FC0_SRC_ROSC_PH: lambda: rp2040.rosc_freq,
-            FC0_SRC_XOSC: lambda: rp2040.xosc_freq,
+            FC0_SRC_XOSC: lambda: xosc_hz(rp2040),
             FC0_SRC_CLK_REF: lambda: self.ref_freq,
             FC0_SRC_CLK_SYS: lambda: (
                 rp2040.clk_sys
@@ -337,7 +347,7 @@ class RPClocks(BasePeripheral):
         if src == CLK_REF_CTRL_SRC_ROSC:
             return rp2040.rosc_freq
         if src == CLK_REF_CTRL_SRC_XOSC:
-            return rp2040.xosc_freq
+            return xosc_hz(rp2040)
         if src == CLK_REF_CTRL_SRC_AUX:
             auxsrc = (self.ref_ctrl >> CLK_REF_CTRL_AUXSRC_SHIFT) & CLK_REF_CTRL_AUXSRC_MASK
             return rp2040.pll_usb.frequency if auxsrc == CLK_REF_CTRL_AUXSRC_PLL_USB else 0
@@ -356,7 +366,7 @@ class RPClocks(BasePeripheral):
         if auxsrc == CLK_SYS_CTRL_AUXSRC_ROSC:
             return rp2040.rosc_freq
         if auxsrc == CLK_SYS_CTRL_AUXSRC_XOSC:
-            return rp2040.xosc_freq
+            return xosc_hz(rp2040)
         return 0
 
     def read_uint32(self, offset: int) -> int:
@@ -438,6 +448,8 @@ class RPClocks(BasePeripheral):
             return self._fc_result
         if offset in STORED_REGISTERS:
             return self._stored[offset]
+        if offset in (ENABLED0, ENABLED1):
+            return 0  # read only; the per-destination clock enables are not modelled (WAKE_EN / SLEEP_EN are stored), so they read their reset value
         if offset == CLK_SYS_RESUS_STATUS:
             return 0  # clock resus not implemented
         if offset == INTR:
@@ -510,7 +522,7 @@ class RPClocks(BasePeripheral):
             return  # read only
         elif offset in STORED_REGISTERS:
             self._stored[offset] = value & STORED_REGISTERS[offset][0]
-        elif offset in (CLK_SYS_RESUS_STATUS, INTR, INTS):
+        elif offset in (CLK_SYS_RESUS_STATUS, ENABLED0, ENABLED1, INTR, INTS):
             return  # read only
         else:
             super().write_uint32(offset, value)

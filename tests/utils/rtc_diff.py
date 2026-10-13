@@ -121,6 +121,7 @@ class Rig:
 
     def __init__(self, kind: str, factory: "Callable[..., Any] | None" = None) -> None:
         self.chip = RP2040()
+        self.chip.write_uint32(0x40024000, (0xFAB << 12) | 0xAA0)  # xosc_init(): clk_rtc has no clock from a stopped crystal
         self.log: list[tuple] = []
         self.raising = False
         if kind == "pure":

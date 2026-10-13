@@ -12,7 +12,7 @@
 
 **This is a curated list, not a measurement.** "Answers" is measured (a read at the register's address does not warn "Unimplemented peripheral read"; for a write-only register, a write of 0 does not warn). "Acts" is curated: it means the block was audited and the register is in none of the stub / partial lists of `scripts/audit/register_status.py`, each entry of which carries its evidence. A stub that nobody has listed yet shows as Acts; if you find one, add it there and re-run the script. For what each block does and does not do, see [feature-coverage.md](feature-coverage.md). A table shared by several instances (UART0/UART1, the DMA's per-channel tables) is listed once, as the datasheet gives it.
 
-**474 registers: 344 act, 65 are stubs, 58 partial, 0 exist but are unchecked, 7 are absent.**
+**474 registers: 344 act, 67 are stubs, 58 partial, 0 exist but are unchecked, 5 are absent.**
 
 | Block | Registers | Acts | Stub | Partial | Unchecked | Absent |
 |---|---|---|---|---|---|---|
@@ -29,7 +29,7 @@
 | DMA | 14 | 12 | 0 | 0 | 0 | 2 |
 | PIO | 24 | 23 | 0 | 1 | 0 | 0 |
 | SSI | 28 | 21 | 7 | 0 | 0 | 0 |
-| CLOCKS | 48 | 28 | 18 | 0 | 0 | 2 |
+| CLOCKS | 48 | 28 | 20 | 0 | 0 | 0 |
 | PLL | 4 | 2 | 1 | 1 | 0 | 0 |
 | XOSC | 5 | 2 | 1 | 2 | 0 | 0 |
 | ROSC | 9 | 4 | 0 | 5 | 0 | 0 |
@@ -414,7 +414,7 @@ Stubs in this block: stored only (peripherals/_ssi.py): MWCR, SER, CTRLR1, RX_SA
 
 ## CLOCKS
 
-Stubs in this block: clock gating, the resus and its interrupt are not modelled (`STORED_REGISTERS` in peripherals/clocks.py, and the status reads constant 0); the four GPOUT clock outputs (CLK_GPOUT0-3 CTRL/DIV) are stored: nothing is driven onto a pin.
+Stubs in this block: clock gating, the resus and its interrupt are not modelled (`STORED_REGISTERS` in peripherals/clocks.py, and the status reads constant 0; ENABLED0/1 read their reset value 0); the four GPOUT clock outputs (CLK_GPOUT0-3 CTRL/DIV) are stored: nothing is driven onto a pin.
 
 | Offset | Register | Status | Note |
 |---|---|---|---|
@@ -460,8 +460,8 @@ Stubs in this block: clock gating, the resus and its interrupt are not modelled 
 | `0xa4` | WAKE_EN1 | Stub |  |
 | `0xa8` | SLEEP_EN0 | Stub |  |
 | `0xac` | SLEEP_EN1 | Stub |  |
-| `0xb0` | ENABLED0 | Absent |  |
-| `0xb4` | ENABLED1 | Absent |  |
+| `0xb0` | ENABLED0 | Stub |  |
+| `0xb4` | ENABLED1 | Stub |  |
 | `0xb8` | INTR | Stub |  |
 | `0xbc` | INTE | Stub |  |
 | `0xc0` | INTF | Stub |  |

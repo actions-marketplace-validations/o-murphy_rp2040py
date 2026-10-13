@@ -11,8 +11,18 @@ TICK_ENABLE = 1 << 9
 XOSC_MHZ = 12  # the chip's crystal (RP2040.xosc_freq): 12 cycles of it are one microsecond
 
 
+XOSC_CTRL = 0x40024000
+XOSC_CTRL_ENABLE = (0xFAB << 12) | 0xAA0  # ENABLE = 0xFAB, FREQ_RANGE = 0xAA0 (1-15 MHz)
+
+
+def start_crystal(chip: Any) -> None:
+    """pico-sdk's ``xosc_init()``: enable the crystal oscillator. Everything the SDK clocks from XOSC (clk_ref, the PLLs, clk_rtc) has no clock until this has run, as on silicon."""
+    chip.write_uint32(XOSC_CTRL, XOSC_CTRL_ENABLE)
+
+
 def start_tick(chip: Any, cycles: int = XOSC_MHZ) -> None:
-    """clk_ref = XOSC, then the tick generator at ``cycles`` of it per tick (12: 1 us)."""
+    """The crystal, then clk_ref = XOSC, then the tick generator at ``cycles`` of it per tick (12: 1 us)."""
+    start_crystal(chip)
     chip.write_uint32(CLK_REF_CTRL, CLK_REF_SRC_XOSC)
     chip.write_uint32(WATCHDOG_TICK, cycles | TICK_ENABLE)
 
@@ -26,5 +36,6 @@ CLK_RTC_AUXSRC_XOSC = 3 << 5
 def start_rtc_clock(chip: Any) -> None:
     """What pico-sdk's ``clocks_init`` does for clk_rtc: XOSC / 256 = 46875 Hz (``rtc_init()`` then divides it down to 1 Hz with CLKDIV_M1 = 46874). A bare chip's RTC does not count until
     this has run, as on silicon (the CLOCKS generator is stopped at reset)."""
+    start_crystal(chip)
     chip.write_uint32(CLK_RTC_DIV, 256 << 8)
     chip.write_uint32(CLK_RTC_CTRL, CLK_RTC_ENABLE | CLK_RTC_AUXSRC_XOSC)

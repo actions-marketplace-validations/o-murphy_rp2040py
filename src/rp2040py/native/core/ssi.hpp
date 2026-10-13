@@ -7,10 +7,14 @@
 // is the caller's buffer (a pointer and a size, like every region of the C++ core); the pin is the caller's `GPIOPin`, listened to by a *direct listener*
 // (core/pin.hpp), so a chip-select edge never enters Python.
 //
-// Bounded where the reference is not: the reference keeps the whole command in a growing bytearray and the RX bytes in an unbounded deque. What is used of the
-// command is its first 4 bytes (opcode and address), at most 256 data bytes of a program, and the *number* of bytes shifted so far (a read or a JEDEC ID is indexed
-// by position); the RX queue is a ring of `kRxCapacity` entries (the hardware FIFO is 16). Above the ring's capacity the OLDEST byte is dropped - undefined in the
-// reference, defined here, and outside the oracle's domain.
+// Bounded where the reference is not: the reference keeps the whole command in a growing bytearray. What is used of the command is its first 4 bytes (opcode and
+// address), at most 256 data bytes of a program, and the *number* of bytes shifted so far (a read or a JEDEC ID is indexed by position).
+//
+// The FIFOs and what hangs off them (datasheet 4.10.5-4.10.9; docs/records/0098, "XIP_CTRL and the XIP subsystem"): the receive FIFO is 16 entries deep and a frame
+// that finds it full is discarded and held as RXO; the transmit FIFO is always empty - a frame written to DR is shifted at once, as the model always did - so TXE is
+// raised whenever `TXFTLR` allows, TFE/TFNF always read set and TXO/MST never rise. RXF follows the level (`RXFTLR + 1` or more), RXU is held when DR is read empty,
+// the held interrupts are cleared by reading their register. The combined, masked interrupt is `XIP_IRQ` (NVIC 6) and the two DMA requests follow the levels and
+// `DMACR`; the host is told only when a level moves. Transfer mode "transmit only" stores no received frame; the other modes are not told apart (a model choice).
 //
 // Quirks of the reference that are kept (each is pinned by tests/test_ssi_diff.py or the C++ checks):
 //   - a DR0 write with SSIENR set and chip-select DEasserted still queues 0xFF (firmware's TXFLR/RXFLR flow control would spin forever otherwise); with SSIENR
@@ -39,9 +43,14 @@ using SsiWarnFn = RegWarnFn;
 // Only when no native pin is bound (a Python chip-select): whether the pin reads LOW now. False: a failure is pending with the caller.
 using SsiCsLowFn = bool (*)(void* ctx, bool* low);
 
+using SsiIrqFn = bool (*)(void* ctx, bool level);               // the combined interrupt (XIP_IRQ) moved; false: a failure is pending with the caller
+using SsiDreqFn = bool (*)(void* ctx, bool tx, bool asserted);  // a DMA request (DREQ_XIP_SSITX / DREQ_XIP_SSIRX) moved; false: a failure is pending
+
 struct SsiHost {
     SsiWarnFn warn = nullptr;
     SsiCsLowFn cs_low = nullptr;
+    SsiIrqFn irq = nullptr;
+    SsiDreqFn dreq = nullptr;
     void* ctx = nullptr;
 };
 
@@ -54,7 +63,7 @@ constexpr uint32_t DMACR = 0x4C, DMATDLR = 0x50, DMARDLR = 0x54;
 inline bool is_data_register(uint32_t offset) noexcept { return offset >= DR0 && offset <= DR_LAST && (offset & 3u) == 0; }
 // Writable bits (datasheet 4.10.13: CTRLR0 24 and 22:0, CTRLR1 15:0, SSIENR 0, BAUDR 15:0, SPI_CTRLR0 31:24, 18:11, 9:8 and 5:0) and the reset value of SPI_CTRLR0 (XIP_CMD = 0x03)
 constexpr uint32_t CTRLR0_MASK = 0x017FFFFFu, CTRLR1_MASK = 0xFFFFu, SSIENR_MASK = 0x1u, BAUDR_MASK = 0xFFFFu, SPI_CTRLR0_MASK = 0xFF07FB3Fu, SPI_CTRLR0_RESET = 0x03000000u;
-// The stored, not-acted-on registers (the SSI is a flash-command model: no FIFOs of its own, no interrupts, no DMA), in the order of `stored_`: offset and writable mask. Every reset value is 0.
+// The programmed registers, in the order of `stored_`: offset and writable mask. The thresholds, the interrupt mask, the DMA enables and levels act through `update()`; MWCR and SER are only stored. Every reset value is 0.
 constexpr uint32_t kStoredCount = 8;
 constexpr uint32_t STORED_OFFSET[kStoredCount] = {MWCR, SER, TXFTLR, RXFTLR, IMR, DMACR, DMATDLR, DMARDLR};
 constexpr uint32_t STORED_MASK[kStoredCount] = {0x7u, 0x1u, 0xFFu, 0xFFu, 0x3Fu, 0x3u, 0xFFu, 0xFFu};
@@ -64,7 +73,11 @@ constexpr int stored_index(uint32_t offset) noexcept {
     }
     return -1;
 }
-constexpr uint32_t SR_TFNF = 0x02, SR_TFE = 0x04, SR_RFNE = 0x08;
+constexpr uint32_t SR_TFNF = 0x02, SR_TFE = 0x04, SR_RFNE = 0x08, SR_RFF = 0x10;
+constexpr uint32_t INT_TXE = 1u << 0, INT_TXO = 1u << 1, INT_RXU = 1u << 2, INT_RXO = 1u << 3, INT_RXF = 1u << 4, INT_MST = 1u << 5;
+constexpr uint32_t STICKY_INTERRUPTS = INT_TXO | INT_RXU | INT_RXO | INT_MST;
+constexpr uint32_t DMACR_RDMAE = 0x1, DMACR_TDMAE = 0x2, CTRLR0_TMOD_SHIFT = 8, TMOD_TX_ONLY = 1;
+constexpr uint32_t DMACR_INDEX = 5, DMATDLR_INDEX = 6, DMARDLR_INDEX = 7, TXFTLR_INDEX = 2, RXFTLR_INDEX = 3, IMR_INDEX = 4;  // positions in STORED_OFFSET
 // JEDEC-standard SPI NOR commands the bootrom's flash helpers issue
 constexpr uint8_t CMD_WRITE_ENABLE = 0x06, CMD_WRITE_DISABLE = 0x04, CMD_READ_STATUS_1 = 0x05, CMD_READ_STATUS_2 = 0x35, CMD_WRITE_STATUS = 0x01;
 constexpr uint8_t CMD_PAGE_PROGRAM = 0x02, CMD_SECTOR_ERASE = 0x20, CMD_BLOCK_ERASE = 0xD8, CMD_READ_DATA = 0x03, CMD_READ_JEDEC_ID = 0x9F;
@@ -75,7 +88,7 @@ constexpr uint8_t JEDEC_ID[3] = {0xEF, 0x40, 0x15};
 
 class SsiBlock {
 public:
-    static constexpr uint32_t kRxCapacity = 4096;
+    static constexpr uint32_t kRxCapacity = 16;  // the hardware FIFO
     static constexpr uint32_t kTxKept = 4 + ssi_regs::FLASH_PAGE_SIZE;  // opcode + address + the data bytes of a page
 
     SsiBlock() = default;
@@ -112,6 +125,7 @@ public:
         if (low && !cs_asserted_) {
             tx_len_ = 0;  // a fresh command ...
             rx_head_ = rx_count_ = 0;  // ... and an empty RX queue
+            update();
         } else if (cs_asserted_ && !low) {
             apply_command();
         }
@@ -123,10 +137,12 @@ public:
         ctrlr0_ = ctrlr1_ = ssienr_ = baudr_ = txflr_ = rxsampdly_ = txddriveedge_ = 0;
         spictrl0_ = ssi_regs::SPI_CTRLR0_RESET;
         for (uint32_t i = 0; i < ssi_regs::kStoredCount; ++i) stored_[i] = 0;
+        sticky_ = 0;
         write_enabled_ = false;
         tx_len_ = 0;
         rx_head_ = rx_count_ = 0;
-        return resync_cs();
+        const bool ok = resync_cs();
+        return update() && ok;
     }
 
     // ---- state, for the shell's views --------------------------------------------------------------------------------
@@ -144,6 +160,17 @@ public:
     void set_ssienr(uint32_t value) noexcept { ssienr_ = value; }
     void tx_append(uint8_t byte) noexcept { push_tx(byte); }
     void rx_push(uint8_t byte) noexcept { push_rx(byte); }
+    uint32_t sticky() const noexcept { return sticky_; }
+    void set_sticky(uint32_t value) noexcept { sticky_ = value & ssi_regs::STICKY_INTERRUPTS; }
+    bool irq_level() const noexcept { return irq_level_; }
+    bool dreq_tx() const noexcept { return dreq_tx_; }
+    bool dreq_rx() const noexcept { return dreq_rx_; }
+    // The raw and the masked interrupt status.
+    uint32_t risr() const noexcept {
+        using namespace ssi_regs;
+        return ((txflr_ <= stored_[TXFTLR_INDEX]) ? INT_TXE : 0u) | ((rx_count_ >= stored_[RXFTLR_INDEX] + 1) ? INT_RXF : 0u) | sticky_;
+    }
+    uint32_t isr() const noexcept { return risr() & stored_[ssi_regs::IMR_INDEX]; }
 
     // ---- registers --------------------------------------------------------------------------------------------------
 
@@ -153,14 +180,19 @@ public:
         if (const int slot = stored_index(offset); slot >= 0) return stored_[slot];
         if (is_data_register(offset)) return pop_rx();
         switch (offset) {
-            case ISR: case RISR: case TXOICR: case RXOICR: case RXUICR: case MSTICR: case ICR: return 0;  // nothing is ever raised
+            case ISR: return isr();
+            case RISR: return risr();
+            case TXOICR: case RXOICR: case RXUICR: case MSTICR: case ICR:  // a read clears what the register names and returns 0
+                sticky_ &= ~(offset == TXOICR ? INT_TXO : offset == RXOICR ? INT_RXO : offset == RXUICR ? INT_RXU : offset == MSTICR ? INT_MST : STICKY_INTERRUPTS);
+                update();
+                return 0;
             case TXFLR: return txflr_;
             case RXFLR: return rx_count_;
             case CTRLR0: return ctrlr0_;
             case CTRLR1: return ctrlr1_;
             case SSIENR: return ssienr_;
             case BAUDR: return baudr_;
-            case SR: return SR_TFE | SR_TFNF | (rx_count_ != 0 ? SR_RFNE : 0u);
+            case SR: return SR_TFE | SR_TFNF | (rx_count_ != 0 ? SR_RFNE : 0u) | (rx_count_ >= kRxCapacity ? SR_RFF : 0u);
             case IDR: return 0x51535049u;
             case VERSION_ID: return 0x3430312Au;
             case RX_SAMPLE_DLY: return rxsampdly_;
@@ -181,10 +213,14 @@ public:
         const uint32_t word = static_cast<uint32_t>(value);
         if (const int slot = stored_index(offset); slot >= 0) {
             stored_[slot] = word & STORED_MASK[slot];
+            update();
             return;
         }
         if (is_data_register(offset)) {
-            if (ssienr_ != 0) push_rx(cs_asserted_ ? shift_byte(static_cast<uint8_t>(word & 0xFFu)) : static_cast<uint8_t>(0xFF));
+            if (ssienr_ != 0) {
+                receive(cs_asserted_ ? shift_byte(static_cast<uint8_t>(word & 0xFFu)) : static_cast<uint8_t>(0xFF));
+                update();
+            }
             return;
         }
         switch (offset) {
@@ -193,7 +229,10 @@ public:
             case CTRLR1: ctrlr1_ = word & CTRLR1_MASK; return;
             case SSIENR:
                 ssienr_ = word & SSIENR_MASK;
-                if (ssienr_ == 0) rx_head_ = rx_count_ = 0;  // "The transmit and receive FIFO buffers are cleared when the DW_apb_ssi is disabled (SSI_EN = 0)" (datasheet 4.10.5)
+                if (ssienr_ == 0) {  // "The transmit and receive FIFO buffers are cleared when the DW_apb_ssi is disabled (SSI_EN = 0)" (datasheet 4.10.5)
+                    rx_head_ = rx_count_ = 0;
+                    update();
+                }
                 return;
             case BAUDR: baudr_ = word & BAUDR_MASK; return;
             case RX_SAMPLE_DLY: rxsampdly_ = word & 0xFFu; return;
@@ -247,20 +286,54 @@ private:
     }
 
     void push_rx(uint8_t byte) noexcept {
-        if (rx_count_ == kRxCapacity) {  // undefined in the reference: the oldest goes
-            rx_head_ = (rx_head_ + 1) % kRxCapacity;
-            --rx_count_;
-        }
+        if (rx_count_ == kRxCapacity) return;  // the shell's test hook onto a full FIFO: nothing to hold the frame
         rx_[(rx_head_ + rx_count_) % kRxCapacity] = byte;
         ++rx_count_;
     }
 
+    // A frame shifted in: stored unless the transfer mode is transmit only; a full FIFO discards it and holds RXO.
+    void receive(uint8_t byte) noexcept {
+        using namespace ssi_regs;
+        if (((ctrlr0_ >> CTRLR0_TMOD_SHIFT) & 3u) == TMOD_TX_ONLY) return;
+        if (rx_count_ >= kRxCapacity) {
+            sticky_ |= INT_RXO;
+        } else {
+            push_rx(byte);
+        }
+    }
+
     uint32_t pop_rx() noexcept {
-        if (rx_count_ == 0) return 0;
-        const uint8_t byte = rx_[rx_head_];
-        rx_head_ = (rx_head_ + 1) % kRxCapacity;
-        --rx_count_;
+        uint32_t byte = 0;
+        if (rx_count_ == 0) {
+            sticky_ |= ssi_regs::INT_RXU;  // "0s are read back from the receive FIFO" (4.10.7); the underflow is held
+        } else {
+            byte = rx_[rx_head_];
+            rx_head_ = (rx_head_ + 1) % kRxCapacity;
+            --rx_count_;
+        }
+        update();
         return byte;
+    }
+
+    // Tells the host what moved: the combined interrupt, then the two DMA requests, each only when its level changed. False: a failure is pending (the rest is skipped, as a raise would).
+    bool update() noexcept {
+        using namespace ssi_regs;
+        const bool level = isr() != 0;
+        if (level != irq_level_) {
+            irq_level_ = level;
+            if (host_.irq != nullptr && !host_.irq(host_.ctx, level)) return false;
+        }
+        const bool tx = (stored_[DMACR_INDEX] & DMACR_TDMAE) != 0 && txflr_ <= stored_[DMATDLR_INDEX];
+        if (tx != dreq_tx_) {
+            dreq_tx_ = tx;
+            if (host_.dreq != nullptr && !host_.dreq(host_.ctx, true, tx)) return false;
+        }
+        const bool rx = (stored_[DMACR_INDEX] & DMACR_RDMAE) != 0 && rx_count_ >= stored_[DMARDLR_INDEX] + 1;
+        if (rx != dreq_rx_) {
+            dreq_rx_ = rx;
+            if (host_.dreq != nullptr && !host_.dreq(host_.ctx, false, rx)) return false;
+        }
+        return true;
     }
 
     uint32_t address() const noexcept { return (static_cast<uint32_t>(tx_[1]) << 16) | (static_cast<uint32_t>(tx_[2]) << 8) | tx_[3]; }
@@ -336,6 +409,8 @@ private:
     uint32_t tx_len_ = 0;
     uint8_t rx_[kRxCapacity] = {};
     uint32_t rx_head_ = 0, rx_count_ = 0;
+    uint32_t sticky_ = 0;  // the held interrupts: TXO, RXU, RXO, MST
+    bool irq_level_ = false, dreq_tx_ = false, dreq_rx_ = false;  // what the host was last told
     int64_t raw_write_value_ = 0;
 };
 

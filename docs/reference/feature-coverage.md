@@ -22,9 +22,9 @@ One place to see, block by block and datasheet section by section, what is model
 | I2C0/1 | Partial | Yes + second pass | Ported | slave mode, DREQs, `IC_SAR` and friends are stubs |
 | ADC | Partial | Yes + second pass | Ported | `TS_EN` gating, SAR error flag |
 | PWM | Done | Yes | Ported | - |
-| DMA | Partial | Yes + second pass + the datasheet examples | Ported | sniffer, priority/arbitration, error flags, I2C/SSI DREQs; bus contention |
+| DMA | Partial | Yes + second pass + the datasheet examples | Ported | sniffer, priority/arbitration, error flags, I2C DREQs; bus contention |
 | PIO0/1 | Partial | Yes + second pass | Ported | `OUT_STICKY`/`INLINE_OUT_EN`/`OUT_EN_SEL`, autopull timing |
-| SSI (XIP flash controller) | Partial | Yes + second pass | Ported | a flash-command model: no own FIFOs, interrupts, `TMOD`; 21 of 28 registers are stubs |
+| SSI (XIP flash controller) | Partial | Yes + XIP_CTRL pass | Ported | a flash-command model with a 16-entry RX FIFO, the six interrupts (`XIP_IRQ`), DMA requests 38/39 and `TMOD` = transmit only; the TX FIFO is always empty (a frame shifts at once); 7 of 28 registers stored only |
 | CLOCKS | Partial | Yes + second pass | Python only | resus, clock enables / sleep, GPIN, the GPOUT clock outputs; 18 of 48 registers are stubs |
 | PLL | Partial | Yes | Python only | always locked |
 | XOSC | Partial | Yes | Ported | DORMANT, the start-up delay and `COUNT` are stored; `STABLE` is set at once |
@@ -63,7 +63,7 @@ Follows the datasheet's own table of contents (chapter.section), so a row is som
 | 2.4.6 | MPU | Stub | `MPU_TYPE` (8 regions), `MPU_CTRL`, `MPU_RNR`, `MPU_RBAR` (`VALID`/`REGION`), `MPU_RASR` registers store and read back; **no access is checked against a region** (no MemManage on ARMv6-M: a violation is a HardFault, which the core does not raise) | Go-ahead |
 | 2.5.1 | DMA: configuring channels | Done | 0098 | - |
 | 2.5.2 | DMA: starting (aliases, triggers, chaining, null triggers) | Done | the datasheet's two example use cases run as tests (0098) | - |
-| 2.5.3 | DMA: DREQ, system table | Partial | I2C and SSI have no DREQ output | Go-ahead |
+| 2.5.3 | DMA: DREQ, system table | Partial | I2C has no DREQ output | Go-ahead |
 | 2.5.3.2 | DMA: credit-based DREQ scheme | Unchecked | | - |
 | 2.5.4 | DMA: interrupts | Done | | - |
 | 2.5.5.1 | DMA: pacing timers | Done | | - |
@@ -168,9 +168,9 @@ Follows the datasheet's own table of contents (chapter.section), so a row is som
 | 4.9.5 | ADC: temperature sensor as channel 4 | Partial | `CS.TS_EN` does not gate it | Go-ahead |
 | 4.9.3, 4.9.4 | ADC: ENOB, INL / DNL | n/a | silicon characteristics | - |
 | 4.10 | SSI: the flash-command model used by the boot ROM and XIP, `DR` aliases, clear-on-disable | Done | 0098 | - |
-| 4.10.5, 4.10.7, 4.10.8 | SSI: own 16-entry FIFOs, the five interrupts, `TMOD` 00/01/10/11 | Stub | 21 of 28 registers are stubs; requirements in 0098 | With XIP_CTRL port |
+| 4.10.5, 4.10.7, 4.10.8 | SSI: 16-entry RX FIFO, `RXO`/`RXU`/`RXF`/`TXE`, `TMOD` 01 | Done | 0098; TX side not timed (always empty), `TMOD` 10/11 behave as 00, `TXO`/`MST` never rise | Go-ahead (a timed shifter) |
 | 4.10.6 | SSI: 32-bit frame size | Missing | | Go-ahead |
-| 4.10.11 | SSI: DMA interface | Missing | | Go-ahead |
+| 4.10.11 | SSI: DMA interface | Done | `DREQ_XIP_SSITX/RX` (38, 39) from `DMACR`, `DMATDLR`, `DMARDLR` | - |
 | 4.10 | SSI: XIP streaming | Done | stream FIFO, `XIP_AUX`, DREQ 37 in XIP_CTRL (0098) | - |
 
 ### Chapters 1 and 5

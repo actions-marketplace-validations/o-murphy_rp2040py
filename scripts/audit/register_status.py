@@ -96,8 +96,8 @@ PARTIAL: dict[str, dict[int, str]] = {
 # block -> (offsets that are stubs | ALL, why)
 STUBS: dict[str, tuple[object, str]] = {
     "SSI": (
-        set(ssi.STORED_REGISTERS) | set(ssi.ZERO_REGISTERS) | {0x00, 0x04, 0x14, 0xF0, 0xF4, 0xF8},
-        "the SSI is a flash-command model: these are stored (`STORED_REGISTERS`, and CTRLR0, CTRLR1, BAUDR, RX_SAMPLE_DLY, SPI_CTRLR0, TXD_DRIVE_EDGE in their own attributes) or read 0 (`ZERO_REGISTERS`) in peripherals/_ssi.py",
+        {ssi.SSI_MWCR, ssi.SSI_SER, 0x00, 0x04, 0xF0, 0xF4, 0xF8},
+        "stored only (peripherals/_ssi.py): MWCR, SER, CTRLR1, RX_SAMPLE_DLY, SPI_CTRLR0 and TXD_DRIVE_EDGE; CTRLR0 acts only through TMOD = transmit only (the frame size, SPI format and the other modes are not modelled); the FIFOs, thresholds, interrupts, DMACR and the DMA levels act since the XIP_CTRL port (BAUDR paces the XIP stream)",
     ),
     "CLOCKS": (
         set(clocks.STORED_REGISTERS)

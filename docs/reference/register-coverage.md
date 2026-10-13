@@ -12,7 +12,7 @@
 
 **This is a curated list, not a measurement.** "Answers" is measured (a read at the register's address does not warn "Unimplemented peripheral read"; for a write-only register, a write of 0 does not warn). "Acts" is curated: it means the block was audited and the register is in none of the stub / partial lists of `scripts/audit/register_status.py`, each entry of which carries its evidence. A stub that nobody has listed yet shows as Acts; if you find one, add it there and re-run the script. For what each block does and does not do, see [feature-coverage.md](feature-coverage.md). A table shared by several instances (UART0/UART1, the DMA's per-channel tables) is listed once, as the datasheet gives it.
 
-**474 registers: 303 act, 83 are stubs, 57 partial, 21 exist but are unchecked, 10 are absent.**
+**474 registers: 317 act, 69 are stubs, 57 partial, 21 exist but are unchecked, 10 are absent.**
 
 | Block | Registers | Acts | Stub | Partial | Unchecked | Absent |
 |---|---|---|---|---|---|---|
@@ -28,7 +28,7 @@
 | PWM | 10 | 10 | 0 | 0 | 0 | 0 |
 | DMA | 14 | 12 | 0 | 0 | 0 | 2 |
 | PIO | 24 | 23 | 0 | 1 | 0 | 0 |
-| SSI | 28 | 7 | 21 | 0 | 0 | 0 |
+| SSI | 28 | 21 | 7 | 0 | 0 | 0 |
 | CLOCKS | 48 | 28 | 18 | 0 | 0 | 2 |
 | PLL | 4 | 2 | 1 | 1 | 0 | 0 |
 | XOSC | 5 | 2 | 1 | 2 | 0 | 0 |
@@ -379,7 +379,7 @@ Stubs in this block: slave mode, the DMA interface, spike suppression and the SD
 
 ## SSI
 
-Stubs in this block: the SSI is a flash-command model: these are stored (`STORED_REGISTERS`, and CTRLR0, CTRLR1, BAUDR, RX_SAMPLE_DLY, SPI_CTRLR0, TXD_DRIVE_EDGE in their own attributes) or read 0 (`ZERO_REGISTERS`) in peripherals/_ssi.py.
+Stubs in this block: stored only (peripherals/_ssi.py): MWCR, SER, CTRLR1, RX_SAMPLE_DLY, SPI_CTRLR0 and TXD_DRIVE_EDGE; CTRLR0 acts only through TMOD = transmit only (the frame size, SPI format and the other modes are not modelled); the FIFOs, thresholds, interrupts, DMACR and the DMA levels act since the XIP_CTRL port (BAUDR paces the XIP stream).
 
 | Offset | Register | Status | Note |
 |---|---|---|---|
@@ -388,23 +388,23 @@ Stubs in this block: the SSI is a flash-command model: these are stored (`STORED
 | `0x08` | SSIENR | Acts |  |
 | `0x0c` | MWCR | Stub |  |
 | `0x10` | SER | Stub |  |
-| `0x14` | BAUDR | Stub |  |
-| `0x18` | TXFTLR | Stub |  |
-| `0x1c` | RXFTLR | Stub |  |
+| `0x14` | BAUDR | Acts |  |
+| `0x18` | TXFTLR | Acts |  |
+| `0x1c` | RXFTLR | Acts |  |
 | `0x20` | TXFLR | Acts |  |
 | `0x24` | RXFLR | Acts |  |
 | `0x28` | SR | Acts |  |
-| `0x2c` | IMR | Stub |  |
-| `0x30` | ISR | Stub |  |
-| `0x34` | RISR | Stub |  |
-| `0x38` | TXOICR | Stub |  |
-| `0x3c` | RXOICR | Stub |  |
-| `0x40` | RXUICR | Stub |  |
-| `0x44` | MSTICR | Stub |  |
-| `0x48` | ICR | Stub |  |
-| `0x4c` | DMACR | Stub |  |
-| `0x50` | DMATDLR | Stub |  |
-| `0x54` | DMARDLR | Stub |  |
+| `0x2c` | IMR | Acts |  |
+| `0x30` | ISR | Acts |  |
+| `0x34` | RISR | Acts |  |
+| `0x38` | TXOICR | Acts |  |
+| `0x3c` | RXOICR | Acts |  |
+| `0x40` | RXUICR | Acts |  |
+| `0x44` | MSTICR | Acts |  |
+| `0x48` | ICR | Acts |  |
+| `0x4c` | DMACR | Acts |  |
+| `0x50` | DMATDLR | Acts |  |
+| `0x54` | DMARDLR | Acts |  |
 | `0x58` | IDR | Acts |  |
 | `0x5c` | SSI_VERSION_ID | Acts |  |
 | `0x60` | DR0 | Acts |  |

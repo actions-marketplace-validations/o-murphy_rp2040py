@@ -21,6 +21,8 @@ from rp2040py.native._pending cimport park_error, raise_if_pending
 from rp2040py.native._window_map cimport WindowHandler
 
 from rp2040py.gpio_pin import GPIOPinState
+from rp2040py.irq import IRQ
+from rp2040py.peripherals._ssi import DREQ_XIP_SSIRX, DREQ_XIP_SSITX
 
 __all__ = ("RPSSI",)
 
@@ -42,6 +44,31 @@ cdef cppbool _cs_low_trampoline(void* ctx, cppbool* low) noexcept:
     cdef RPSSI ssi = <RPSSI> ctx
     try:
         low[0] = ssi.rp2040.qspi[1].value == GPIOPinState.LOW
+    except BaseException as error:
+        park_error(error)
+        return False
+    return True
+
+
+cdef cppbool _irq_trampoline(void* ctx, cppbool level) noexcept:
+    cdef RPSSI ssi = <RPSSI> ctx
+    try:
+        ssi.rp2040.set_interrupt(IRQ.XIP, bool(level))
+    except BaseException as error:
+        park_error(error)
+        return False
+    return True
+
+
+cdef cppbool _dreq_trampoline(void* ctx, cppbool tx, cppbool asserted) noexcept:
+    cdef RPSSI ssi = <RPSSI> ctx
+    try:
+        dma = ssi.rp2040.dma
+        channel = DREQ_XIP_SSITX if tx else DREQ_XIP_SSIRX
+        if asserted:
+            dma.set_dreq(channel)
+        else:
+            dma.clear_dreq(channel)
     except BaseException as error:
         park_error(error)
         return False
@@ -119,6 +146,8 @@ cdef class RPSSI:
         self._cs_listening = False
         host.warn = _warn_trampoline
         host.cs_low = _cs_low_trampoline
+        host.irq = _irq_trampoline
+        host.dreq = _dreq_trampoline
         host.ctx = <void*> self
         self._block.init(<uint8_t*> <size_t> flash_address, <uint32_t> flash_size, host)
         if isinstance(self._cs_pin, GPIOPin):
@@ -184,6 +213,34 @@ cdef class RPSSI:
         # the not-acted-on registers by offset, as the reference's dict (MWCR, SER, TXFTLR, RXFTLR, IMR, DMACR, DMATDLR, DMARDLR)
         offsets = (0x0C, 0x10, 0x18, 0x1C, 0x2C, 0x4C, 0x50, 0x54)
         return {offset: self._block.stored(index) for index, offset in enumerate(offsets)}
+
+    @property
+    def _sticky(self):
+        return self._block.sticky()
+
+    @_sticky.setter
+    def _sticky(self, value):
+        self._block.set_sticky(<uint32_t> (value & 0xFFFFFFFF))
+
+    @property
+    def _risr(self):
+        return self._block.risr()
+
+    @property
+    def _isr(self):
+        return self._block.isr()
+
+    @property
+    def _irq_level(self):
+        return bool(self._block.irq_level())
+
+    @property
+    def _dreq_tx(self):
+        return bool(self._block.dreq_tx())
+
+    @property
+    def _dreq_rx(self):
+        return bool(self._block.dreq_rx())
 
     @property
     def _write_enabled(self):

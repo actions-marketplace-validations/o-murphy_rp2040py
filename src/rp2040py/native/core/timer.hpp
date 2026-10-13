@@ -65,6 +65,7 @@ public:
     void init(Clock* clock, const TimerHost& host) noexcept {
         clock_ = clock;
         host_ = host;
+        clock_->add_rebase_listener(&rebase_listener_, &TimerBlock::on_rebase, this);  // the clock's origin moved: this block's epoch is an absolute tick count
         for (int i = 0; i < kAlarms; ++i) {
             slots_[i].block = this;
             slots_[i].index = i;
@@ -75,6 +76,7 @@ public:
 
     // Unlinks every alarm from the clock; the owner calls it before the block goes away.
     void detach() noexcept {
+        Clock::remove_rebase_listener(&rebase_listener_);
         for (int i = 0; i < kAlarms; ++i) cancel_alarm(&alarms_[i]);
     }
 
@@ -322,6 +324,9 @@ private:
 
     Clock* clock_ = nullptr;
     TimerHost host_;
+    static void on_rebase(void* ctx, int64_t delta) noexcept { static_cast<TimerBlock*>(ctx)->epoch_ticks_ -= delta; }
+
+    RebaseListener rebase_listener_;
     int64_t epoch_ticks_ = 0;  // the clock's time, in ticks, at which this block's count was zero
     int64_t latched_high_ = 0;
     uint32_t int_raw_ = 0, int_enable_ = 0, int_force_ = 0;

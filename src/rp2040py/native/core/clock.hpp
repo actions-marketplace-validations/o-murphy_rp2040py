@@ -33,14 +33,37 @@ namespace rp2040core {
 
 constexpr int64_t kTicksPerNano = 16;
 constexpr int64_t kMaxTicks = INT64_MAX / 2;  // "never": times saturate here instead of wrapping (the clock records it, `saturated()`)
+// An idle chip fast-forwards: with nothing waiting on the outside world the clock jumps from alarm to alarm, and a periodic one (the RTC's second) makes that millions of simulated seconds per
+// wall second - the whole `int64` in half a minute (found by the MicroPython `micropython/` tests, record 0100). So the origin MOVES: when the time passes kRebaseAt the clock subtracts it from `now`,
+// from every linked alarm and - through the listeners - from every absolute tick count a block holds, and carries the total apart (`rebased_ticks()`), so `nanos()` still never goes back.
+constexpr int64_t kRebaseAt = int64_t{1} << 58;  // 9e6 s, a little over 100 days
+using RebaseFn = void (*)(void* ctx, int64_t delta);
 
-// A delta in nanoseconds as ticks: round half up, saturating at +-kMaxTicks, NaN as 0 - exactly `_simulation_clock.nanos_to_ticks`.
+class Clock;
+
+// A holder of an absolute tick count (a block's epoch) owns one of these and registers it with the clock; like an `Alarm` it is linked by pointer, the clock never allocates, and a clock that goes first
+// (the garbage collector frees a cycle in no particular order) lets go of every listener, so the holder's later `remove_rebase_listener()` is a no-op instead of a write through a dangling pointer.
+struct RebaseListener {
+    RebaseListener* next = nullptr;
+    Clock* owner = nullptr;
+    RebaseFn fn = nullptr;
+    void* ctx = nullptr;
+    RebaseListener() = default;
+    RebaseListener(const RebaseListener&) = delete;
+    RebaseListener& operator=(const RebaseListener&) = delete;
+    ~RebaseListener();  // a holder that goes (freed by the garbage collector, without a detach) takes itself off its clock
+};
+
+// A delta in nanoseconds as ticks: round half up (but a positive delta is at least one tick), saturating at +-kMaxTicks, NaN as 0 - exactly `_simulation_clock.nanos_to_ticks`.
 inline int64_t nanos_to_ticks(double nanos) noexcept {
     if (nanos != nanos) return 0;
     const double ticks = nanos * static_cast<double>(kTicksPerNano);
     if (ticks >= static_cast<double>(kMaxTicks)) return kMaxTicks;
     if (ticks <= -static_cast<double>(kMaxTicks)) return -kMaxTicks;
-    return static_cast<int64_t>(std::floor(ticks + 0.5));
+    const int64_t rounded = static_cast<int64_t>(std::floor(ticks + 0.5));
+    // A delay that is positive stays at least one tick: an alarm that re-arms itself with a vanishing positive delay must still move time forward, or the clock would fire it
+    // again at the very same instant, for ever (the double clock moved by the sliver, however small).
+    return rounded == 0 && ticks > 0.0 ? 1 : rounded;
 }
 
 using AlarmFireFn = bool (*)(void* ctx);  // false: stop ticking, a failure is pending with the caller
@@ -78,15 +101,56 @@ public:
             alarm->owner = nullptr;
             alarm->scheduled = false;
         }
+        while (rebase_head_ != nullptr) {  // let go of the listeners, as of the alarms
+            RebaseListener* listener = rebase_head_;
+            rebase_head_ = listener->next;
+            listener->next = nullptr;
+            listener->owner = nullptr;
+        }
         now_ = 0;
         frequency = 125e6;
         cycle_remainder_ = 0.0;
         saturated_ = false;
+        rebased_ticks_ = 0.0;
+    }
+
+    // A holder of an absolute tick count (a block's epoch, a device's last edge) registers a listener here to have `delta` subtracted when the origin moves. Registering twice is a no-op.
+    void add_rebase_listener(RebaseListener* listener, RebaseFn fn, void* ctx) noexcept {
+        if (listener->owner == this) return;
+        listener->fn = fn;
+        listener->ctx = ctx;
+        listener->owner = this;
+        listener->next = rebase_head_;
+        rebase_head_ = listener;
+    }
+    // Takes the listener off its clock, if it is still on one.
+    static void remove_rebase_listener(RebaseListener* listener) noexcept {
+        Clock* clock = listener->owner;
+        if (clock == nullptr) return;
+        RebaseListener** link = &clock->rebase_head_;
+        while (*link != nullptr && *link != listener) link = &(*link)->next;
+        if (*link != nullptr) *link = listener->next;
+        listener->next = nullptr;
+        listener->owner = nullptr;
+    }
+
+    // Moves the origin: `delta` is subtracted from the time, from every linked alarm (a "never" alarm stays at the end) and, through the listeners, from every absolute count a block holds. Not from inside an
+    // alarm's callback (the list is being walked); `tick_ticks` does it when it has finished.
+    void rebase(int64_t delta) noexcept {
+        if (delta <= 0 || delta > now_) return;
+        now_ -= delta;
+        rebased_ticks_ += static_cast<double>(delta);
+        for (Alarm* alarm = head_; alarm != nullptr; alarm = alarm->next) {
+            if (alarm->ticks < kMaxTicks) alarm->ticks -= delta;
+        }
+        for (RebaseListener* listener = rebase_head_; listener != nullptr; listener = listener->next) listener->fn(listener->ctx, delta);
     }
 
     int64_t ticks() const noexcept { return now_; }
     // The time in nanoseconds, for display and for the blocks that think in them (inexact beyond 2^53 / 16 ns; differences of it should be taken in ticks).
-    double nanos() const noexcept { return static_cast<double>(now_) / static_cast<double>(kTicksPerNano); }
+    double nanos() const noexcept { return (static_cast<double>(now_) + rebased_ticks_) / static_cast<double>(kTicksPerNano); }
+    // The ticks the origin has been moved by so far (a double: it is for display, and `nanos()` stays monotonic across a move).
+    double rebased_ticks() const noexcept { return rebased_ticks_; }
     bool has_alarm() const noexcept { return head_ != nullptr; }
     // Time until the next alarm is due, or 0 when there is none (has_alarm() tells the two apart).
     int64_t ticks_to_next_alarm() const noexcept { return head_ != nullptr ? head_->ticks - now_ : 0; }
@@ -153,16 +217,22 @@ public:
     // is re-read after every callback (a callback may schedule or cancel anything). Returns false if a
     // callback asked to stop; the clock is then at that alarm's time and the rest of `delta` is not applied.
     bool tick_ticks(int64_t delta) noexcept {
+        ++depth_;
         const int64_t target = add_ticks(now_, delta);
         while (head_ != nullptr && head_->ticks <= target) {
             Alarm* alarm = head_;
             head_ = alarm->next;
             alarm->owner = nullptr;
             alarm->scheduled = false;  // it is no longer in the list; a callback may re-arm it
-            now_ = alarm->ticks;
-            if (!alarm->fire(alarm->ctx)) return false;
+            if (alarm->ticks > now_) now_ = alarm->ticks;  // a callback may have ticked on itself: time never goes back
+            if (!alarm->fire(alarm->ctx)) {
+                --depth_;
+                return false;
+            }
         }
-        now_ = target;
+        if (delta < 0 || target > now_) now_ = target;  // (a callback that ticked on itself may have gone past it already)
+        --depth_;
+        if (depth_ == 0 && now_ >= kRebaseAt) rebase(now_);  // the outermost tick only: nothing is walking the list
         return true;
     }
     bool tick(double delta_nanos) noexcept { return tick_ticks(to_ticks(delta_nanos)); }
@@ -194,12 +264,17 @@ private:
 
     int64_t now_ = 0;
     double cycle_remainder_ = 0.0;
+    double rebased_ticks_ = 0.0;
     bool saturated_ = false;
+    int depth_ = 0;  // nested `tick_ticks` calls: the origin only moves at depth 0
+    RebaseListener* rebase_head_ = nullptr;
     Alarm* head_ = nullptr;
 };
 
 // Unlinks `alarm` from whatever clock it is linked into, if that clock still exists. What an owner's `detach()` calls: unlike
 // `clock->cancel(alarm)` it is safe when the clock was destroyed first.
+inline RebaseListener::~RebaseListener() { Clock::remove_rebase_listener(this); }
+
 inline void cancel_alarm(Alarm* alarm) noexcept {
     if (alarm->owner != nullptr) alarm->owner->cancel(alarm);
     alarm->scheduled = false;

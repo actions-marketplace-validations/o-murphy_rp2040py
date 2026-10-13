@@ -7,6 +7,11 @@ from libcpp cimport bool
 cdef extern from "clock.hpp" namespace "rp2040core":
     # `bool`, not `bint`: Cython's bint is a C int, which is a different function-pointer type from the core's bool.
     ctypedef bool (*AlarmFireFn)(void* ctx)
+    ctypedef void (*RebaseFn)(void* ctx, int64_t delta)
+
+    cdef cppclass RebaseListener:
+        RebaseListener* next
+        Clock* owner
 
     cdef cppclass Alarm:
         Alarm* next
@@ -24,6 +29,9 @@ cdef extern from "clock.hpp" namespace "rp2040core":
         int64_t ticks_to_next_alarm() noexcept
         double nanos_to_next_alarm() noexcept
         bint saturated() noexcept
+        double rebased_ticks() noexcept
+        void add_rebase_listener(RebaseListener* listener, RebaseFn fn, void* ctx) noexcept
+        void rebase(int64_t delta) noexcept
         void link(Alarm* alarm, double delta_nanos) noexcept
         void link_ticks(Alarm* alarm, int64_t delta) noexcept
         bint unlink(Alarm* alarm) noexcept
@@ -39,3 +47,4 @@ cdef extern from "clock.hpp" namespace "rp2040core":
     cdef const int64_t kMaxTicks
 
     void cancel_alarm(Alarm* alarm) noexcept
+    void remove_rebase_listener(RebaseListener* listener) noexcept

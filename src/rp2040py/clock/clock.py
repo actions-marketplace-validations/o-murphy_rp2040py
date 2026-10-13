@@ -34,6 +34,9 @@ class IClock(Protocol):
 
     def tick_ticks(self, delta_ticks: int) -> None: ...
 
+    # The origin of `ticks` moves when an idle chip has fast-forwarded far enough; a holder of an absolute tick count subtracts the delta it is told.
+    def add_rebase_listener(self, callback: Callable[[int], None]) -> Callable[[], None]: ...
+
     def advance_cycles(self, cycles: int, ticks_per_cycle: float) -> None: ...
 
     @property

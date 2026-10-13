@@ -33,6 +33,7 @@ cdef extern from "rosc.hpp" namespace "rp2040core":
     cdef cppclass RoscBlock:
         RoscBlock() noexcept
         void init(Clock* clock, const RoscHost& host) noexcept
+        void detach() noexcept
         int64_t raw_write_value() noexcept
         cppbool reset() noexcept
         double frequency() noexcept

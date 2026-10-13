@@ -268,7 +268,9 @@ def test_a_delay_is_rounded_half_up_to_a_tick_and_saturates(clock_cls):
     alarm = clock.create_alarm(lambda: None)
     alarm.schedule(1 / 32)  # half a tick
     assert alarm.ticks == 1
-    alarm.schedule(1 / 32 - 1 / 1000)
+    alarm.schedule(1 / 32 - 1 / 1000)  # a positive delay is never rounded down to 'now': at least one tick
+    assert alarm.ticks == 1
+    alarm.schedule(0.0)
     assert alarm.ticks == 0
     alarm.schedule(float("nan"))
     assert alarm.ticks == 0

@@ -167,7 +167,7 @@ int main() {
     {
         Clock t;
         CHECK(kTicksPerNano == 16 && t.ticks() == 0);
-        CHECK(nanos_to_ticks(8.0) == 128 && nanos_to_ticks(1.0 / 32) == 1 && nanos_to_ticks(1.0 / 32 - 1e-3) == 0 && nanos_to_ticks(-1.0 / 32) == 0 && nanos_to_ticks(-0.1) == -2);  // round half up
+        CHECK(nanos_to_ticks(8.0) == 128 && nanos_to_ticks(1.0 / 32) == 1 && nanos_to_ticks(1.0 / 32 - 1e-3) == 1 && nanos_to_ticks(0.0) == 0 && nanos_to_ticks(-1.0 / 32) == 0 && nanos_to_ticks(-0.1) == -2);  // round half up
         CHECK(nanos_to_ticks(1e30) == kMaxTicks && nanos_to_ticks(-1e30) == -kMaxTicks && nanos_to_ticks(std::nan("")) == 0);
         // past 2^53 ns, where a double of nanoseconds could not hold now + 8: an 8 ns step still resolves, tick by tick
         CHECK(t.tick_ticks((int64_t{1} << 53) * 16 + 7));
@@ -190,8 +190,8 @@ int main() {
         init(never, z, 23);
         z.schedule(&never.alarm, 1e30);
         CHECK(z.saturated() && z.ticks_to_next_alarm() == kMaxTicks);
-        CHECK(z.tick_ticks(kMaxTicks) && z.ticks() == kMaxTicks && never.fired == 1);
-        CHECK(z.tick_ticks(kMaxTicks) && z.ticks() == kMaxTicks);  // stays at the end
+        CHECK(z.tick_ticks(kMaxTicks) && never.fired == 1 && z.rebased_ticks() > 0.0);  // the end of the range is reached and the origin moves on
+        CHECK(z.tick_ticks(kMaxTicks) && z.ticks() < kRebaseAt);
         z.reset();
         CHECK(!z.saturated() && z.ticks() == 0);
         // a negative delta moves time back, as the double clock allowed

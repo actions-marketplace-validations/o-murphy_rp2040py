@@ -121,6 +121,7 @@ class Ws2812:
         self._bit_count = 0
         self._bytes = bytearray()
         self._unsubscribe: Callable[[], None] | None = None
+        self._unsubscribe_rebase: Callable[[], None] | None = None
 
     def attach(self, rp2040: "RP2040") -> None:
         self._clock = rp2040.clock
@@ -129,7 +130,14 @@ class Ws2812:
         # way `Epd2in9G` reschedules its own tx alarm per byte), so it only ever fires once the
         # line has really gone quiet.
         self._latch_alarm = rp2040.clock.create_alarm(self._latch)
+        self._unsubscribe_rebase = rp2040.clock.add_rebase_listener(
+            self._rebased
+        )  # the edges are absolute tick counts: they follow the clock when its origin moves
         self._unsubscribe = rp2040.gpio[self.gpio].add_listener(self._on_change)
+
+    def _rebased(self, delta: int) -> None:
+        self._rise_ticks -= delta
+        self._fall_ticks -= delta
 
     def _on_change(self, new_state: "GPIOPinState", old_state: "GPIOPinState") -> None:
         assert self._clock is not None and self._latch_alarm is not None  # set in attach()

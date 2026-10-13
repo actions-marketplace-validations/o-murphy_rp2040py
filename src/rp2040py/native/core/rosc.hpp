@@ -68,6 +68,12 @@ public:
     void init(Clock* clock, const RoscHost& host) noexcept {
         clock_ = clock;
         host_ = host;
+        clock_->add_rebase_listener(&rebase_listener_, &RoscBlock::on_rebase, this);  // the clock's origin moved: COUNT's epoch is an absolute tick count
+    }
+
+    // Takes the block off the clock's rebase list; the owner calls it before the block goes away.
+    void detach() noexcept {
+        Clock::remove_rebase_listener(&rebase_listener_);
     }
 
     bool failed() const noexcept { return host_failed(host_.failed); }
@@ -238,6 +244,8 @@ public:
     WindowHandler window_handler() noexcept { return BlockWindow<RoscBlock>::handler(this); }
 
 private:
+    static void on_rebase(void* ctx, int64_t delta) noexcept { static_cast<RoscBlock*>(ctx)->count_epoch -= delta; }
+
     // 2.17.3's ratios of the ranges to LOW (0 for a value that is not a range); 0xAA0, the reset value, is LOW.
     static double range_ratio(uint32_t freq_range) noexcept {
         using namespace rosc_regs;
@@ -281,6 +289,7 @@ private:
     }
 
     RoscHost host_;
+    RebaseListener rebase_listener_;
     Clock* clock_ = nullptr;
     int64_t raw_write_value_ = 0;
 };

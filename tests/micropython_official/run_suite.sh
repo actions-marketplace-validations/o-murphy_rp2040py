@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
 # Runs MicroPython's own test files (tests/ports/rp2, tests/extmod/machine_*) against the emulated board, one file at a time, through the console's pty.
 #
-# It only reports: every file ends as PASS / FAIL / SKIP / HANG / ERROR in $OUT (a markdown table), and the script itself always exits 0. A file that hangs is killed after
+# It reports: every file ends as PASS / FAIL / SKIP / HANG / ERROR in $OUT (a markdown table). The script exits 0 - except with STRICT=1 (a group that gates the build, see
+# .github/workflows/ci-micropython-official.yml), where any FAIL, ERROR or HANG makes it exit 1; a SKIP never does. A file that hangs is killed after
 # $PER_TEST_TIMEOUT seconds and the emulator is restarted for the next one. Why the failures happen is for a human to sort (hardware-only, a missing model, or a bug): see
 # docs/records/0098-datasheet-conformance-audit.md.
 #
 # usage: run_suite.sh <micropython checkout> <image tag> <output .md> [test glob relative to tests/ ...]
-#        (default globs: ports/rp2/*.py extmod/machine_*.py; GROUP_TITLE names the group in the summary)
+#        (default globs: ports/rp2/*.py extmod/machine_*.py; GROUP_TITLE names the group in the summary; STRICT=1 gates, see above)
 set -u
 MP_DIR=$1
 TAG=$2
@@ -15,6 +16,7 @@ shift 3
 GLOBS=("$@")
 [ ${#GLOBS[@]} -eq 0 ] && GLOBS=("ports/rp2/*.py" "extmod/machine_*.py")
 TITLE=${GROUP_TITLE:-}
+STRICT=${STRICT:-0}
 PER_TEST_TIMEOUT=${PER_TEST_TIMEOUT:-45}
 WORK=$(mktemp -d)
 EMU_LOG=$WORK/emu.log
@@ -65,7 +67,7 @@ stop_emulator
 {
   echo "## MicroPython official tests on the emulated RP2040 ($TAG)${TITLE:+ - $TITLE}"
   echo
-  echo "**:white_check_mark: $pass passed, :x: $fail failed, :fast_forward: $skip skipped, :hourglass: $hang hung** - report only, nothing here gates the build."
+  echo "**:white_check_mark: $pass passed, :x: $fail failed, :fast_forward: $skip skipped, :hourglass: $hang hung** - $([ "$STRICT" = 1 ] && echo "this group gates the build: a failure or a hang fails the job." || echo "report only, nothing here gates the build.")"
   echo
   if [ -s "$BAD" ]; then
     echo "Not passing:"
@@ -89,4 +91,5 @@ stop_emulator
 cat "$OUT"
 # straight into the run's summary page as well, so it shows even if a later step fails
 [ -n "${GITHUB_STEP_SUMMARY:-}" ] && cat "$OUT" >>"$GITHUB_STEP_SUMMARY"
+[ "$STRICT" = 1 ] && [ $((fail + hang)) -gt 0 ] && exit 1
 exit 0

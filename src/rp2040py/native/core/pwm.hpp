@@ -103,6 +103,7 @@ public:
     }
 
     void detach() noexcept {
+        timer.detach();
         alarm_a.detach();
         alarm_b.detach();
         alarm_a_rise.detach();

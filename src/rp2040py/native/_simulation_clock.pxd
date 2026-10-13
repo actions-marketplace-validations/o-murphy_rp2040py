@@ -14,7 +14,7 @@
 # the two classes to forward-declare each other for no hot-path benefit.
 from libc.stdint cimport int64_t
 
-from rp2040py.native._clock cimport Alarm, Clock
+from rp2040py.native._clock cimport Alarm, Clock, RebaseListener
 
 
 cdef class ClockAlarm:
@@ -30,6 +30,8 @@ cdef class ClockAlarm:
 cdef class SimulationClock:
     cdef Clock _clock
     cdef set _armed
+    cdef list _rebase_callbacks
+    cdef RebaseListener _rebase_node
 
     cpdef ClockAlarm create_alarm(self, callback)
     cpdef ClockAlarm link_alarm(self, double nanos, ClockAlarm alarm)

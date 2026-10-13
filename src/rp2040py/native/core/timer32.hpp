@@ -65,6 +65,12 @@ public:
     void init(Clock* clock, double base_freq) noexcept {
         clock_ = clock;
         base_freq_ = base_freq;
+        clock_->add_rebase_listener(&rebase_listener_, &Timer32::on_rebase, this);  // the clock's origin moved: `base_ticks` is an absolute tick count
+    }
+
+    // Takes the counter off the clock's rebase list; the owner calls it before the counter goes away.
+    void detach() noexcept {
+        Clock::remove_rebase_listener(&rebase_listener_);
     }
 
     Clock* clock() const noexcept { return clock_; }
@@ -167,11 +173,14 @@ public:
     void attach(Timer32PeriodicAlarm* alarm) noexcept;
 
 private:
+    static void on_rebase(void* ctx, int64_t delta) noexcept { static_cast<Timer32*>(ctx)->base_ticks_ -= delta; }
+
     void updated() noexcept;
 
     Clock* clock_ = nullptr;
     double base_freq_ = 0.0;
     int64_t base_value_ = 0;
+    RebaseListener rebase_listener_;
     int64_t base_ticks_ = 0;  // the clock's time, in ticks, when the counter was last set
     int64_t top_value_ = kNoTop;
     double prescaler_ = 1.0;

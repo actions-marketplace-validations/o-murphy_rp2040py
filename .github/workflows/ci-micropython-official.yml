@@ -1,7 +1,8 @@
 name: MicroPython official tests (report only)
 
-# Runs MicroPython's own test files (ports/rp2 and extmod/machine_*) against the emulated board and LOGS what passes and what does not.
-# It never fails the push or the pull request: continue-on-error on the job, and the script exits 0. Read the job summary / artifact.
+# Runs MicroPython's own test files against the emulated board and LOGS what passes and what does not. Most groups only report: continue-on-error on the job, and the script
+# exits 0 - read the job summary / artifact. The PERIPHERALS group (ports/rp2, machine) is `strict: true`: it passes completely (record 0100: rp2_dma, after the integer clock)
+# so a FAIL, an ERROR or a HANG in it fails the job. A SKIP (a file that needs core 1, or skips itself) never does.
 
 on:
   push:
@@ -19,9 +20,9 @@ concurrency:
 
 jobs:
   official-tests:
-    name: MicroPython ${{ matrix.micropython_tag }} official tests - ${{ matrix.group.name }} (report only)
+    name: MicroPython ${{ matrix.micropython_tag }} official tests - ${{ matrix.group.name }} (${{ matrix.group.strict && 'gating' || 'report only' }})
     runs-on: ubuntu-latest
-    continue-on-error: true
+    continue-on-error: ${{ !matrix.group.strict }}
     timeout-minutes: 60
     strategy:
       fail-fast: false
@@ -32,6 +33,7 @@ jobs:
         group:
           - name: peripherals (ports/rp2, machine)
             globs: "ports/rp2/*.py extmod/machine_*.py"
+            strict: true
           - name: CPU - float, inline assembly
             globs: "float/*.py inlineasm/thumb/*.py"
           - name: CPU - basics a-l
@@ -57,9 +59,10 @@ jobs:
       - name: Clone MicroPython at the same tag (its tests are the suite)
         run: git clone --depth 1 --branch v${{ matrix.micropython_tag }} https://github.com/micropython/micropython.git "$RUNNER_TEMP/micropython"
 
-      - name: Run the suite (report only)
-        continue-on-error: true
+      - name: Run the suite (${{ matrix.group.strict && 'gating' || 'report only' }})
+        continue-on-error: ${{ !matrix.group.strict }}
         env:
+          STRICT: ${{ matrix.group.strict && '1' || '0' }}
           PER_TEST_TIMEOUT: "90"  # a CI runner is slower than a workstation: the stochastic basics/class_setname_hazard_rand.py took longer than 45 s there
         run: |
           source .venv/bin/activate

@@ -71,10 +71,14 @@ public:
         host_ = host;
         stream_alarm_.fire = &XipBlock::on_stream_alarm;
         stream_alarm_.ctx = this;
+        clock_->add_rebase_listener(&rebase_listener_, &XipBlock::on_rebase, this);  // the clock's origin moved: the flush deadline is an absolute tick count
     }
 
     // Unlinks the alarm from the clock; the owner calls it before the block goes away.
-    void detach() noexcept { cancel_alarm(&stream_alarm_); }
+    void detach() noexcept {
+        Clock::remove_rebase_listener(&rebase_listener_);
+        cancel_alarm(&stream_alarm_);
+    }
 
     bool failed() const noexcept { return host_failed(host_.failed); }
     int64_t raw_write_value() const noexcept { return raw_write_value_; }
@@ -253,6 +257,7 @@ public:
     XipHooks hooks() noexcept { return XipHooks{&XipBlock::hook_access, &XipBlock::hook_write_access, &XipBlock::hook_sram_read, &XipBlock::hook_sram_write, this}; }
 
 private:
+    static void on_rebase(void* ctx, int64_t delta) noexcept { static_cast<XipBlock*>(ctx)->flush_done_ticks -= delta; }
     static bool on_stream_alarm(void* ctx) noexcept {
         XipBlock* self = static_cast<XipBlock*>(ctx);
         self->on_stream_word();
@@ -318,6 +323,7 @@ private:
     const uint8_t* flash_ = nullptr;
     uint32_t flash_size_ = 0;
     Alarm stream_alarm_;
+    RebaseListener rebase_listener_;
     int64_t raw_write_value_ = 0;
 };
 

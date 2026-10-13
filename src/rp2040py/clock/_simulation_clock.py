@@ -6,7 +6,9 @@ relationship `_state_machine.py` has to `state_machine.py`.
 
 from __future__ import annotations
 
+import inspect
 import math
+import weakref
 from collections.abc import Callable
 
 from rp2040py.clock.clock import AlarmCallback, IAlarm, IClock
@@ -23,10 +25,13 @@ __all__ = (
 # beyond 104 days. A 125 MHz cycle is 128 ticks.
 TICKS_PER_NANO = 16
 MAX_TICKS = (1 << 63) // 2 - 1  # "never": times saturate here instead of growing past the C++ clock's int64
+# An idle chip fast-forwards (millions of simulated seconds per wall second when a periodic alarm is all that is pending), so the origin MOVES: once the time passes REBASE_AT the clock subtracts it from
+# `now`, from every linked alarm and - through the listeners - from every absolute tick count a block holds (docs/records/0100-integer-clock.md). `nanos` still never goes back.
+REBASE_AT = 1 << 58
 
 
 def nanos_to_ticks(nanos: float) -> int:
-    """A delta in nanoseconds as ticks: round half up, saturating at +-MAX_TICKS, NaN as 0 - the same function as `nanos_to_ticks` in core/clock.hpp."""
+    """A delta in nanoseconds as ticks: round half up (but a positive delta is at least one tick), saturating at +-MAX_TICKS, NaN as 0 - the same function as `nanos_to_ticks` in core/clock.hpp."""
     if math.isnan(nanos):
         return 0
     ticks = nanos * TICKS_PER_NANO
@@ -34,7 +39,10 @@ def nanos_to_ticks(nanos: float) -> int:
         return MAX_TICKS
     if ticks <= -MAX_TICKS:
         return -MAX_TICKS
-    return math.floor(ticks + 0.5)
+    rounded = math.floor(ticks + 0.5)
+    # A delay that is positive stays at least one tick: an alarm that re-arms itself with a vanishing positive delay must still move time forward, or the clock would fire it again
+    # at the very same instant, for ever (the float clock moved by the sliver, however small).
+    return 1 if rounded == 0 and ticks > 0 else rounded
 
 
 ClockEventCallback = Callable[[], None]
@@ -72,6 +80,9 @@ class SimulationClock(IClock):
         self.frequency = frequency
         self._next_alarm: ClockAlarm | None = None
         self._ticks: int = 0
+        self._rebased_ticks = 0
+        self._rebase_depth = 0
+        self._rebase_listeners: list[Callable[[], Callable[[int], None] | None]] = []
         self._cycle_remainder = 0.0
         self.saturated = False  # a time was clamped to MAX_TICKS
 
@@ -83,7 +94,42 @@ class SimulationClock(IClock):
     @property
     def nanos(self) -> float:
         """The time in nanoseconds, derived (inexact beyond 2**53 / 16 ns: take differences in `ticks`)."""
-        return self._ticks / TICKS_PER_NANO
+        return (self._ticks + self._rebased_ticks) / TICKS_PER_NANO
+
+    @property
+    def rebased_ticks(self) -> int:
+        """The ticks the origin has been moved by so far (`nanos` includes them, so it never goes back)."""
+        return self._rebased_ticks
+
+    def add_rebase_listener(self, callback: Callable[[int], None]) -> Callable[[], None]:
+        """`callback(delta)` is called when the origin moves: whoever holds an absolute `clock.ticks` value subtracts `delta` from it. Returns the function that unsubscribes it."""
+        # A bound method is held weakly: the clock must not keep its holder (a block, a chip) alive.
+        ref = weakref.WeakMethod(callback) if inspect.ismethod(callback) else (lambda: callback)
+        self._rebase_listeners.append(ref)
+
+        def unsubscribe() -> None:
+            if ref in self._rebase_listeners:
+                self._rebase_listeners.remove(ref)
+
+        return unsubscribe
+
+    def rebase(self, delta: int) -> None:
+        """Moves the origin by `delta` ticks (the clock does it itself at REBASE_AT; the tests call it by hand). Not from inside an alarm's callback."""
+        if delta <= 0 or delta > self._ticks:
+            return
+        self._ticks -= delta
+        self._rebased_ticks += delta
+        alarm = self._next_alarm
+        while alarm:
+            if alarm.ticks < MAX_TICKS:  # a "never" alarm stays at the end
+                alarm.ticks -= delta
+            alarm = alarm.next
+        for ref in list(self._rebase_listeners):
+            callback = ref()
+            if callback is None:
+                self._rebase_listeners.remove(ref)
+            else:
+                callback(delta)
 
     def _to_ticks(self, nanos: float) -> int:
         """`nanos_to_ticks`, recording a clamp."""
@@ -150,13 +196,24 @@ class SimulationClock(IClock):
 
     def tick_ticks(self, delta_ticks: int) -> None:
         target = self._add_ticks(self._ticks, delta_ticks)
-        alarm = self._next_alarm
-        while alarm and alarm.ticks <= target:
-            self._next_alarm = alarm.next
-            self._ticks = alarm.ticks
-            alarm.callback()
+        self._rebase_depth += 1
+        try:
             alarm = self._next_alarm
-        self._ticks = target
+            while alarm and alarm.ticks <= target:
+                self._next_alarm = alarm.next
+                self._ticks = max(
+                    self._ticks, alarm.ticks
+                )  # a callback may have ticked on itself: time never goes back
+                alarm.callback()
+                alarm = self._next_alarm
+            if (
+                delta_ticks < 0 or target > self._ticks
+            ):  # (a callback that ticked on itself may have gone past it already)
+                self._ticks = target
+        finally:
+            self._rebase_depth -= 1
+        if self._rebase_depth == 0 and self._ticks >= REBASE_AT:  # the outermost tick only: nothing is walking the list
+            self.rebase(self._ticks)
 
     def advance_cycles(self, cycles: int, ticks_per_cycle: float) -> None:
         """Advances by `cycles` periods of `ticks_per_cycle` ticks each (not a whole number in general: 120.30 at 133 MHz) with the fraction CARRIED between calls, so the long-run rate is exact

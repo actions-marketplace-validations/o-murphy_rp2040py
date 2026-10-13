@@ -212,6 +212,10 @@ cdef class RPROSC:
     def _hz(self, value):
         self._block.hz = <double> value
 
+    def __dealloc__(self):
+        # Off the clock's rebase list before the block goes away (a no-op if the clock is gone already).
+        self._block.detach()
+
     def reset(self):
         """Back to power-on (enabled, div 16, LOW range). Gated on `PSM.WDSEL`'s ROSC bit by `RP2040.reset()` (see the reference)."""
         if not self._block.reset():

@@ -108,6 +108,12 @@ class RPROSC(BasePeripheral):
         # The frequency this block last gave the chip (its own copy: the clock tree is told, it is not asked)
         self._hz = NOMINAL_HZ
         self._load_power_on_state()
+        rp2040.clock.add_rebase_listener(
+            self._rebased
+        )  # COUNT's epoch is an absolute tick count: it follows the clock when its origin moves
+
+    def _rebased(self, delta: int) -> None:
+        self._count_epoch -= delta
 
     def _load_power_on_state(self) -> None:
         self._ctrl = CTRL_RESET

@@ -37,6 +37,9 @@ at that alarm's time, exactly as before. The pure-Python reference stays the ora
 tests/test_simulation_clock_parity.py replays randomized alarm scripts against both.
 """
 
+import inspect
+import weakref
+
 from libcpp cimport bool
 
 from rp2040py.native._pending cimport has_pending_error, park_error, raise_if_pending
@@ -55,6 +58,20 @@ cdef bool _fire_alarm(void* ctx) noexcept:
         park_error(error)
         return False
     return True
+
+
+cdef void _rebase_trampoline(void* ctx, int64_t delta) noexcept:
+    """The origin moved (the clock reached `kRebaseAt`): tells the Python holders of an absolute tick count. They must not raise; an error is parked like any callback's."""
+    cdef SimulationClock clock = <SimulationClock> ctx
+    for ref in list(clock._rebase_callbacks):
+        callback = ref()
+        if callback is None:
+            clock._rebase_callbacks.remove(ref)
+            continue
+        try:
+            callback(delta)
+        except BaseException as error:
+            park_error(error)
 
 
 cdef class ClockAlarm:
@@ -101,6 +118,8 @@ cdef class ClockAlarm:
 cdef class SimulationClock:
     def __cinit__(self, *args, **kwargs):
         self._armed = set()
+        self._rebase_callbacks = []
+        self._clock.add_rebase_listener(&self._rebase_node, _rebase_trampoline, <void*> self)
 
     def __init__(self, double frequency=125e6):
         self._clock.frequency = frequency
@@ -121,6 +140,27 @@ cdef class SimulationClock:
     def ticks(self):
         """The time in ticks of 1/16 ns, exactly (`nanos` is derived from it)."""
         return self._clock.ticks()
+
+    @property
+    def rebased_ticks(self):
+        """The ticks the origin has been moved by so far (`nanos` includes them, so it never goes back)."""
+        return self._clock.rebased_ticks()
+
+    def add_rebase_listener(self, callback):
+        """`callback(delta)` is called when the origin moves: whoever holds an absolute `clock.ticks` value subtracts `delta` from it. Returns the function that unsubscribes it."""
+        # A bound method is held weakly: the clock must not keep its holder (a block, a chip) alive.
+        ref = weakref.WeakMethod(callback) if inspect.ismethod(callback) else (lambda: callback)
+        self._rebase_callbacks.append(ref)
+
+        def unsubscribe():
+            if ref in self._rebase_callbacks:
+                self._rebase_callbacks.remove(ref)
+
+        return unsubscribe
+
+    def rebase(self, delta):
+        """Moves the origin by `delta` ticks (the clock does it itself at `kRebaseAt`; the tests call it by hand)."""
+        self._clock.rebase(<int64_t> delta)
 
     @property
     def saturated(self):

@@ -73,7 +73,14 @@ class RPXIPCtrl(BasePeripheral):
         super().__init__(rp2040, name)
         self.sram = bytearray(SRAM_SIZE)  # the cache's data RAM: it keeps its contents through a flush and a reset
         self._stream_alarm = rp2040.clock.create_alarm(self._on_stream_word)
+        self.flush_done_ticks = 0
+        rp2040.clock.add_rebase_listener(
+            self._rebased
+        )  # the flush deadline is an absolute tick count: it follows the clock when its origin moves
         self.reset()
+
+    def _rebased(self, delta: int) -> None:
+        self.flush_done_ticks -= delta
 
     def reset(self) -> None:
         """The XIP domain, which is a `PSM.WDSEL` bit rather than a `RESETS` one - there is no `RESETS_RESET_XIP` (0089 Phase 5): the registers back to power-on, the stream stopped and its FIFO

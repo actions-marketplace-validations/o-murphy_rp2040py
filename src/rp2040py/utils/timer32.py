@@ -27,11 +27,15 @@ class Timer32:
 
         self._base_value = 0
         self._base_ticks: int = 0  # the clock's time in ticks of 1/16 ns when the counter was last set
+        clock.add_rebase_listener(self._rebased)  # ... and it follows the clock when its origin moves
         self._top_value = 0xFFFFFFFF
         self._prescaler_value: float = 1
         self._timer_mode = TimerMode.INCREMENT
         self._enabled = True
         self.listeners: list[Callable[[], None]] = []
+
+    def _rebased(self, delta: int) -> None:
+        self._base_ticks -= delta
 
     def reset(self) -> None:
         self._base_ticks = self.clock.ticks

@@ -71,12 +71,16 @@ class RPTimer(BasePeripheral):
         # the way real silicon does - `clock.nanos` is the *simulation's* time base and is never
         # reset (USB SOF, every other peripheral's alarms and the engine room all share it).
         self._epoch_ticks: int = 0  # in ticks of 1/16 ns, so that a difference with the clock stays exact however far into the run (docs/records/0100)
+        self.clock.add_rebase_listener(self._rebased)  # ... and follows the clock when its origin moves
         self.alarms = [
             RPTimerAlarm(ALARM_0, self.clock.create_alarm(lambda: self._fire_alarm(0))),
             RPTimerAlarm(ALARM_1, self.clock.create_alarm(lambda: self._fire_alarm(1))),
             RPTimerAlarm(ALARM_2, self.clock.create_alarm(lambda: self._fire_alarm(2))),
             RPTimerAlarm(ALARM_3, self.clock.create_alarm(lambda: self._fire_alarm(3))),
         ]
+
+    def _rebased(self, delta: int) -> None:
+        self._epoch_ticks -= delta
 
     def reset(self) -> None:
         """Registers and all four alarms, back to power-on (0089 Phase 5).

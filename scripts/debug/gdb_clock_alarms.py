@@ -1,6 +1,8 @@
+# ruff: noqa: BLE001
 # Run inside gdb attached to a running native emulator: `gdb -p <pid> -batch -x scripts/debug/gdb_clock_alarms.py`. Prints the simulated clock's alarm list (what the idle fast-forward is jumping between)
 # when the emulator spins and Python-level tools cannot say why (record 0100, the origin-move hang).
 import gdb
+
 gdb.execute("set pagination off")
 f = gdb.newest_frame()
 while f is not None:
@@ -19,7 +21,9 @@ try:
         if nm == "clock":
             clk = obj[nm]
     print("clock field:", clk)
-    sc = clk.cast(gdb.lookup_type("struct __pyx_obj_8rp2040py_6native_17_simulation_clock_SimulationClock").pointer()).dereference()
+    sc = clk.cast(
+        gdb.lookup_type("struct __pyx_obj_8rp2040py_6native_17_simulation_clock_SimulationClock").pointer()
+    ).dereference()
     c = sc["_clock"]
     print("Clock:", c)
     head = c["head_"]

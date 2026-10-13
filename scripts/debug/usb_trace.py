@@ -14,14 +14,35 @@ import signal
 import sys
 
 os.environ["RP2040PY_SKIP_CYTHON"] = "1"
-from rp2040py.peripherals import _usb as U  # noqa: E402
+from rp2040py.peripherals import _usb as U
 
 NAMES = {
     getattr(U, name): name
-    for name in (
-        "ADDR_ENDP MAIN_CTRL SOF_WR SOF_RD SIE_CTRL SIE_STATUS INT_EP_CTRL BUFF_STATUS BUFF_CPU_SHOULD_HANDLE EP_ABORT EP_ABORT_DONE EP_STALL_ARM NAK_POLL EP_STATUS_STALL_NAK USB_MUXING "
-        "USB_PWR USBPHY_DIRECT USBPHY_DIRECT_OVERRIDE USBPHY_TRIM INTR INTE INTF INTS"
-    ).split()
+    for name in [
+        "ADDR_ENDP",
+        "MAIN_CTRL",
+        "SOF_WR",
+        "SOF_RD",
+        "SIE_CTRL",
+        "SIE_STATUS",
+        "INT_EP_CTRL",
+        "BUFF_STATUS",
+        "BUFF_CPU_SHOULD_HANDLE",
+        "EP_ABORT",
+        "EP_ABORT_DONE",
+        "EP_STALL_ARM",
+        "NAK_POLL",
+        "EP_STATUS_STALL_NAK",
+        "USB_MUXING",
+        "USB_PWR",
+        "USBPHY_DIRECT",
+        "USBPHY_DIRECT_OVERRIDE",
+        "USBPHY_TRIM",
+        "INTR",
+        "INTE",
+        "INTF",
+        "INTS",
+    ]
 }
 HEAD = 400
 log: collections.deque = collections.deque(maxlen=80)
@@ -38,7 +59,12 @@ def now(usb) -> int:
     return int(usb.rp2040.clock.ticks)  # 1/16 ns
 
 
-read, write, dpram, done = U.RPUSBController.read_uint32, U.RPUSBController.write_uint32, U.RPUSBController.dpram_updated, U.RPUSBController._buffer_done
+read, write, dpram, done = (
+    U.RPUSBController.read_uint32,
+    U.RPUSBController.write_uint32,
+    U.RPUSBController.dpram_updated,
+    U.RPUSBController._buffer_done,
+)
 
 
 def traced_read(self, offset):
@@ -83,4 +109,6 @@ if __name__ == "__main__":
     signal.alarm(int(sys.argv[2]))
     from rp2040py.cli import main
 
-    main(["micropython", "--image", sys.argv[1], "--expect-text", sys.argv[3] if len(sys.argv) > 3 else "Hello, world!"])
+    main(
+        ["micropython", "--image", sys.argv[1], "--expect-text", sys.argv[3] if len(sys.argv) > 3 else "Hello, world!"]
+    )

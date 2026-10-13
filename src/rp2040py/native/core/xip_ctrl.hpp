@@ -54,7 +54,7 @@ constexpr double FLUSH_CYCLES = 1026.0;
 constexpr uint32_t SRAM_SIZE = 16 * 1024, FIFO_DEPTH = 2, STREAM_CTR_MASK = 0x3FFFFFu;
 constexpr double STREAM_WORD_CLOCKS = 32.0;
 constexpr uint32_t COUNTER_MAX = 0xFFFFFFFFu;
-constexpr uint32_t ALIAS_ALLOCATING = 0, ALIAS_NOALLOC = 1, ALIAS_NOCACHE = 2, ALIAS_BYPASS = 3;
+constexpr uint32_t ALIAS_ALLOCATING = 0, ALIAS_NOCACHE = 2, ALIAS_BYPASS = 3;  // 0x10... allocating, 0x12... non-cacheable, 0x13... bypass; 0x11... (non-allocating) is "none of those"
 }  // namespace xip_regs
 
 class XipBlock {

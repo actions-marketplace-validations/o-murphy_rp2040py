@@ -12,5 +12,8 @@
     "if (!host_.device_setup(host_.ctx, dpram_ + HOST_SETUP_PACKET, &has_response)) return false; |  +  ->  - ": "HOST_SETUP_PACKET is 0",
     "bool present = false; | false -> true": "the host function always assigns it before it is read",
     "if (data_len < available) available = data_len; |  <  ->  <= ": "equal sizes: assigning the same value"
+  },
+  "clocks": {
+    "fc_started_hz_ = 0.0; | delete": "fc_start() overwrites it before fc_done() can run: the alarm only exists after a start"
   }
 }

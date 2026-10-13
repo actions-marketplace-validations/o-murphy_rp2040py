@@ -20,6 +20,9 @@ static int failures = 0;
 
 constexpr double MHZ = 1e6;
 
+// A register write that succeeds.
+#define W(offset, value) CHECK(clocks.write((offset), (value)))
+
 struct Call {
     char sink;  // 's'ys, 'p'eri, 'r'ef, 'c' (rtc)
     double hz, old;
@@ -59,6 +62,11 @@ static bool record(char sink, double hz, double old) {
 static bool on_sys(void*, double hz, double old) { return record('s', hz, old); }
 static bool on_sys2(void*, double hz, double old) { return record('S', hz, old); }
 static bool on_peri(void*, double hz, double old) { return record('p', hz, old); }
+static int ctx_seen = 0;
+static bool on_ctx(void* ctx, double, double) {
+    ctx_seen = *static_cast<int*>(ctx);
+    return true;
+}
 static bool on_ref(void*, double hz, double old) { return record('r', hz, old); }
 static bool on_rtc(void*, double hz, double old) { return record('c', hz, old); }
 
@@ -105,9 +113,9 @@ static void sdk_pll(PllBlock& pll, uint32_t fbdiv, uint32_t pd1, uint32_t pd2) {
 // clocks_init(): clk_ref on the crystal, clk_sys on PLL_SYS (aux), clk_peri on clk_sys.
 static void sdk_clocks() {
     sdk_pll(pll_sys, 125, 6, 2);
-    clocks.write(REF_CTRL, REF_SRC_XOSC);
-    clocks.write(SYS_CTRL, 0x1 | (SYS_AUXSRC_PLL_SYS << 5));
-    clocks.write(PERI_CTRL, GEN_ENABLE | (PERI_AUXSRC_CLK_SYS << 5));
+    W(REF_CTRL, REF_SRC_XOSC);
+    W(SYS_CTRL, 0x1 | (SYS_AUXSRC_PLL_SYS << 5));
+    W(PERI_CTRL, GEN_ENABLE | (PERI_AUXSRC_CLK_SYS << 5));
 }
 
 static void test_defaults() {
@@ -123,35 +131,49 @@ static void test_defaults() {
 
 static void test_register_masks() {
     fresh();
-    clocks.write(REF_DIV, 0xFFFFFFFFu);
+    W(REF_DIV, 0xFFFFFFFFu);
     CHECK(clocks.read(REF_DIV) == 0x300);
-    clocks.write(USB_DIV, 0xFFFFFFFFu);
+    W(USB_DIV, 0xFFFFFFFFu);
     CHECK(clocks.read(USB_DIV) == 0x300);
-    clocks.write(ADC_DIV, 0xFFFFFFFFu);
+    W(ADC_DIV, 0xFFFFFFFFu);
     CHECK(clocks.read(ADC_DIV) == 0x300);
-    clocks.write(SYS_DIV, 0xFFFFFFFFu);
+    W(SYS_DIV, 0xFFFFFFFFu);
     CHECK(clocks.read(SYS_DIV) == 0xFFFFFFFFu);
-    clocks.write(REF_CTRL, 0xFFFFFFFFu);
+    W(REF_CTRL, 0xFFFFFFFFu);
     CHECK(clocks.read(REF_CTRL) == 0x63 && clocks.read(REF_SELECTED) == 8);
-    clocks.write(SYS_CTRL, 0xFFFFFFFFu);
+    W(SYS_CTRL, 0xFFFFFFFFu);
     CHECK(clocks.read(SYS_CTRL) == 0xE1 && clocks.read(SYS_SELECTED) == 2);
-    clocks.write(PERI_CTRL, 0xFFFFFFFFu);
+    W(PERI_CTRL, 0xFFFFFFFFu);
     CHECK(clocks.read(PERI_CTRL) == 0b110011100000);
-    clocks.write(RTC_CTRL, 0xFFFFFFFFu);
+    W(RTC_CTRL, 0xFFFFFFFFu);
     CHECK(clocks.read(RTC_CTRL) == 0b100110000110011100000);
-    clocks.write(SYS_RESUS_CTRL, 0xFFFFFFFFu);
+    W(SYS_RESUS_CTRL, 0xFFFFFFFFu);
     CHECK(clocks.read(SYS_RESUS_CTRL) == 0x111FF);
-    clocks.write(WAKE_EN1, 0xFFFFFFFFu);
-    clocks.write(SLEEP_EN1, 0xFFFFFFFFu);
+    W(WAKE_EN1, 0xFFFFFFFFu);
+    W(SLEEP_EN1, 0xFFFFFFFFu);
     CHECK(clocks.read(WAKE_EN1) == 0x7FFF && clocks.read(SLEEP_EN1) == 0x7FFF);
-    clocks.write(INTE, 0xFFFFFFFFu);
-    clocks.write(INTF, 0xFFFFFFFFu);
+    W(INTE, 0xFFFFFFFFu);
+    W(INTF, 0xFFFFFFFFu);
     CHECK(clocks.read(INTE) == 1 && clocks.read(INTF) == 1 && clocks.read(INTS) == 1);
-    clocks.write(ENABLED0, 5);
-    clocks.write(INTS, 5);
-    clocks.write(SYS_RESUS_STATUS, 5);
+    W(ENABLED0, 5);
+    W(INTS, 5);
+    W(SYS_RESUS_STATUS, 5);
     CHECK(clocks.read(ENABLED0) == 0 && clocks.read(INTS) == 1 && clocks.read(SYS_RESUS_STATUS) == 0);
     CHECK(env.warns == 0);
+}
+
+static void test_gpout_registers_are_stored() {
+    fresh();
+    const uint32_t ctrl[4] = {GPOUT0_CTRL, GPOUT1_CTRL, GPOUT2_CTRL, GPOUT3_CTRL}, div[4] = {GPOUT0_DIV, GPOUT1_DIV, GPOUT2_DIV, GPOUT3_DIV};
+    for (int i = 0; i < 4; ++i) {
+        CHECK(clocks.read(ctrl[i]) == 0 && clocks.read(div[i]) == 0x100);
+        W(ctrl[i], 0xFFFFFFFFu);
+        W(div[i], 0x12345678u);
+        CHECK(clocks.read(ctrl[i]) == 0b100110001110111100000 && clocks.read(div[i]) == 0x12345678u);
+    }
+    clocks.reset();
+    for (int i = 0; i < 4; ++i) CHECK(clocks.read(ctrl[i]) == 0 && clocks.read(div[i]) == 0x100);
+    CHECK(env.n == 0);  // nothing runs from them
 }
 
 static void test_the_sdk_sequence_settles_at_125_mhz() {
@@ -182,9 +204,9 @@ static void test_a_retune_with_no_change_tells_only_the_ref_and_rtc_sinks() {
     fresh();
     sdk_clocks();
     env.n = 0;
-    clocks.write(PERI_DIV, 0x200);  // stored: no retune
+    W(PERI_DIV, 0x200);  // stored: no retune
     CHECK(env.n == 0);
-    clocks.write(SYS_DIV, 0x100);  // same divisor: a retune that changes nothing
+    W(SYS_DIV, 0x100);  // same divisor: a retune that changes nothing
     CHECK(env.n == 2);
     CHECK(env.calls[0].sink == 'r' && env.calls[0].hz == 12 * MHZ);  // clk_ref is on the crystal
     CHECK(env.calls[1].sink == 'c' && env.calls[1].hz == 0.0);       // clk_rtc is stopped
@@ -192,7 +214,7 @@ static void test_a_retune_with_no_change_tells_only_the_ref_and_rtc_sinks() {
 
 static void test_a_bare_chips_first_write_follows_the_ring_oscillator() {
     fresh();
-    clocks.write(SYS_DIV, 0x100);  // clk_sys comes from clk_ref, which is on the ring oscillator until firmware says otherwise
+    W(SYS_DIV, 0x100);  // clk_sys comes from clk_ref, which is on the ring oscillator until firmware says otherwise
     CHECK(clocks.clk_sys() == 6.5 * MHZ);
     CHECK(env.n == 4 && env.calls[0].sink == 's' && env.calls[0].old == 125 * MHZ && env.calls[1].sink == 'S');
 }
@@ -201,7 +223,7 @@ static void test_a_stopped_or_unmodelled_source_keeps_the_last_value() {
     fresh();
     sdk_clocks();
     env.n = 0;
-    clocks.write(SYS_CTRL, 0x1 | (4u << 5));  // AUXSRC GPIN0: not modelled, 0 Hz
+    W(SYS_CTRL, 0x1 | (4u << 5));  // AUXSRC GPIN0: not modelled, 0 Hz
     CHECK(clocks.clk_sys() == 125 * MHZ);
     CHECK(env.n == 2 && env.calls[0].sink == 'r');
 }
@@ -209,24 +231,24 @@ static void test_a_stopped_or_unmodelled_source_keeps_the_last_value() {
 static void test_clk_sys_dividers() {
     fresh();
     sdk_clocks();
-    clocks.write(SYS_DIV, (2u << 8) | 128);  // 2.5
+    W(SYS_DIV, (2u << 8) | 128);  // 2.5
     CHECK(clocks.clk_sys() == 50 * MHZ);
-    clocks.write(SYS_DIV, 0);  // INT 0: 2**16
+    W(SYS_DIV, 0);  // INT 0: 2**16
     CHECK(clocks.clk_sys() == 125 * MHZ / 65536.0);
 }
 
 static void test_clk_sys_straight_off_the_crystal_and_clk_ref() {
     fresh();
-    clocks.write(SYS_CTRL, 0x1 | (SYS_AUXSRC_XOSC << 5));
+    W(SYS_CTRL, 0x1 | (SYS_AUXSRC_XOSC << 5));
     CHECK(clocks.clk_sys() == 12 * MHZ);
     fresh();
-    clocks.write(REF_CTRL, REF_SRC_XOSC);
-    clocks.write(SYS_CTRL, SYS_SRC_REF);
+    W(REF_CTRL, REF_SRC_XOSC);
+    W(SYS_CTRL, SYS_SRC_REF);
     CHECK(clocks.clk_sys() == 12 * MHZ);
-    clocks.write(REF_DIV, 2u << 8);
+    W(REF_DIV, 2u << 8);
     CHECK(clocks.clk_sys() == 6 * MHZ);
     fresh();
-    clocks.write(REF_CTRL, REF_SRC_AUX | (REF_AUXSRC_PLL_USB << 5));
+    W(REF_CTRL, REF_SRC_AUX | (REF_AUXSRC_PLL_USB << 5));
     CHECK(clocks.ref_freq() == 0.0);  // PLL_USB is off
     sdk_pll(pll_usb, 100, 5, 5);
     CHECK(clocks.ref_freq() == 48 * MHZ);
@@ -235,9 +257,9 @@ static void test_clk_sys_straight_off_the_crystal_and_clk_ref() {
 static void test_a_disabled_crystal_gives_no_clock() {
     fresh();
     env.xosc = 0.0;
-    clocks.write(REF_CTRL, REF_SRC_XOSC);
+    W(REF_CTRL, REF_SRC_XOSC);
     CHECK(clocks.ref_freq() == 0.0);
-    clocks.write(SYS_CTRL, 0x1 | (SYS_AUXSRC_XOSC << 5));
+    W(SYS_CTRL, 0x1 | (SYS_AUXSRC_XOSC << 5));
     CHECK(clocks.clk_sys() == 125 * MHZ);  // 0 keeps the last value
 }
 
@@ -245,50 +267,50 @@ static void test_clk_peri_sources() {
     fresh();
     sdk_clocks();
     env.n = 0;
-    clocks.write(PERI_CTRL, GEN_ENABLE | (PERI_AUXSRC_XOSC << 5));
+    W(PERI_CTRL, GEN_ENABLE | (PERI_AUXSRC_XOSC << 5));
     CHECK(clocks.clk_peri() == 12 * MHZ);
     CHECK(env.calls[0].sink == 'p' && env.calls[0].hz == 12 * MHZ && env.calls[0].old == 125 * MHZ);
-    clocks.write(PERI_CTRL, GEN_ENABLE | (PERI_AUXSRC_ROSC << 5));
+    W(PERI_CTRL, GEN_ENABLE | (PERI_AUXSRC_ROSC << 5));
     CHECK(clocks.clk_peri() == 6.5 * MHZ);
     sdk_pll(pll_usb, 100, 5, 5);
-    clocks.write(PERI_CTRL, GEN_ENABLE | (PERI_AUXSRC_PLL_USB << 5));
+    W(PERI_CTRL, GEN_ENABLE | (PERI_AUXSRC_PLL_USB << 5));
     CHECK(clocks.clk_peri() == 48 * MHZ);
-    clocks.write(PERI_CTRL, GEN_ENABLE | (PERI_AUXSRC_PLL_SYS << 5));
+    W(PERI_CTRL, GEN_ENABLE | (PERI_AUXSRC_PLL_SYS << 5));
     CHECK(clocks.clk_peri() == 125 * MHZ);
-    clocks.write(PERI_CTRL, GEN_ENABLE | GEN_KILL);  // killed: 0 keeps the last value
+    W(PERI_CTRL, GEN_ENABLE | GEN_KILL);  // killed: 0 keeps the last value
     CHECK(clocks.peri_freq() == 0.0 && clocks.clk_peri() == 125 * MHZ);
-    clocks.write(PERI_CTRL, 0);
+    W(PERI_CTRL, 0);
     CHECK(clocks.peri_freq() == 0.0);
 }
 
 static void test_the_aux_generators() {
     fresh();
     CHECK(clocks.rtc_freq() == 0.0 && clocks.usb_freq() == 0.0 && clocks.adc_freq() == 0.0);  // ENABLE is clear at reset
-    clocks.write(RTC_CTRL, GEN_ENABLE | (AUX_XOSC << 5));
-    clocks.write(RTC_DIV, 256u << 8);
+    W(RTC_CTRL, GEN_ENABLE | (AUX_XOSC << 5));
+    W(RTC_DIV, 256u << 8);
     CHECK(clocks.rtc_freq() == 12 * MHZ / 256.0);
-    clocks.write(RTC_CTRL, GEN_ENABLE | (AUX_ROSC << 5));
+    W(RTC_CTRL, GEN_ENABLE | (AUX_ROSC << 5));
     CHECK(clocks.rtc_freq() == 6.5 * MHZ / 256.0);
-    clocks.write(RTC_CTRL, GEN_ENABLE | GEN_KILL | (AUX_XOSC << 5));
+    W(RTC_CTRL, GEN_ENABLE | GEN_KILL | (AUX_XOSC << 5));
     CHECK(clocks.rtc_freq() == 0.0);
-    clocks.write(USB_CTRL, GEN_ENABLE | (AUX_XOSC << 5));
-    clocks.write(USB_DIV, 2u << 8);
+    W(USB_CTRL, GEN_ENABLE | (AUX_XOSC << 5));
+    W(USB_DIV, 2u << 8);
     CHECK(clocks.usb_freq() == 6 * MHZ);
-    clocks.write(ADC_CTRL, GEN_ENABLE | (4u << 5));  // GPIN0
+    W(ADC_CTRL, GEN_ENABLE | (4u << 5));  // GPIN0
     CHECK(clocks.adc_freq() == 0.0);
     sdk_pll(pll_usb, 100, 5, 5);
-    clocks.write(ADC_CTRL, GEN_ENABLE | (AUX_PLL_USB << 5));
+    W(ADC_CTRL, GEN_ENABLE | (AUX_PLL_USB << 5));
     CHECK(clocks.adc_freq() == 48 * MHZ);
-    clocks.write(ADC_CTRL, GEN_ENABLE | (AUX_PLL_SYS << 5));
+    W(ADC_CTRL, GEN_ENABLE | (AUX_PLL_SYS << 5));
     CHECK(clocks.adc_freq() == 0.0);  // PLL_SYS is off
     // clk_rtc moves: the rtc sink hears of it with the new rate
     env.n = 0;
-    clocks.write(RTC_CTRL, GEN_ENABLE | (AUX_XOSC << 5));
+    W(RTC_CTRL, GEN_ENABLE | (AUX_XOSC << 5));
     CHECK(env.n == 2 && env.calls[1].sink == 'c' && env.calls[1].hz == 12 * MHZ / 256.0);
     // usb / adc register writes and CLK_PERI_DIV do not retune
     env.n = 0;
-    clocks.write(USB_CTRL, 0);
-    clocks.write(ADC_DIV, 0x100);
+    W(USB_CTRL, 0);
+    W(ADC_DIV, 0x100);
     CHECK(env.n == 0);
 }
 
@@ -296,11 +318,25 @@ static void test_reset_and_the_tree_reset() {
     fresh();
     sdk_clocks();
     sdk_pll(pll_usb, 100, 5, 5);
-    clocks.write(RTC_CTRL, GEN_ENABLE | (AUX_XOSC << 5));
-    clocks.write(SYS_CTRL, 0x1 | (SYS_AUXSRC_XOSC << 5));
+    W(RTC_CTRL, GEN_ENABLE | (AUX_XOSC << 5));
+    W(SYS_CTRL, 0x1 | (SYS_AUXSRC_XOSC << 5));
     CHECK(clocks.clk_sys() == 12 * MHZ);
+    W(WAKE_EN0, 0);
+    W(WAKE_EN1, 0);
+    W(SLEEP_EN0, 0);
+    W(SLEEP_EN1, 0);
+    W(SYS_RESUS_CTRL, 0);
+    W(INTE, 1);
+    W(INTF, 1);
+    W(FC0_MIN_KHZ, 5);
+    W(FC0_MAX_KHZ, 5);
+    W(FC0_DELAY, 5);
+    W(FC0_INTERVAL, 5);
     clocks.reset();
-    CHECK(clocks.read(SYS_CTRL) == 0 && clocks.read(RTC_DIV) == 0x100 && clocks.read(WAKE_EN0) == 0xFFFFFFFFu);
+    CHECK(clocks.read(WAKE_EN0) == 0xFFFFFFFFu && clocks.read(WAKE_EN1) == 0x7FFF && clocks.read(SLEEP_EN0) == 0xFFFFFFFFu && clocks.read(SLEEP_EN1) == 0x7FFF);
+    CHECK(clocks.read(SYS_RESUS_CTRL) == 0xFF && clocks.read(INTE) == 0 && clocks.read(INTF) == 0);
+    CHECK(clocks.read(FC0_MIN_KHZ) == 0 && clocks.read(FC0_MAX_KHZ) == 0x1FFFFFF && clocks.read(FC0_DELAY) == 1 && clocks.read(FC0_INTERVAL) == 8);
+    CHECK(clocks.read(SYS_CTRL) == 0 && clocks.read(RTC_DIV) == 0x100);
     CHECK(clocks.clk_sys() == 12 * MHZ);  // reset() alone is registers only
     env.n = 0;
     CHECK(clocks.reset_tree());
@@ -325,6 +361,71 @@ static void test_a_failing_sink_stops_the_retune() {
     CHECK(clocks.clk_sys() == 12 * MHZ);  // the value was already taken
 }
 
+static void test_a_sink_gets_its_own_context() {
+    fresh();
+    static int token = 42;
+    ctx_seen = 0;
+    CHECK(clocks.add_rtc_sink(on_ctx, &token));
+    W(SYS_DIV, 0x100);
+    CHECK(ctx_seen == 42);
+}
+
+static void test_a_failing_peri_ref_or_rtc_sink_stops_the_retune() {
+    fresh();
+    sdk_clocks();
+    env.n = 0;
+    env.fail_sink = 3;  // s, S, then the peri sink
+    clocks.write(SYS_CTRL, 0x1 | (SYS_AUXSRC_XOSC << 5));
+    fresh();
+    sdk_clocks();
+    W(PERI_CTRL, GEN_ENABLE | (PERI_AUXSRC_XOSC << 5));  // clk_peri 12 MHz
+    env.n = 0;
+    env.fail_sink = 1;  // the peri sink is the first call of this retune
+    CHECK(!clocks.write(PERI_CTRL, GEN_ENABLE | (PERI_AUXSRC_CLK_SYS << 5)));
+    CHECK(env.n == 1 && env.calls[0].sink == 'p');
+    fresh();
+    sdk_clocks();
+    env.n = 0;
+    env.fail_sink = 1;  // no clock changes: the ref sink is the first call
+    CHECK(!clocks.write(SYS_DIV, 0x100));
+    CHECK(env.n == 1 && env.calls[0].sink == 'r');
+    fresh();
+    sdk_clocks();
+    env.n = 0;
+    env.fail_sink = 2;
+    CHECK(!clocks.write(SYS_DIV, 0x100));
+    CHECK(env.n == 2 && env.calls[1].sink == 'c');
+}
+
+static void test_reset_tree_stops_at_a_failing_sink() {
+    fresh();
+    sdk_clocks();
+    W(SYS_CTRL, 0x1 | (SYS_AUXSRC_XOSC << 5));
+    W(PERI_CTRL, GEN_ENABLE | (PERI_AUXSRC_ROSC << 5));
+    clocks.reset();
+    env.n = 0;
+    env.fail_sink = 1;  // the first sys sink
+    CHECK(!clocks.reset_tree());
+    CHECK(env.n == 1);
+    fresh();
+    sdk_clocks();
+    W(PERI_CTRL, GEN_ENABLE | (PERI_AUXSRC_ROSC << 5));  // clk_peri 6.5 MHz, clk_sys stays 125 MHz
+    clocks.reset();
+    env.n = 0;
+    env.fail_sink = 1;  // the peri sink is the first call: clk_sys is already at the default
+    CHECK(!clocks.reset_tree());
+    CHECK(env.n == 1 && env.calls[0].sink == 'p');
+    CHECK(clocks.clk_peri() == 125 * MHZ);
+}
+
+static void test_a_parked_failure_stops_an_alias_write() {
+    fresh();
+    env.failed = 1;
+    const uint32_t before = clocks.read(SYS_DIV);
+    CHECK(!clocks.write_atomic(SYS_DIV, 0x1, kAtomicSet));
+    CHECK(clocks.read(SYS_DIV) == before);
+}
+
 static void test_sink_lists_are_bounded() {
     fresh();
     for (uint32_t i = 0; i < kClockSinkCapacity - 2; ++i) CHECK(clocks.add_sys_sink(on_sys, nullptr));  // two are there already
@@ -333,16 +434,16 @@ static void test_sink_lists_are_bounded() {
 
 // ---- the frequency counter ----
 static void fc_run(uint32_t src, uint32_t ref_khz = 12000) {
-    clocks.write(FC0_REF_KHZ, ref_khz);
-    clocks.write(FC0_SRC, src);
+    W(FC0_REF_KHZ, ref_khz);
+    W(FC0_SRC, src);
 }
 
 static void test_a_count_runs_for_the_interval() {
     fresh();
     fc_run(FC0_SRC_XOSC);  // the default interval 8: 250.88 us, after one reference period of delay
-    clk.tick(1e6 / 12000 + 250880 - 1);
+    CHECK(clk.tick(1e6 / 12000 + 250880 - 1));
     CHECK(clocks.read(FC0_STATUS) == FC0_STATUS_RUNNING);
-    clk.tick(2);
+    CHECK(clk.tick(2));  // the alarm lets time go on
     CHECK(clocks.read(FC0_STATUS) == (FC0_STATUS_DONE | FC0_STATUS_PASS));
     CHECK(clocks.read(FC0_RESULT) == 12000u << 5);
     fc_run(FC0_SRC_ROSC);
@@ -365,16 +466,16 @@ static void test_every_source_of_the_counter() {
         CHECK(clocks.read(FC0_STATUS) == (FC0_STATUS_DONE | FC0_STATUS_PASS));
         CHECK(clocks.read(FC0_RESULT) >> 5 == c.khz);
     }
-    clocks.write(USB_CTRL, GEN_ENABLE | (AUX_PLL_USB << 5));
+    W(USB_CTRL, GEN_ENABLE | (AUX_PLL_USB << 5));
     fc_run(FC0_SRC_CLK_USB);
     clk.tick(400000);
     CHECK(clocks.read(FC0_RESULT) >> 5 == 48000);
-    clocks.write(ADC_CTRL, GEN_ENABLE | (AUX_XOSC << 5));
+    W(ADC_CTRL, GEN_ENABLE | (AUX_XOSC << 5));
     fc_run(FC0_SRC_CLK_ADC);
     clk.tick(400000);
     CHECK(clocks.read(FC0_RESULT) >> 5 == 12000);
-    clocks.write(RTC_CTRL, GEN_ENABLE | (AUX_XOSC << 5));
-    clocks.write(RTC_DIV, 256u << 8);
+    W(RTC_CTRL, GEN_ENABLE | (AUX_XOSC << 5));
+    W(RTC_DIV, 256u << 8);
     fc_run(FC0_SRC_CLK_RTC);
     clk.tick(400000);
     CHECK(clocks.read(FC0_RESULT) >> 5 == 46 && (clocks.read(FC0_RESULT) & 31) == 28);  // 46.875 kHz
@@ -392,17 +493,39 @@ static void test_a_stopped_clock_died() {
 
 static void test_min_and_max() {
     fresh();
-    clocks.write(FC0_REF_KHZ, 12000);
+    W(FC0_REF_KHZ, 12000);
     auto run = [](uint32_t mn, uint32_t mx) {
-        clocks.write(FC0_MIN_KHZ, mn);
-        clocks.write(FC0_MAX_KHZ, mx);
-        clocks.write(FC0_SRC, FC0_SRC_XOSC);
+        W(FC0_MIN_KHZ, mn);
+        W(FC0_MAX_KHZ, mx);
+        W(FC0_SRC, FC0_SRC_XOSC);
         clk.tick(300000);
         return clocks.read(FC0_STATUS);
     };
     CHECK(run(11000, 13000) == (FC0_STATUS_DONE | FC0_STATUS_PASS));
     CHECK(run(13000, 20000) == (FC0_STATUS_DONE | FC0_STATUS_SLOW | FC0_STATUS_FAIL));
     CHECK(run(0, 11000) == (FC0_STATUS_DONE | FC0_STATUS_FAST | FC0_STATUS_FAIL));
+    CHECK(run(12000, 12000) == (FC0_STATUS_DONE | FC0_STATUS_PASS));  // the limits are inclusive
+}
+
+static void test_a_clock_that_starts_or_ends_stopped_died() {
+    fresh();
+    W(FC0_REF_KHZ, 12000);
+    W(RTC_CTRL, GEN_ENABLE | (AUX_XOSC << 5));
+    W(FC0_SRC, FC0_SRC_CLK_RTC);
+    W(RTC_CTRL, GEN_ENABLE | GEN_KILL);  // running at the start, stopped by the end
+    clk.tick(400000);
+    CHECK(clocks.read(FC0_STATUS) == (FC0_STATUS_DONE | FC0_STATUS_DIED | FC0_STATUS_FAIL));
+    W(RTC_CTRL, 0);
+    W(FC0_SRC, FC0_SRC_CLK_RTC);  // stopped at the start
+    W(RTC_CTRL, GEN_ENABLE | (AUX_XOSC << 5));  // running at the end
+    clk.tick(400000);
+    CHECK(clocks.read(FC0_STATUS) == (FC0_STATUS_DONE | FC0_STATUS_DIED | FC0_STATUS_FAIL));
+    // a start clears the previous result
+    fc_run(FC0_SRC_XOSC);
+    clk.tick(400000);
+    CHECK(clocks.read(FC0_RESULT) == 12000u << 5);
+    W(FC0_SRC, FC0_SRC_XOSC);
+    CHECK(clocks.read(FC0_STATUS) == FC0_STATUS_RUNNING && clocks.read(FC0_RESULT) == 0);
 }
 
 static void test_a_new_count_replaces_the_one_in_progress_and_reset_clears_it() {
@@ -410,7 +533,7 @@ static void test_a_new_count_replaces_the_one_in_progress_and_reset_clears_it() 
     fc_run(FC0_SRC_XOSC);
     clk.tick(100000);
     CHECK(clocks.read(FC0_STATUS) == FC0_STATUS_RUNNING);
-    clocks.write(FC0_SRC, FC0_SRC_ROSC);  // restarts: the first alarm is gone
+    W(FC0_SRC, FC0_SRC_ROSC);  // restarts: the first alarm is gone
     clk.tick(200000);
     CHECK(clocks.read(FC0_STATUS) == FC0_STATUS_RUNNING);
     clk.tick(100000);
@@ -420,8 +543,8 @@ static void test_a_new_count_replaces_the_one_in_progress_and_reset_clears_it() 
     CHECK(clocks.read(FC0_STATUS) == 0 && clocks.read(FC0_SRC) == 0 && clocks.read(FC0_REF_KHZ) == 0);
     clk.tick(1000000);
     CHECK(clocks.read(FC0_STATUS) == 0);  // the cancelled alarm never fired
-    clocks.write(FC0_STATUS, 0xFFFFFFFFu);
-    clocks.write(FC0_RESULT, 0xFFFFFFFFu);
+    W(FC0_STATUS, 0xFFFFFFFFu);
+    W(FC0_RESULT, 0xFFFFFFFFu);
     CHECK(clocks.read(FC0_STATUS) == 0 && clocks.read(FC0_RESULT) == 0);
 }
 
@@ -429,11 +552,14 @@ static void test_unimplemented_offsets_warn() {
     fresh();
     CHECK(clocks.read(0xC8) == 0xFFFFFFFFu);
     CHECK(env.warns == 1 && env.warn_kind[0] == kClocksWarnRead && env.warn_offset[0] == 0xC8);
-    clocks.write(0xCC, 7);
+    W(0xCC, 7);
     CHECK(env.warns == 2 && env.warn_kind[1] == kClocksWarnWrite && env.warn_value[1] == 7);
     fresh();
     CHECK(clocks.read(0x1008) == 0xFFFFFFFFu);
     CHECK(env.warns == 2 && env.warn_kind[1] == kClocksWarnReadAtomicArea);
+    fresh();
+    CHECK(clocks.read(0x1000) == 0xFFFFFFFFu);  // the atomic area starts above 0x1000
+    CHECK(env.warns == 1);
 }
 
 static void test_atomic_aliases_decode_against_a_read() {
@@ -451,6 +577,7 @@ static void test_atomic_aliases_decode_against_a_read() {
 int main() {
     test_defaults();
     test_register_masks();
+    test_gpout_registers_are_stored();
     test_the_sdk_sequence_settles_at_125_mhz();
     test_a_200_mhz_clk_sys_and_the_order_of_the_sinks();
     test_a_retune_with_no_change_tells_only_the_ref_and_rtc_sinks();
@@ -463,7 +590,12 @@ int main() {
     test_the_aux_generators();
     test_reset_and_the_tree_reset();
     test_a_failing_sink_stops_the_retune();
+    test_a_sink_gets_its_own_context();
+    test_a_failing_peri_ref_or_rtc_sink_stops_the_retune();
+    test_reset_tree_stops_at_a_failing_sink();
+    test_a_parked_failure_stops_an_alias_write();
     test_sink_lists_are_bounded();
+    test_a_clock_that_starts_or_ends_stopped_died();
     test_a_count_runs_for_the_interval();
     test_every_source_of_the_counter();
     test_a_stopped_clock_died();

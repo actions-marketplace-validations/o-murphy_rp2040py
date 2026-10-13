@@ -25,6 +25,7 @@ struct Env {
     int changed = 0;
     double xosc = 12e6;
     int failed = 0;
+    bool fail_changed = false;
 };
 static Env env;
 
@@ -39,6 +40,10 @@ static void on_warn(void*, uint32_t kind, uint32_t offset, int64_t value) {
 static double on_ref(void*) { return env.xosc; }
 static bool on_changed(void*) {
     ++env.changed;
+    if (env.fail_changed) {
+        env.failed = 1;
+        return false;
+    }
     return true;
 }
 
@@ -152,23 +157,49 @@ static void test_no_crystal_no_reference() {
 
 static void test_reset_announces_nothing() {
     fresh();
-    sdk_init(1, 125, 6, 2);
+    sdk_init(2, 125, 6, 2);
+    block.write(REG_CS, CS_BYPASS | 2);
     const int before = env.changed;
     block.reset();
     CHECK(env.changed == before);
-    CHECK(block.read(REG_PWR) == 0x2D && block.read(REG_PRIM) == 0x77000 && block.read(REG_CS) == 1);
+    CHECK(block.read(REG_PWR) == 0x2D && block.read(REG_PRIM) == 0x77000 && block.read(REG_CS) == 1 && block.read(REG_FBDIV_INT) == 0);
 }
 
 static void test_unimplemented_offsets_warn() {
     fresh();
     CHECK(block.read(0x10) == 0xFFFFFFFFu);
     CHECK(env.warns == 1 && env.warn_kind[0] == kPllWarnRead && env.warn_offset[0] == 0x10);
-    block.write(0x14, 5);
+    CHECK(block.write(0x14, 5));
     CHECK(env.warns == 2 && env.warn_kind[1] == kPllWarnWrite && env.warn_value[1] == 5);
     CHECK(env.changed == 0);
     fresh();
     CHECK(block.read(0x1004) == 0xFFFFFFFFu);
     CHECK(env.warns == 2 && env.warn_kind[1] == kPllWarnReadAtomicArea);
+    fresh();
+    CHECK(block.read(0x1000) == 0xFFFFFFFFu);  // the atomic area starts above 0x1000 (the reference's `offset > 0x1000`)
+    CHECK(env.warns == 1);
+}
+
+static void test_a_block_with_no_host_function_still_writes() {
+    fresh();
+    PllHost bare;
+    bare.failed = &env.failed;
+    block.init(bare);
+    CHECK(block.write(REG_FBDIV_INT, 7));  // no `changed`, no `ref_hz`, no `warn`
+    CHECK(block.read(REG_FBDIV_INT) == 7 && block.frequency() == 0.0 && block.read(0x10) == 0xFFFFFFFFu);
+}
+
+static void test_a_failing_host_is_reported() {
+    fresh();
+    env.fail_changed = true;
+    CHECK(!block.write(REG_FBDIV_INT, 5));
+    CHECK(block.read(REG_FBDIV_INT) == 5);  // the write itself had happened
+    CHECK(!block.write_atomic(REG_FBDIV_INT, 1, kAtomicSet));  // the notification fails again
+    env.fail_changed = false;
+    env.failed = 1;  // a failure parked earlier: an alias write stops after decoding, before writing
+    const uint32_t before = block.read(REG_FBDIV_INT);
+    CHECK(!block.write_atomic(REG_FBDIV_INT, 0x10, kAtomicSet));
+    CHECK(block.read(REG_FBDIV_INT) == before);
 }
 
 static void test_atomic_aliases_decode_against_a_read() {
@@ -197,6 +228,8 @@ int main() {
     test_reset_announces_nothing();
     test_unimplemented_offsets_warn();
     test_atomic_aliases_decode_against_a_read();
+    test_a_block_with_no_host_function_still_writes();
+    test_a_failing_host_is_reported();
     if (failures) {
         std::printf("%d check(s) failed\n", failures);
         return 1;

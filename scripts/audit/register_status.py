@@ -23,7 +23,7 @@ ALL = "all"  # every register of the block
 # Blocks read against the datasheet (record 0098) and, but for the exceptions listed below, acting on their registers
 AUDITED = {
     "M0PLUS", "SIO", "TIMER", "WATCHDOG", "RTC", "UART", "SPI", "I2C", "ADC", "PWM", "DMA", "PIO", "SSI", "CLOCKS", "PLL", "XOSC", "PSM", "RESETS", "SYSCFG", "SYSINFO", "TBMAN",
-    "VREG_AND_CHIP_RESET", "BUSCTRL", "ROSC", "IO_BANK0", "IO_QSPI", "PADS_BANK0", "PADS_QSPI",
+    "VREG_AND_CHIP_RESET", "BUSCTRL", "ROSC", "XIP", "IO_BANK0", "IO_QSPI", "PADS_BANK0", "PADS_QSPI",
 }  # fmt: skip
 # Blocks never audited: whatever they answer is unchecked (USB: the port still to do)
 UNAUDITED = {"USB"}
@@ -86,6 +86,9 @@ PARTIAL: dict[str, dict[int, str]] = {
     },
     "USB": {
         0x000: "ADDR_ENDP: acts as the host's device address (`_dev_addr_ctrl`); in device mode the value is only stored"
+    },
+    "XIP": {
+        0x000: "CTRL.ERR_BADWRITE is never set: a write to a non-caching alias warns instead of raising the bus fault (record 0098, XIP_CTRL pass)"
     },
     "XOSC": {
         0x008: "DORMANT is stored; the oscillator does not go dormant",

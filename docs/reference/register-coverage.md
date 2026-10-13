@@ -12,7 +12,7 @@
 
 **This is a curated list, not a measurement.** "Answers" is measured (a read at the register's address does not warn "Unimplemented peripheral read"; for a write-only register, a write of 0 does not warn). "Acts" is curated: it means the block was audited and the register is in none of the stub / partial lists of `scripts/audit/register_status.py`, each entry of which carries its evidence. A stub that nobody has listed yet shows as Acts; if you find one, add it there and re-run the script. For what each block does and does not do, see [feature-coverage.md](feature-coverage.md). A table shared by several instances (UART0/UART1, the DMA's per-channel tables) is listed once, as the datasheet gives it.
 
-**474 registers: 317 act, 69 are stubs, 57 partial, 21 exist but are unchecked, 10 are absent.**
+**474 registers: 324 act, 69 are stubs, 58 partial, 13 exist but are unchecked, 10 are absent.**
 
 | Block | Registers | Acts | Stub | Partial | Unchecked | Absent |
 |---|---|---|---|---|---|---|
@@ -45,7 +45,7 @@
 | PADS_BANK0 | 4 | 0 | 3 | 1 | 0 | 0 |
 | PADS_QSPI | 3 | 0 | 1 | 2 | 0 | 0 |
 | USB | 23 | 0 | 6 | 1 | 13 | 3 |
-| XIP | 8 | 0 | 0 | 0 | 8 | 0 |
+| XIP | 8 | 7 | 0 | 1 | 0 | 0 |
 
 ## M0PLUS
 
@@ -690,11 +690,11 @@ Stubs in this block: EP_ABORT, EP_ABORT_DONE, EP_STALL_ARM, NAK_POLL, EP_STATUS_
 
 | Offset | Register | Status | Note |
 |---|---|---|---|
-| `0x00` | CTRL | Unchecked | the block was never audited |
-| `0x04` | FLUSH | Unchecked | the block was never audited |
-| `0x08` | STAT | Unchecked | the block was never audited |
-| `0x0c` | CTR_HIT | Unchecked | the block was never audited |
-| `0x10` | CTR_ACC | Unchecked | the block was never audited |
-| `0x14` | STREAM_ADDR | Unchecked | the block was never audited |
-| `0x18` | STREAM_CTR | Unchecked | the block was never audited |
-| `0x1c` | STREAM_FIFO | Unchecked | the block was never audited |
+| `0x00` | CTRL | Partial | CTRL.ERR_BADWRITE is never set: a write to a non-caching alias warns instead of raising the bus fault (record 0098, XIP_CTRL pass) |
+| `0x04` | FLUSH | Acts |  |
+| `0x08` | STAT | Acts |  |
+| `0x0c` | CTR_HIT | Acts |  |
+| `0x10` | CTR_ACC | Acts |  |
+| `0x14` | STREAM_ADDR | Acts |  |
+| `0x18` | STREAM_CTR | Acts |  |
+| `0x1c` | STREAM_FIFO | Acts |  |

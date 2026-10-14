@@ -19,6 +19,7 @@ cdef class GPIOPinBank:
     cdef public list shells
     cdef public list _direct_refs
     cdef public unsigned int first
+    cdef public bint _from_mcu  # this is the view of a bank the `Mcu` holds
 
 
 cdef class GPIOPin:

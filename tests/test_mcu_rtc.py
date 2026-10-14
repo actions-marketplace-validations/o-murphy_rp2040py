@@ -219,3 +219,21 @@ def test_the_io_bank0_line_follows_a_forced_pin_irq_and_comes_down_with_it(chip)
     assert chip.core.pending_interrupts & (1 << IRQ.IO_BANK0)
     chip.write_uint32(0x40014000 + 0x110, 0)
     assert not chip.core.pending_interrupts & (1 << IRQ.IO_BANK0)
+
+
+def test_sio_warns_under_its_own_name_for_an_address_it_does_not_have(chip):
+    chip.read_uint32(0xD0000000 + 0x300)
+    assert chip.logger.messages and chip.logger.messages[0][1] == "SIO"
+
+
+def test_sio_drives_a_pin_and_reads_the_inputs_of_the_banks_the_chip_holds(chip):
+    heard: list[str] = []
+    chip.gpio[7]._listeners.add(lambda new, old: heard.append(new.name))
+    chip.gpio[3].set_input_value(True)
+    assert chip.read_uint32(0xD0000004) & (1 << 3)  # GPIO_IN
+    chip.write_uint32(0x40014000 + 0x04 + 8 * 7, 5)  # GPIO7_CTRL: SIO
+    chip.write_uint32(0xD0000000 + 0x24, 1 << 7)  # GPIO_OE_SET
+    chip.write_uint32(0xD0000000 + 0x14, 1 << 7)  # GPIO_OUT_SET
+    assert heard[-1] == "HIGH"
+    chip.write_uint32(0xD0000000 + 0x18, 1 << 7)  # GPIO_OUT_CLR
+    assert heard[-1] == "LOW"

@@ -452,6 +452,22 @@ int main() {
         const int changes = world.pin_changes;
         m.bus.write32(0x40014000 + 0x04 + 8 * 5, 5 | (3u << 8) | (3u << 12));  // GPIO5_CTRL: SIO, OUTOVER = high, OEOVER = enable
         CHECK(world.pin_changes == changes + 1 && world.pin_bank == 0 && world.pin_number == 5 && world.pin_new == 1);  // HIGH
+
+        // SIO (group 5b): its GPIO registers drive the pins with the sources bound inside, its GPIO_IN reads the bank's inputs, and an invalid address warns under its own id.
+        {
+            const int w = world.warns;
+            (void)m.bus.read32(0xD0000000 + 0x300);
+            CHECK(world.warns == w + 1 && world.block == kMcuBlockSio);
+        }
+        CHECK(m.pins(0).set_input_value(3, true));
+        CHECK((m.bus.read32(0xD0000004) & (1u << 3)) != 0);  // GPIO_IN: pin 3's effective input
+        m.bus.write32(0x40014000 + 0x04 + 8 * 7, 5);          // GPIO7_CTRL: FUNCSEL = SIO
+        const int sio_changes = world.pin_changes;
+        m.bus.write32(0xD0000000 + 0x24, 1u << 7);            // GPIO_OE_SET: pin 7 is an output
+        m.bus.write32(0xD0000000 + 0x14, 1u << 7);            // GPIO_OUT_SET: ... driven high
+        CHECK(world.pin_changes > sio_changes && world.pin_bank == 0 && world.pin_number == 7 && world.pin_new == 1);  // HIGH, told to the host's listeners
+        m.bus.write32(0xD0000000 + 0x18, 1u << 7);            // GPIO_OUT_CLR
+        CHECK(world.pin_new == 0);                            // LOW
     }
 
     if (failures == 0) std::printf("test_mcu: ok\n");

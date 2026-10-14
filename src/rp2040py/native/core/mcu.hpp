@@ -39,6 +39,7 @@
 #include "clocks.hpp"
 #include "rosc.hpp"
 #include "rtc.hpp"
+#include "sio.hpp"
 #include "spi.hpp"
 #include "syscfg.hpp"
 #include "sysinfo.hpp"
@@ -58,7 +59,7 @@ using McuResult = BatchResult;
 // What the world supplies to a chip that builds itself (step 3a of the revised plan, record 0096): the one interface the blocks go through for what the core cannot answer alone.
 // For now it is the warning (a register access the block does not implement: the logger of the host); the pins, the console and the rest come with the blocks that need them.
 // `warn(ctx, block, kind, offset, value)`: `block` is a `McuBlock`, `kind` the `kRegWarn*` code of core_host.hpp. `failed` is the host's parked-failure flag, shared by every block.
-enum McuBlock : uint32_t { kMcuBlockRtc = 0, kMcuBlockTbman = 1, kMcuBlockBusctrl = 2, kMcuBlockVreg = 3, kMcuBlockSysinfo = 4, kMcuBlockSyscfg = 5, kMcuBlockTimer = 6, kMcuBlockAdc = 7, kMcuBlockUart0 = 8, kMcuBlockUart1 = 9, kMcuBlockSpi0 = 10, kMcuBlockSpi1 = 11, kMcuBlockI2c0 = 12, kMcuBlockI2c1 = 13, kMcuBlockClocks = 14, kMcuBlockPllSys = 15, kMcuBlockPllUsb = 16, kMcuBlockXosc = 17, kMcuBlockRosc = 18, kMcuBlockPpb = 19, kMcuBlockWatchdog = 20, kMcuBlockDma = 21, kMcuBlockIoBank0 = 22, kMcuBlockIoQspi = 23, kMcuBlockPadsBank0 = 24, kMcuBlockPadsQspi = 25 };
+enum McuBlock : uint32_t { kMcuBlockRtc = 0, kMcuBlockTbman = 1, kMcuBlockBusctrl = 2, kMcuBlockVreg = 3, kMcuBlockSysinfo = 4, kMcuBlockSyscfg = 5, kMcuBlockTimer = 6, kMcuBlockAdc = 7, kMcuBlockUart0 = 8, kMcuBlockUart1 = 9, kMcuBlockSpi0 = 10, kMcuBlockSpi1 = 11, kMcuBlockI2c0 = 12, kMcuBlockI2c1 = 13, kMcuBlockClocks = 14, kMcuBlockPllSys = 15, kMcuBlockPllUsb = 16, kMcuBlockXosc = 17, kMcuBlockRosc = 18, kMcuBlockPpb = 19, kMcuBlockWatchdog = 20, kMcuBlockDma = 21, kMcuBlockIoBank0 = 22, kMcuBlockIoQspi = 23, kMcuBlockPadsBank0 = 24, kMcuBlockPadsQspi = 25, kMcuBlockSio = 26 };
 struct McuHost {
     void (*warn)(void* ctx, uint32_t block, uint32_t kind, uint32_t offset, int64_t value) = nullptr;
     void* ctx = nullptr;
@@ -81,6 +82,9 @@ struct McuHost {
     bool (*pin_source)(void* ctx, uint32_t bank, uint32_t source, uint32_t* value) = nullptr;
     bool (*pin_changed)(void* ctx, uint32_t bank, uint32_t pin, int new_state, int old_state) = nullptr;
     bool (*pin_input_changed)(void* ctx, uint32_t bank, uint32_t pin, bool function_is_pwm) = nullptr;
+    // The pin banks the host has put its own over (an oracle's reference pins): SIO's reads of the pins' inputs and its updates of the pins then go to the host, which asks them of its banks.
+    bool (*pin_inputs)(void* ctx, uint32_t bank, uint32_t* value) = nullptr;
+    bool (*pin_update)(void* ctx, uint32_t bank, uint32_t pin_mask) = nullptr;
     void (*system_reset_request)(void* ctx) = nullptr;                                  // AIRCR.SYSRESETREQ; without it the core alone is reset
     bool (*watchdog_trigger)(void* ctx) = nullptr;                                      // the watchdog fired (or was triggered): the chip's reset; without it nothing happens
     bool (*watchdog_tick)(void* ctx, double tick_hz) = nullptr;                         // the tick changed (0: stopped), after the TIMER and SysTick have followed it
@@ -220,6 +224,29 @@ public:
         bus.windows.attach(kIoQspiBase, io_qspi_.window_handler());
         bus.windows.attach(kPadsBank0Base, pads_bank0_.window_handler());
         bus.windows.attach(kPadsQspiBase, pads_qspi_.window_handler());
+
+        // SIO: the single-cycle IO block (it has no window of the table: the bus reaches it on its own). Its GPIO registers are the pins' sources, and the pins' sources are bound to them (and to both
+        // PIOs' pin images) by address, so a level evaluation never leaves C++. A replaced block unbinds its source, which goes back to the host.
+        SioHost sh;
+        sh.gpio_in = sio_gpio_in;
+        sh.qspi_in = sio_qspi_in;
+        sh.update_pins = sio_update_pins;
+        sh.add_cycles = sio_add_cycles;
+        sh.warn = block_warn<kMcuBlockSio>;
+        sh.ctx = this;
+        sio_.init(sh);
+        bus.set_sio(sio_.window_handler());
+        for (uint32_t b = 0; b < 2; ++b) {
+            PinBank& bank = pins(b);
+            bank.bind_source(kSrcSioOe, &sio_.gpio_output_enable);
+            bank.bind_source(kSrcSioValue, &sio_.gpio_value);
+            bank.bind_source(kSrcSioQspiOe, &sio_.qspi_gpio_output_enable);
+            bank.bind_source(kSrcSioQspiValue, &sio_.qspi_gpio_value);
+            bank.bind_source(kSrcPio0Oe, &pio_[0].pin_directions);
+            bank.bind_source(kSrcPio0Value, &pio_[0].pin_values);
+            bank.bind_source(kSrcPio1Oe, &pio_[1].pin_directions);
+            bank.bind_source(kSrcPio1Value, &pio_[1].pin_values);
+        }
 
         // The core's own peripherals and the DMA: PPB (SysTick, NVIC, SCB on the CPU), the watchdog (it tells the TIMER and SysTick their tick) and the DMA (on the bus, reading clk_sys from the tree).
         PpbHost pp;
@@ -361,6 +388,7 @@ public:
     PinBank& pins(uint32_t bank) noexcept { return bank == 0 ? gpio_bank_ : qspi_bank_; }
     IoBlock& io(uint32_t bank) noexcept { return bank == 0 ? io_bank0_ : io_qspi_; }
     PadsBlock& pads(uint32_t bank) noexcept { return bank == 0 ? pads_bank0_ : pads_qspi_; }
+    SioBlock& sio() noexcept { return sio_; }
     PpbBlock& ppb() noexcept { return ppb_; }
     WatchdogBlock& watchdog() noexcept { return watchdog_; }
     DmaBlock& dma() noexcept { return own_dma_; }
@@ -415,6 +443,8 @@ public:
         tree_hook_ = hook;
         tree_hook_ctx_ = ctx;
     }
+    // `world` true: this bank is the host's (not the `Mcu`'s own), so SIO asks the host for its inputs and tells it of its updates.
+    void set_pin_bank_world(uint32_t bank, bool world) noexcept { pins_world_[bank & 1] = world; }
     void attach_dma(DmaBlock* dma) noexcept { dma_ = dma; }
     void set_dreq_hook(DreqHook hook, void* ctx) noexcept {
         dreq_hook_ = hook;
@@ -463,6 +493,28 @@ private:
         Mcu* m = static_cast<Mcu*>(chip);
         return m->tree_hook_ != nullptr ? m->tree_hook_(m->tree_hook_ctx_) : m->clocks_.retune();
     }
+    // SIO's host: the pins' effective inputs, the pins whose SIO-driven state moved, and the cycles SIO charges the CPU.
+    static uint32_t sio_inputs(Mcu* m, uint32_t bank) noexcept {
+        uint32_t value = 0;
+        if (m->pins_world_[bank]) {
+            if (m->host_world_.pin_inputs != nullptr) (void)m->host_world_.pin_inputs(m->host_world_.ctx, bank, &value);
+            return value;
+        }
+        return m->pins(bank).input_values();
+    }
+    static uint32_t sio_gpio_in(void* chip) noexcept { return sio_inputs(static_cast<Mcu*>(chip), 0); }
+    static uint32_t sio_qspi_in(void* chip) noexcept { return sio_inputs(static_cast<Mcu*>(chip), 1); }
+    static bool sio_update_pins(void* chip, uint32_t pin_mask, bool qspi) noexcept {
+        Mcu* m = static_cast<Mcu*>(chip);
+        const uint32_t b = qspi ? 1 : 0;
+        if (m->pins_world_[b]) return m->host_world_.pin_update == nullptr || m->host_world_.pin_update(m->host_world_.ctx, b, pin_mask);
+        PinBank& bank = m->pins(b);
+        for (uint32_t i = 0; i < bank.count() && i < 32; ++i) {
+            if ((pin_mask & (1u << i)) != 0 && !bank.check_for_updates(i)) return false;
+        }
+        return true;
+    }
+    static void sio_add_cycles(void* chip, uint32_t cycles) noexcept { static_cast<Mcu*>(chip)->cpu.cycles += cycles; }
     // The pin banks' host: `ctx` is a `McuInstance` (the bank).
     static bool pin_source(void* ctx, uint32_t source, uint32_t* out) noexcept {
         const McuInstance* i = static_cast<const McuInstance*>(ctx);
@@ -630,6 +682,8 @@ private:
     PadsBlock pads_bank0_, pads_qspi_;
     McuInstance bank_ctx_[2];
     TimerBlock timer_;
+    bool pins_world_[2] = {false, false};
+    SioBlock sio_;
     PpbBlock ppb_;
     WatchdogBlock watchdog_;
     DmaBlock own_dma_;  // (`dma_` is the block the requests go to: this one, unless the host attached another)

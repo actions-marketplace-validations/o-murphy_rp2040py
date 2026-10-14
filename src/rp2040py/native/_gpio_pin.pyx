@@ -133,6 +133,7 @@ cdef class GPIOPinBank:
         self.shells = [None] * count
         for i in range(count):
             always[i] = bool(always_output_enabled)
+        self._from_mcu = mcu_bank >= 0
         if mcu_bank >= 0:
             # the chip's C++ `Mcu` holds this bank (and the IO and PADS blocks on it): this object is the Python view of it
             self._bank = <PinBank*> <size_t> rp2040._native_pins_address(mcu_bank)

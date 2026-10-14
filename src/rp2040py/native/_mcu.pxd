@@ -21,6 +21,7 @@ from rp2040py.native._pll cimport PllBlock
 from rp2040py.native._ppb cimport PpbBlock
 from rp2040py.native._rosc cimport RoscBlock
 from rp2040py.native._rtc cimport RtcBlock
+from rp2040py.native._sio cimport SioBlock
 from rp2040py.native._spi cimport SpiBlock
 from rp2040py.native._syscfg cimport SyscfgBlock
 from rp2040py.native._sysinfo cimport SysInfoBlock
@@ -66,6 +67,7 @@ cdef extern from "mcu.hpp" namespace "rp2040core":
     cdef const uint32_t kMcuBlockIoQspi
     cdef const uint32_t kMcuBlockPadsBank0
     cdef const uint32_t kMcuBlockPadsQspi
+    cdef const uint32_t kMcuBlockSio
 
     cdef cppclass McuHost:
         McuHost() noexcept
@@ -83,6 +85,8 @@ cdef extern from "mcu.hpp" namespace "rp2040core":
         bool (*pin_source)(void* ctx, uint32_t bank, uint32_t source, uint32_t* value) noexcept
         bool (*pin_changed)(void* ctx, uint32_t bank, uint32_t pin, int new_state, int old_state) noexcept
         bool (*pin_input_changed)(void* ctx, uint32_t bank, uint32_t pin, bool function_is_pwm) noexcept
+        bool (*pin_inputs)(void* ctx, uint32_t bank, uint32_t* value) noexcept
+        bool (*pin_update)(void* ctx, uint32_t bank, uint32_t pin_mask) noexcept
         void (*system_reset_request)(void* ctx) noexcept
         bool (*watchdog_trigger)(void* ctx) noexcept
         bool (*watchdog_tick)(void* ctx, double tick_hz) noexcept
@@ -120,6 +124,7 @@ cdef extern from "mcu.hpp" namespace "rp2040core":
         PinBank& pins(uint32_t bank) noexcept
         IoBlock& io(uint32_t bank) noexcept
         PadsBlock& pads(uint32_t bank) noexcept
+        SioBlock& sio() noexcept
         PpbBlock& ppb() noexcept
         WatchdogBlock& watchdog() noexcept
         DmaBlock& dma() noexcept
@@ -128,6 +133,7 @@ cdef extern from "mcu.hpp" namespace "rp2040core":
         XoscBlock& xosc() noexcept
         RoscBlock& rosc() noexcept
         void set_crystal_hz(double hz) noexcept
+        void set_pin_bank_world(uint32_t bank, bool world) noexcept
         void set_tree_hook(McuTreeHook hook, void* ctx) noexcept
         TimerBlock& timer() noexcept
         AdcBlock& adc() noexcept

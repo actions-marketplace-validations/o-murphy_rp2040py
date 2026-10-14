@@ -36,7 +36,7 @@ from rp2040py.native._memory_map cimport (
     kWordIndexed,
 )
 from rp2040py.native._dma cimport RPDMA
-from rp2040py.native._mcu cimport kMcuBlockBusctrl, kMcuBlockRtc, kMcuBlockSyscfg, kMcuBlockSysinfo, kMcuBlockTbman, kMcuBlockVreg, Mcu, McuHost, kMcuBlockAdc, kMcuBlockClocks, kMcuBlockDma, kMcuBlockI2c0, kMcuBlockI2c1, kMcuBlockIoBank0, kMcuBlockIoQspi, kMcuBlockPadsBank0, kMcuBlockPadsQspi, kMcuBlockPllSys, kMcuBlockPllUsb, kMcuBlockPpb, kMcuBlockRosc, kMcuBlockSpi0, kMcuBlockSpi1, kMcuBlockTimer, kMcuBlockUart0, kMcuBlockUart1, kMcuBlockWatchdog, kMcuBlockXosc
+from rp2040py.native._mcu cimport kMcuBlockBusctrl, kMcuBlockRtc, kMcuBlockSyscfg, kMcuBlockSysinfo, kMcuBlockTbman, kMcuBlockVreg, Mcu, McuHost, kMcuBlockAdc, kMcuBlockClocks, kMcuBlockDma, kMcuBlockI2c0, kMcuBlockI2c1, kMcuBlockIoBank0, kMcuBlockIoQspi, kMcuBlockPadsBank0, kMcuBlockPadsQspi, kMcuBlockPllSys, kMcuBlockPllUsb, kMcuBlockPpb, kMcuBlockRosc, kMcuBlockSio, kMcuBlockSpi0, kMcuBlockSpi1, kMcuBlockTimer, kMcuBlockUart0, kMcuBlockUart1, kMcuBlockWatchdog, kMcuBlockXosc
 from rp2040py.native._pending cimport park_error, pending_flag, raise_if_pending
 from rp2040py.native._pio cimport PioBlock
 from rp2040py.native._bus cimport BusHost, kBusWarnInvalidRead, kBusWarnUnalignedRead
@@ -325,7 +325,8 @@ cdef void _mcu_warn(void* ctx, uint32_t block, uint32_t kind, uint32_t offset, i
     # What a block that the `Mcu` built says about a register access it does not implement: the Python view of that block (the one in the peripherals table) words it for the logger.
     cdef RP2040 chip = <RP2040> ctx
     try:
-        view = chip._ppb if block == kMcuBlockPpb else chip._peripherals.get(_BLOCK_WINDOW[block])  # (the PPB is not in the peripherals table: the bus reaches it on its own)
+        # (the PPB and SIO are not in the peripherals table: the bus reaches them on its own)
+        view = chip._ppb if block == kMcuBlockPpb else chip._sio if block == kMcuBlockSio else chip._peripherals.get(_BLOCK_WINDOW[block])
         warn = getattr(view, "_warn_kind", None)
         if warn is not None:
             warn(kind, offset, value)
@@ -394,6 +395,29 @@ cdef bool _w_pin_input_changed(void* ctx, uint32_t bank, uint32_t pin, bool func
     cdef RP2040 chip = <RP2040> ctx
     try:
         _bank_of(chip, bank)._world_input(pin, function_is_pwm)
+    except BaseException as error:
+        park_error(error)
+        return False
+    return True
+
+
+cdef bool _w_pin_inputs(void* ctx, uint32_t bank, uint32_t* value) noexcept:
+    cdef RP2040 chip = <RP2040> ctx
+    try:
+        value[0] = <uint32_t> (<long long> _bank_of(chip, bank).input_values())
+    except BaseException as error:
+        park_error(error)
+        return False
+    return True
+
+
+cdef bool _w_pin_update(void* ctx, uint32_t bank, uint32_t pin_mask) noexcept:
+    cdef RP2040 chip = <RP2040> ctx
+    try:
+        pins = chip.qspi if bank else chip.gpio
+        for index in range(len(pins)):
+            if index < 32 and pin_mask & ((<uint32_t> 1) << index):
+                pins[index].check_for_updates()
     except BaseException as error:
         park_error(error)
         return False
@@ -626,6 +650,8 @@ cdef class RP2040:
         world.pin_source = _w_pin_source
         world.pin_changed = _w_pin_changed
         world.pin_input_changed = _w_pin_input_changed
+        world.pin_inputs = _w_pin_inputs
+        world.pin_update = _w_pin_update
         world.system_reset_request = _w_system_reset_request
         world.watchdog_trigger = _w_watchdog_trigger
         world.watchdog_tick = _w_watchdog_tick
@@ -650,7 +676,7 @@ cdef class RP2040:
         self._clock_listeners = set()
 
         self.ppb = RPPPB(self, "PPB", 0)
-        self.sio = RPSIO(self)
+        self.sio = RPSIO(self, 0)
 
         self.uart = [
             RPUART(
@@ -1401,6 +1427,26 @@ cdef class RP2040:
     def _native_i2c_address(self, index):
         return <size_t> &self._mcu.i2c(<uint32_t> index)
 
+    # The chip's two pin banks: the `Mcu`'s own (views of its C++ banks) or a host's (an oracle's reference banks). SIO reads the pins' inputs and updates the pins in C++ for the first kind and asks the
+    # host for the second.
+    @property
+    def _gpio_bank(self):
+        return self._gpio_bank_object
+
+    @_gpio_bank.setter
+    def _gpio_bank(self, bank) -> None:
+        self._gpio_bank_object = bank
+        self._mcu.set_pin_bank_world(0, not getattr(bank, "_from_mcu", False))
+
+    @property
+    def _qspi_bank(self):
+        return self._qspi_bank_object
+
+    @_qspi_bank.setter
+    def _qspi_bank(self, bank) -> None:
+        self._qspi_bank_object = bank
+        self._mcu.set_pin_bank_world(1, not getattr(bank, "_from_mcu", False))
+
     @property
     def clk_peri(self):
         """The peripheral clock, in Hz: the C++ clock tree's value (the UARTs' and SPIs' bit times follow it). Assigning sets that value, as a host or a test that fixes the rate does."""
@@ -1418,6 +1464,9 @@ cdef class RP2040:
 
     def _native_pads_address(self, bank):
         return <size_t> &self._mcu.pads(<uint32_t> bank)
+
+    def _native_sio_address(self):
+        return <size_t> &self._mcu.sio()
 
     def _native_ppb_address(self):
         return <size_t> &self._mcu.ppb()

@@ -29,6 +29,7 @@ cdef extern from "clocks.hpp" namespace "rp2040core":
         ClocksBlock() noexcept
         void init(Clock* clock, const ClocksHost& host, PllBlock* pll_sys, PllBlock* pll_usb) noexcept
         void detach() noexcept
+        void clear_sinks() noexcept
         int64_t raw_write_value() noexcept
         cppbool add_sys_sink(ClockSinkFn fn, void* ctx) noexcept
         cppbool add_peri_sink(ClockSinkFn fn, void* ctx) noexcept
@@ -63,6 +64,12 @@ cdef extern from "clocks.hpp" namespace "rp2040core":
         uint32_t rtc_ctrl
         uint32_t rtc_div
 
+cdef extern from "clock_sinks.hpp" namespace "rp2040core":
+    cppbool ppb_sys_sink(void* ctx, double hz, double old) noexcept
+    cppbool pwm_sys_sink(void* ctx, double hz, double old) noexcept
+    cppbool watchdog_ref_sink(void* ctx, double hz, double old) noexcept
+    cppbool rtc_rtc_sink(void* ctx, double hz, double old) noexcept
+
 cdef class RPClocks:
     cdef ClocksBlock _block
     cdef public object rp2040
@@ -70,4 +77,5 @@ cdef class RPClocks:
     cdef public object clock
     cdef object _pll_sys
     cdef object _pll_usb
+    cdef object _consumers  # the blocks the direct sinks point into: kept alive while they are bound
     cdef public unsigned char _sys_dirty  # raised whenever clk_sys changes: the batch loop ends its batch on it (core/batch.hpp `clk_changed`)

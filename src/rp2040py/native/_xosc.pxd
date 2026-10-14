@@ -15,10 +15,12 @@ cdef extern from "xosc.hpp" namespace "rp2040core":
     cdef const uint32_t kXoscWarnInvalidDormant
 
     ctypedef void (*XoscWarnFn)(void* ctx, uint32_t kind, uint32_t offset, int64_t value)
+    ctypedef cppbool (*XoscStableFn)(void* ctx)
 
     cdef cppclass XoscHost:
         XoscHost() noexcept
         XoscWarnFn warn
+        XoscStableFn stable_changed
         void* ctx
         const int* failed
 

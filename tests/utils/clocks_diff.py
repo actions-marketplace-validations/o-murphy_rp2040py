@@ -103,6 +103,7 @@ class Rig:
     """One chip plus the log of every warning and every call the clock tree makes."""
 
     def __init__(self, kind: str, factory: "Callable[..., Any] | None" = None) -> None:
+        self.kind = kind
         self.chip = RP2040()
         self.log: list[tuple] = []
         self.raising = False
@@ -192,9 +193,19 @@ class Rig:
                 )
             ),
             "pwm": tuple(float(channel.timer.frequency) for channel in chip.pwm.channels),
+            # what the C++ consumers were told (the default tree calls them directly, so no spy sees it): SysTick's clk_sys, the watchdog's tick, the RTC's second
+            "consumers": (
+                float(chip.ppb.clk_sys),
+                float(chip.watchdog.tick_hz),
+                bool(chip.rtc.running),
+                float(chip.rtc.second_nanos()) if chip.rtc.running else 0.0,
+            ),
             "raw": (int(clocks.raw_write_value), int(chip.pll_sys.raw_write_value), int(chip.pll_usb.raw_write_value)),
             "time": float(chip.clock.nanos),
         }
+
+
+_C_CONSUMERS = ("ppb", "watchdog", "rtc")
 
 
 class Divergence:
@@ -373,6 +384,10 @@ def run_pair(
             return Divergence(step, op, f"result {result_a!r}/{error_a} vs {result_b!r}/{error_b}")
         new_a, new_b = a.log[log_a:], b.log[log_b:]
         log_a, log_b = len(a.log), len(b.log)
+        if a.kind == "default" or b.kind == "default":
+            # The default tree tells SysTick, the watchdog and the RTC from C++ without a Python call to spy on: their calls are compared by what they did ("consumers" in the snapshot), not as a log
+            new_a = [entry for entry in new_a if not (entry[0] == "sink" and entry[2] in _C_CONSUMERS)]
+            new_b = [entry for entry in new_b if not (entry[0] == "sink" and entry[2] in _C_CONSUMERS)]
         if new_a != new_b:
             return Divergence(step, op, f"log: {new_a[:6]} vs {new_b[:6]}")
         snapshot_a, snapshot_b = a.snapshot(), b.snapshot()

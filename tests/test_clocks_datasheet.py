@@ -131,10 +131,14 @@ def test_a_count_runs_for_the_interval_and_reports_the_frequency_in_khz_with_fiv
 
 def test_every_source_of_the_counter_reads_what_the_clock_tree_says(rp2040_factory):
     chip = rp2040_factory()
-    start_crystal(chip)  # xosc_init(): a stopped crystal has no frequency
-    assert _measure(chip, PLL_SYS_SRC)[1] == 0 and _measure(chip, PLL_SYS_SRC)[0] & DIED  # a PLL that is not running
     assert _measure(chip, CLK_SYS_SRC)[1] >> 5 == 125_000  # 125 MHz until firmware configures the tree
     assert _measure(chip, CLK_PERI_SRC)[1] >> 5 == 125_000
+    assert _measure(chip, XOSC_SRC)[0] & DIED  # (a stopped crystal has no frequency)
+    start_crystal(
+        chip
+    )  # xosc_init(): the tree hears of it, and clk_sys - which follows clk_ref's reset source, the ring oscillator - is 6.5 MHz from here until firmware says otherwise
+    assert _measure(chip, PLL_SYS_SRC)[1] == 0 and _measure(chip, PLL_SYS_SRC)[0] & DIED  # a PLL that is not running
+    assert _measure(chip, CLK_SYS_SRC)[1] >> 5 == 6500
     assert _measure(chip, CLK_REF_SRC)[1] >> 5 == 6500  # clk_ref from the ring oscillator at reset
     assert _measure(chip, XOSC_SRC)[1] >> 5 == 12_000
     P = 0x4002C000  # PLL_USB as pico-sdk configures it: 48 MHz

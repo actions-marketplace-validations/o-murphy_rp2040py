@@ -36,12 +36,24 @@ cdef void _warn_trampoline(void* ctx, uint32_t kind, uint32_t offset, int64_t va
         park_error(error)
 
 
+cdef cppbool _stable_trampoline(void* ctx) noexcept:
+    # The crystal started or stopped: the clock tree is re-derived (nothing is clocked from XOSC while it is stopped)
+    cdef RPXOSC block = <RPXOSC> ctx
+    try:
+        block.rp2040.update_clocks()
+    except BaseException as error:
+        park_error(error)
+        return False
+    return True
+
+
 cdef class RPXOSC:
     def __init__(self, rp2040, name):
         cdef XoscHost host
         self.rp2040 = rp2040
         self.name = name
         host.warn = _warn_trampoline
+        host.stable_changed = _stable_trampoline
         host.ctx = <void*> self
         host.failed = pending_flag()
         self._block.init(host)

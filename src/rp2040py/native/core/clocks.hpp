@@ -102,6 +102,8 @@ public:
     int64_t raw_write_value() const noexcept { return raw_write_value_; }
 
     // The sinks, called in the order they were added. False: the list is full.
+    // Forgets every sink (the host re-registers them when a consumer is replaced).
+    void clear_sinks() noexcept { n_sys_ = n_peri_ = n_ref_ = n_rtc_ = 0; }
     bool add_sys_sink(ClockSinkFn fn, void* ctx) noexcept { return add(sys_sinks_, n_sys_, fn, ctx); }
     bool add_peri_sink(ClockSinkFn fn, void* ctx) noexcept { return add(peri_sinks_, n_peri_, fn, ctx); }
     bool add_ref_sink(ClockSinkFn fn, void* ctx) noexcept { return add(ref_sinks_, n_ref_, fn, ctx); }

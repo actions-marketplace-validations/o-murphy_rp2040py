@@ -165,3 +165,23 @@ def test_the_frequency_counter_sees_a_stopped_crystal_as_dead(mcu):
     status = mcu.read_uint32(CLOCKS_BASE + C.FC0_STATUS)
     assert status & C.FC0_STATUS_DONE and not status & C.FC0_STATUS_DIED
     assert mcu.read_uint32(CLOCKS_BASE + C.FC0_RESULT) >> C.FC0_RESULT_FRAC_BITS == 12000
+
+
+def test_starting_the_crystal_after_the_tree_is_configured_retunes_what_runs_from_it(mcu):
+    """Datasheet 2.16: nothing is clocked from XOSC until it runs. A PLL and a clk_sys already set up on it start delivering the moment the crystal is enabled (the chip's tree hears of it
+    - not only of the next write to a CLOCKS or PLL register)."""
+    mcu.write_uint32(
+        CLOCKS_BASE + C.CLK_SYS_CTRL, 1 | (C.CLK_SYS_CTRL_AUXSRC_PLL_SYS << C.CLK_SYS_CTRL_AUXSRC_SHIFT)
+    )  # clk_sys on PLL_SYS first: a bare chip's clk_sys follows the ring oscillator (clk_ref's reset source) at the first write that finds nothing better
+    # pll_init() without the wait for LOCK (it would never come): 12 MHz * 100 / 6 = 200 MHz, once there is a 12 MHz
+    mcu.write_uint32(PLL_SYS_BASE + P.PLL_CS, 1)
+    mcu.write_uint32(PLL_SYS_BASE + P.PLL_FBDIV_INT, 100)
+    mcu.write_uint32(PLL_SYS_BASE + P.PLL_PWR, 0)
+    mcu.write_uint32(PLL_SYS_BASE + P.PLL_PRIM, (6 << 16) | (1 << 12))
+    seen: list[tuple[float, float]] = []
+    mcu.add_clock_listener(lambda new, old: seen.append((new, old)))
+    assert mcu.pll_sys.frequency == 0.0 and mcu.clk_sys == 125e6  # no crystal yet: 0 keeps the last value
+    seen.clear()
+    start_crystal(mcu)
+    assert mcu.pll_sys.frequency == 200e6
+    assert mcu.clk_sys == 200e6 and seen == [(200e6, 125e6)]

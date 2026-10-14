@@ -456,13 +456,13 @@ cdef class RP2040:
         # why reset() needs each of them by name (0089 Phase 5).
         self.pll_sys = RPPLL(self, "PLL_SYS_BASE")
         self.pll_usb = RPPLL(self, "PLL_USB_BASE")
-        self.clocks = RPClocks(self, "CLOCKS_BASE")  # after the PLLs: the native tree points at their C++ blocks
         self.resets = RPReset(self, "RESETS_BASE")
         self.psm = RPPSM(self, "PSM_BASE")
         self.pads_bank0 = RPPADS(self, "PADS_BANK0_BASE", "bank0")
         self.pads_qspi = RPPADS(self, "PADS_QSPI_BASE", "qspi")
         self.timer = RPTimer(self, "TIMER_BASE")
         self.rtc = RP2040RTC(self, "RTC_BASE")
+        self.clocks = RPClocks(self, "CLOCKS_BASE")  # after the PLLs and the blocks it drives (PPB, PWM, watchdog, RTC): the native tree points at their C++ blocks
         self.busctrl = RPBUSCTRL(self, "BUSCTRL_BASE")
         self.syscfg = RP2040SysCfg(self, "SYSCFG")
         self.xip_ctrl = RPXIPCtrl(self, "XIP_CTRL_BASE")
@@ -815,6 +815,7 @@ cdef class RP2040:
     def pwm(self, value) -> None:
         self._pwm_block = value
         self._bind_pin_sources()
+        self._rebind_clock_sinks()
 
     @property
     def pio(self):
@@ -843,6 +844,31 @@ cdef class RP2040:
     def ppb(self, value) -> None:
         self._ppb = value
         self._bus.set_ppb(self._direct_handler(value, False))
+        self._rebind_clock_sinks()
+
+    # The clock tree tells these four of a change directly when they are native blocks (core/clock_sinks.hpp), so replacing one has to re-point the tree: every way of replacing is a property.
+    @property
+    def watchdog(self):
+        return self._watchdog
+
+    @watchdog.setter
+    def watchdog(self, value) -> None:
+        self._watchdog = value
+        self._rebind_clock_sinks()
+
+    @property
+    def rtc(self):
+        return self._rtc
+
+    @rtc.setter
+    def rtc(self, value) -> None:
+        self._rtc = value
+        self._rebind_clock_sinks()
+
+    def _rebind_clock_sinks(self):
+        clocks = getattr(self, "clocks", None)  # (not there yet while the chip is being built)
+        if clocks is not None and hasattr(clocks, "rebind_consumers"):
+            clocks.rebind_consumers()
 
     def _attach_xip_hooks(self, xip):
         """Hands the C++ memory map the XIP block's hooks, so the flash window (read-only to the bus, its reads counted and cached) and the `0x15...` cache-as-SRAM segment are served

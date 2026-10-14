@@ -14,8 +14,12 @@ from libc.stdint cimport int64_t, uint32_t
 from libcpp cimport bool as cppbool
 
 from rp2040py.native._pending cimport park_error, pending_flag, raise_if_pending
+from rp2040py.native._ppb cimport RPPPB
 from rp2040py.native._pll cimport RPPLL
+from rp2040py.native._pwm cimport RPPWM
+from rp2040py.native._rtc cimport RP2040RTC
 from rp2040py.native._simulation_clock cimport SimulationClock
+from rp2040py.native._watchdog cimport RPWatchdog
 from rp2040py.native._window_map cimport WindowHandler
 
 __all__ = ("RPClocks",)
@@ -57,17 +61,65 @@ cdef double _rosc_trampoline(void* ctx) noexcept:
 
 
 cdef cppbool _sys_sink(void* ctx, double hz, double old) noexcept:
+    # First of the sys sinks: the chip's own `clk_sys` (the host reads it, and so does a native PWM block's shell), and the flag that ends the running batch.
     cdef RPClocks block = <RPClocks> ctx
     try:
-        rp2040 = block.rp2040
-        rp2040.clk_sys = hz
+        block.rp2040.clk_sys = hz
         block._sys_dirty = 1
-        rp2040.ppb.clk_sys_changed(hz)
-        pwm = rp2040.pwm
+    except BaseException as error:
+        park_error(error)
+        return False
+    return True
+
+
+cdef cppbool _listeners_sink(void* ctx, double hz, double old) noexcept:
+    # Last of the sys sinks: the host's listeners (a PIO clock divider, say), after SysTick and the PWM counters have followed.
+    cdef RPClocks block = <RPClocks> ctx
+    try:
+        for listener in list(block.rp2040._clock_listeners):
+            listener(hz, old)
+    except BaseException as error:
+        park_error(error)
+        return False
+    return True
+
+
+cdef cppbool _ppb_python_sink(void* ctx, double hz, double old) noexcept:
+    cdef RPClocks block = <RPClocks> ctx
+    try:
+        block.rp2040.ppb.clk_sys_changed(hz)
+    except BaseException as error:
+        park_error(error)
+        return False
+    return True
+
+
+cdef cppbool _pwm_python_sink(void* ctx, double hz, double old) noexcept:
+    cdef RPClocks block = <RPClocks> ctx
+    try:
+        pwm = block.rp2040.pwm
         for channel in pwm.channels:
             channel.timer.frequency = pwm.clock_freq
-        for listener in list(rp2040._clock_listeners):
-            listener(hz, old)
+    except BaseException as error:
+        park_error(error)
+        return False
+    return True
+
+
+cdef cppbool _watchdog_python_sink(void* ctx, double hz, double old) noexcept:
+    cdef RPClocks block = <RPClocks> ctx
+    try:
+        block.rp2040.watchdog.clk_ref_changed(hz)
+    except BaseException as error:
+        park_error(error)
+        return False
+    return True
+
+
+cdef cppbool _rtc_python_sink(void* ctx, double hz, double old) noexcept:
+    cdef RPClocks block = <RPClocks> ctx
+    try:
+        block.rp2040.rtc.clk_rtc_changed(hz)
     except BaseException as error:
         park_error(error)
         return False
@@ -81,26 +133,6 @@ cdef cppbool _peri_sink(void* ctx, double hz, double old) noexcept:
         rp2040.clk_peri = hz
         for uart in rp2040.uart:
             uart.clk_peri_changed()
-    except BaseException as error:
-        park_error(error)
-        return False
-    return True
-
-
-cdef cppbool _ref_sink(void* ctx, double hz, double old) noexcept:
-    cdef RPClocks block = <RPClocks> ctx
-    try:
-        block.rp2040.watchdog.clk_ref_changed(hz)
-    except BaseException as error:
-        park_error(error)
-        return False
-    return True
-
-
-cdef cppbool _rtc_sink(void* ctx, double hz, double old) noexcept:
-    cdef RPClocks block = <RPClocks> ctx
-    try:
-        block.rp2040.rtc.clk_rtc_changed(hz)
     except BaseException as error:
         park_error(error)
         return False
@@ -132,12 +164,40 @@ cdef class RPClocks:
         host.ctx = <void*> self
         host.failed = pending_flag()
         self._block.init(&(<SimulationClock> clock)._clock, host, &(<RPPLL> pll_sys)._block, &(<RPPLL> pll_usb)._block)
-        if not (
-            self._block.add_sys_sink(_sys_sink, <void*> self)
-            and self._block.add_peri_sink(_peri_sink, <void*> self)
-            and self._block.add_ref_sink(_ref_sink, <void*> self)
-            and self._block.add_rtc_sink(_rtc_sink, <void*> self)
-        ):
+        self.rebind_consumers()
+
+    def rebind_consumers(self):
+        """(Re)registers the sinks, in the order of the reference's `update_clocks()`: the chip's `clk_sys`, SysTick, the PWM counters, the host's listeners; the chip's `clk_peri` and the UARTs (their
+        baud-rate announcement is a host callback); the watchdog's tick; the RTC. A consumer that is a native block is told directly (core/clock_sinks.hpp); anything else - a recorder, a
+        pure-Python reference swapped in by an oracle - through its Python methods. Called by the chip whenever one of the four is replaced; the blocks bound now are kept alive until then."""
+        rp2040 = self.rp2040
+        ppb, pwm, watchdog, rtc = rp2040.ppb, rp2040.pwm, rp2040.watchdog, rp2040.rtc
+        self._consumers = (ppb, pwm, watchdog, rtc)
+        self._block.clear_sinks()
+        ok = self._block.add_sys_sink(_sys_sink, <void*> self)
+        ok = ok and (
+            self._block.add_sys_sink(ppb_sys_sink, <void*> &(<RPPPB> ppb)._block)
+            if isinstance(ppb, RPPPB)
+            else self._block.add_sys_sink(_ppb_python_sink, <void*> self)
+        )
+        ok = ok and (
+            self._block.add_sys_sink(pwm_sys_sink, <void*> &(<RPPWM> pwm)._block)
+            if isinstance(pwm, RPPWM)
+            else self._block.add_sys_sink(_pwm_python_sink, <void*> self)
+        )
+        ok = ok and self._block.add_sys_sink(_listeners_sink, <void*> self)
+        ok = ok and self._block.add_peri_sink(_peri_sink, <void*> self)
+        ok = ok and (
+            self._block.add_ref_sink(watchdog_ref_sink, <void*> &(<RPWatchdog> watchdog)._block)
+            if isinstance(watchdog, RPWatchdog)
+            else self._block.add_ref_sink(_watchdog_python_sink, <void*> self)
+        )
+        ok = ok and (
+            self._block.add_rtc_sink(rtc_rtc_sink, <void*> &(<RP2040RTC> rtc)._block)
+            if isinstance(rtc, RP2040RTC)
+            else self._block.add_rtc_sink(_rtc_python_sink, <void*> self)
+        )
+        if not ok:
             raise RuntimeError("the clock tree's sink lists are full")
 
     @property

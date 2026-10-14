@@ -98,6 +98,13 @@ class RPXOSC(BasePeripheral):
         return super().read_uint32(offset)
 
     def write_uint32(self, offset: int, value: int) -> None:
+        was_stable = self._stable
+        self._write(offset, value)
+        if self._stable != was_stable:
+            # The crystal starting or stopping changes what the clock tree delivers (nothing from XOSC while it is stopped); `reset()` does not tell it (the CLOCKS domain reset re-derives the tree itself)
+            self.rp2040.update_clocks()
+
+    def _write(self, offset: int, value: int) -> None:
         if offset == XOSC_CTRL:
             value &= CTRL_MASK
             if value & CTRL_FREQ_RANGE_BITS != CTRL_FREQ_RANGE_1_15MHZ:

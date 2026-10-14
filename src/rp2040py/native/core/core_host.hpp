@@ -19,10 +19,27 @@
 #define RP2040PY_CORE_CORE_HOST_HPP
 
 #include <cstdint>
+#if !(defined(__wasm__) && !defined(__EMSCRIPTEN__))
+#include <cstdio>
+#include <cstdlib>
+#endif
 
 #include "window_map.hpp"
 
 namespace rp2040core {
+
+// A request the core has no way to honour and no way to answer (a feature that is not built yet, such as core 1 behind the inter-core FIFO): the program stops here, with `message` on stderr - no
+// unwinding, no signal to the host to catch, because there is nothing a host could do with it and a firmware that went on would only hang. A bare wasm32 module (no stdio to write to) traps.
+[[noreturn]] inline void fatal(const char* message) noexcept {
+#if defined(__wasm__) && !defined(__EMSCRIPTEN__)
+    (void)message;
+    __builtin_trap();
+#else
+    std::fputs(message, stderr);
+    std::fputc('\n', stderr);
+    std::abort();
+#endif
+}
 
 // The messages a block reports for a register it does not implement; the host formats them (it owns the logger). The per-block names (`kDmaWarnRead`, ...) are aliases.
 enum RegWarn : uint32_t {

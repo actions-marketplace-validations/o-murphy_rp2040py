@@ -12,7 +12,6 @@ cdef extern from "sio.hpp" namespace "rp2040core":
     ctypedef void (*SioCyclesFn)(void* ctx, uint32_t cycles)
     ctypedef void (*SioWarnFn)(void* ctx, uint32_t kind, uint32_t offset, int64_t value)
 
-    cdef const uint32_t kSioWarnFifo
     cdef const uint32_t kSioWarnReadInvalid
     cdef const uint32_t kSioWarnWriteInvalid
     cdef const uint32_t kSioFailDivideByZero

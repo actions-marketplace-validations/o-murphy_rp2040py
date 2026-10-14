@@ -38,8 +38,11 @@ from rp2040py._sio import (
 from rp2040py._sio import RPSIO as PureSIO
 from rp2040py.native._sio import RPSIO as NativeSIO
 
+FIFO = (0x050, 0x054, 0x058)
 REGISTERS = [
-    *range(0x000, 0x080, 4),  # CPUID .. DIV_CSR, including the FIFO (warns) and the gaps
+    *(
+        offset for offset in range(0x000, 0x080, 4) if offset not in FIFO
+    ),  # CPUID .. DIV_CSR and the gaps (the FIFO stops the program: tests/test_sio_fifo_unsupported.py)
     *range(0x080, 0x100, 4),  # both interpolators
     *range(SPINLOCK0, SPINLOCK31 + 4, 4),
 ]
@@ -178,6 +181,8 @@ def _script(seed, length=500):
         offset = rng.choice(interesting) if rng.random() < 0.35 else rng.choice(REGISTERS)
         if rng.random() < 0.03:
             offset = rng.randrange(0, 0x10000000) & ~3  # far outside the register file
+        if offset in FIFO:
+            offset += 0x100  # (the FIFO stops the program: tests/test_sio_fifo_unsupported.py)
         roll = rng.random()
         if roll < 0.35:
             ops.append(("read", offset))

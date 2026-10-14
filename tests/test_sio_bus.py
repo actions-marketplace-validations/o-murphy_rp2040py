@@ -40,6 +40,8 @@ def _session(seed):
     for _ in range(1500):
         offset = rng.choice([rng.randrange(0, 0x180) & ~3, 0x60, 0x64, 0x68, 0x6C, 0x70, 0x74, 0x78, 0x10, 0x14, 0x20])
         offset += rng.choice([0, 0, 0, 0x1000, 0x2000, 0x10000000 - 4])  # the far offsets are invalid SIO addresses
+        if offset in (0x50, 0x54, 0x58):
+            offset += 0x100  # (the inter-core FIFO stops the program: tests/test_sio_fifo_unsupported.py)
         yield (
             rng.choice(("r32", "w32", "w16", "w8")),
             SIO + offset,

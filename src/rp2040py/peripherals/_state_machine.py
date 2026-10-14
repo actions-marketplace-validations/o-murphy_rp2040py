@@ -43,7 +43,7 @@ from rp2040py.peripherals.pio_registers import (
 from rp2040py.utils.fifo import FIFO
 
 if TYPE_CHECKING:
-    from rp2040py.peripherals.pio import RPPIO
+    from rp2040py.peripherals._pio import RPPIO
     from rp2040py.rp2040 import RP2040
 
 __all__ = ("StateMachine",)

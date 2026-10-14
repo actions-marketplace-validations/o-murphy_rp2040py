@@ -3,7 +3,7 @@ from typing import TYPE_CHECKING
 from rp2040py.peripherals.peripheral import BasePeripheral
 
 if TYPE_CHECKING:
-    from rp2040py.gpio_pin import GPIOPin
+    from rp2040py._gpio_pin import GPIOPin
     from rp2040py.rp2040 import RP2040
 
 __all__ = ("RPIO",)

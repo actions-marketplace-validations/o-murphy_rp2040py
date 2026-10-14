@@ -20,7 +20,7 @@ from rp2040py.native._gpio_pin cimport GPIOPin
 from rp2040py.native._pending cimport park_error, raise_if_pending
 from rp2040py.native._window_map cimport WindowHandler
 
-from rp2040py.gpio_pin import GPIOPinState
+from rp2040py._gpio_pin import GPIOPinState
 from rp2040py.irq import IRQ
 from rp2040py.peripherals._ssi import DREQ_XIP_SSIRX, DREQ_XIP_SSITX
 

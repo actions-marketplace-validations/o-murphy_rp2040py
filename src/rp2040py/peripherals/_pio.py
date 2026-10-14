@@ -1,6 +1,7 @@
 import asyncio
 from typing import TYPE_CHECKING
 
+from rp2040py.peripherals._state_machine import StateMachine
 from rp2040py.peripherals.peripheral import BasePeripheral
 from rp2040py.peripherals.pio_registers import (
     CTRL,
@@ -44,7 +45,6 @@ from rp2040py.peripherals.pio_registers import (
     TXF2,
     TXF3,
 )
-from rp2040py.peripherals.state_machine import StateMachine
 
 if TYPE_CHECKING:
     from rp2040py.rp2040 import RP2040

@@ -11,7 +11,7 @@
 # `rp2040.core` resolve as an attribute from outside Cython in the first place.
 
 from rp2040py.native._cortex_m0_core cimport CortexM0Core
-from rp2040py.native._bus cimport Bus
+from rp2040py.native._mcu cimport Mcu
 from rp2040py.native._window_map cimport WindowHandler
 from rp2040py.native._simulation_clock cimport SimulationClock
 
@@ -36,9 +36,9 @@ cdef class RP2040:
     # clock.simulation_clock facade resolves to, so it satisfies this typed field too - see that
     # module's docstring for why this doesn't shut out other IClock implementations.
     cdef public SimulationClock clock
-    # The caller-owned memory map (record 0096, Phase 1): a table of pointers into the four buffers below,
-    # which stay allocated and owned here as Python objects. The C++ side never allocates or copies.
-    cdef Bus _bus
+    # The chip as one C++ object (record 0096, step 2a): it owns the CPU, the bus (the caller-owned memory map of Phase 1: a table of pointers into the four buffers below,
+    # which stay allocated and owned here as Python objects - the C++ side never allocates or copies), the run flags and the host of the batch loop. `core` is a view of its CPU.
+    cdef Mcu _mcu
     # The peripheral window registry (record 0096, Phase 1): which handler serves each 16 KiB window. The
     # `peripherals` dict stays the Python-visible source of truth and mirrors every change into it
     # (_PeripheralTable); `_window_owners` keeps the handlers' Python-side contexts alive.

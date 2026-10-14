@@ -1,7 +1,7 @@
 from collections import deque
 from typing import TYPE_CHECKING
 
-from rp2040py.gpio_pin import GPIOPinState
+from rp2040py._gpio_pin import GPIOPinState
 from rp2040py.irq import IRQ
 from rp2040py.peripherals.peripheral import BasePeripheral
 

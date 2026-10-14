@@ -9,7 +9,7 @@ cycle. Pure constants/helpers only, no classes, so both sides can depend on it s
 
 from enum import IntEnum
 
-from rp2040py.peripherals.dma import DREQChannel
+from rp2040py.peripherals._dma import DREQChannel
 
 __all__ = (
     "CTRL",

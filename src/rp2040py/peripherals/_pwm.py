@@ -4,7 +4,7 @@ from typing import TYPE_CHECKING
 
 from rp2040py.clock.clock import IClock
 from rp2040py.irq import IRQ
-from rp2040py.peripherals.dma import DREQChannel
+from rp2040py.peripherals._dma import DREQChannel
 from rp2040py.peripherals.peripheral import BasePeripheral
 from rp2040py.utils.timer32 import Timer32, Timer32PeriodicAlarm
 

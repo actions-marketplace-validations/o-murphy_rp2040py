@@ -1,10 +1,12 @@
 from collections.abc import Callable, Coroutine
 from typing import TYPE_CHECKING, Any
 
+from rp2040py._cortex_m0_core import CortexM0Core
+from rp2040py._gpio_pin import GPIOPin
+from rp2040py._pin_bank import GPIOPinBank
+from rp2040py._sio import RPSIO
+from rp2040py.clock._simulation_clock import SimulationClock
 from rp2040py.clock.clock import IClock
-from rp2040py.clock.simulation_clock import SimulationClock
-from rp2040py.cortex_m0_core import CortexM0Core
-from rp2040py.gpio_pin import GPIOPin, GPIOPinBank
 from rp2040py.irq import IRQ
 from rp2040py.memory_map import (
     APB_START_ADDRESS,
@@ -24,6 +26,7 @@ from rp2040py.peripherals._dma import (  # the pure chip's own DMA: the native o
 from rp2040py.peripherals._i2c import RPI2C  # the pure chip's own I2C: the native one is the native chip's
 from rp2040py.peripherals._io import RPIO
 from rp2040py.peripherals._pads import RPPADS
+from rp2040py.peripherals._pio import RPPIO
 from rp2040py.peripherals._pll import RPPLL
 from rp2040py.peripherals._ppb import RPPPB  # the pure chip's own PPB: the native one is the native chip's
 from rp2040py.peripherals._psm import (
@@ -73,6 +76,7 @@ from rp2040py.peripherals._ssi import (
 from rp2040py.peripherals._syscfg import RP2040SysCfg
 from rp2040py.peripherals._sysinfo import RP2040SysInfo
 from rp2040py.peripherals._tbman import RPTBMAN
+from rp2040py.peripherals._timer import RPTimer
 from rp2040py.peripherals._uart import (  # the pure chip's own UART: the native one is the native chip's
     RPUART,
     IUARTDMAChannels,
@@ -86,11 +90,8 @@ from rp2040py.peripherals._xip_ctrl import (  # the pure chip's own XIP: the nat
 )
 from rp2040py.peripherals._xosc import RPXOSC
 from rp2040py.peripherals.peripheral import Peripheral
-from rp2040py.peripherals.pio import RPPIO
-from rp2040py.peripherals.timer import RPTimer
 from rp2040py.qspi_pads import QSPI_PAD_RESET_VALUES
 from rp2040py.reset_cause import ResetCause
-from rp2040py.sio import RPSIO
 from rp2040py.utils.bit import (
     read_uint16_le,
     read_uint32_le,

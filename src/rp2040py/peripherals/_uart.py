@@ -2,7 +2,7 @@ import math
 from collections.abc import Callable
 from typing import TYPE_CHECKING, NamedTuple
 
-from rp2040py.peripherals.dma import DREQChannel
+from rp2040py.peripherals._dma import DREQChannel
 from rp2040py.peripherals.peripheral import BasePeripheral
 from rp2040py.utils.fifo import FIFO
 

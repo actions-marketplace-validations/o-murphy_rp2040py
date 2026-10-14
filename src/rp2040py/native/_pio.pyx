@@ -571,6 +571,16 @@ cdef class RPPIO:
     def __cinit__(self, rp2040, str name, unsigned int first_irq, unsigned int index):
         cdef PioHost host
         cdef GPIOPin pin
+        block_address = getattr(rp2040, "_native_pio_address", None)
+        if block_address is None:
+            raise TypeError(
+                "the native PIO is a view of a block of the native chip's C++ core; "
+                f"{type(rp2040).__name__} is not that (the pure-Python chip has the pure-Python peripherals/_pio.RPPIO)"
+            )
+        address = block_address(index)  # (a block of the chip: re-initialised here, so a shell that replaces another one starts from reset)
+        if address is None:
+            raise ValueError(f"the chip has no PIO block {index}")
+        self._block = <PioBlock*> <size_t> address
         self.rp2040 = rp2040
         self.name = name
         self.first_irq = first_irq

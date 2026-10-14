@@ -52,9 +52,26 @@ struct BatchParams {
     double paced_idle_nanos = 1e6;      // the longest idle jump while `real_io` is set (1 ms of simulated time)
 };
 
+// Why a batch ended (`BatchResult::reason`). Exactly one holds; they are checked in this order.
+enum BatchStop : int {
+    kStopFault = -1,         // a clock alarm, the CPU or a host call failed (the host has parked its error)
+    kStopCeiling = 0,        // `instruction_ceiling` iterations done
+    kStopRequested = 1,      // the stop byte was set
+    kStopClockChanged = 2,   // `clk_sys` changed: the cycle period in the params is stale, start the next batch at the new rate
+    kStopBudget = 3,         // the real-time budget (`yield_budget_seconds`) was used up
+    kStopPaced = 4,          // one capped idle jump while a device waits on the real world: the caller sleeps for the simulated time it covered
+};
+
+// What a batch did, for a host that wants more than "it ran" (the Python `Simulator` does not read it; a wasm or FFI host paces and reports from it).
+struct BatchResult {
+    int reason = kStopCeiling;
+    long iterations = 0;          // loop iterations: an instruction, or an idle jump
+    int64_t ticks_advanced = 0;   // simulated time the batch covered, in clock ticks (1/16 ns)
+};
+
 // Runs one batch. Returns 0, or kBatchFault when a clock alarm or the CPU failed (the Python error is parked; the pending tick time
-// is *not* flushed, as an exception would not have flushed it).
-inline int run_batch(Cpu& cpu, Clock& clock, const BatchHost& host, const BatchParams& params) noexcept {
+// is *not* flushed, as an exception would not have flushed it). `result`, if given, says why it ended and what it covered.
+inline int run_batch(Cpu& cpu, Clock& clock, const BatchHost& host, const BatchParams& params, BatchResult* result = nullptr) noexcept {
     constexpr int64_t kNoAlarm = std::numeric_limits<int64_t>::max();
     // One system clock in ticks: not a whole number in general (133 MHz is 120.30), so time is advanced in CYCLES with the fraction carried by the clock.
     const double ticks_per_cycle = params.cycle_nanos * static_cast<double>(kTicksPerNano);
@@ -63,6 +80,17 @@ inline int run_batch(Cpu& cpu, Clock& clock, const BatchHost& host, const BatchP
     const int64_t cycle_ticks = whole_ticks ? static_cast<int64_t>(ticks_per_cycle) : 0;
     auto advance = [&](int64_t n) noexcept { return whole_ticks ? clock.tick_ticks(n * cycle_ticks) : clock.advance_cycles(n, ticks_per_cycle); };
     long i = 0;
+    const int64_t start_ticks = clock.ticks();
+    int stop_reason = kStopCeiling;
+    // Every exit reports through here: the reason, the iterations and the simulated time covered (stores only; nothing in the loop reads them).
+    auto done = [&](int status, int reason) noexcept {
+        if (result != nullptr) {
+            result->reason = reason;
+            result->iterations = i;
+            result->ticks_advanced = clock.ticks() - start_ticks;
+        }
+        return status;
+    };
     int ticks_since_check = 0;
     const double batch_start = host.monotonic(host.ctx);
     int64_t pending_cycles = 0;
@@ -78,13 +106,16 @@ inline int run_batch(Cpu& cpu, Clock& clock, const BatchHost& host, const BatchP
         ticks_since_check += 1;
         if (ticks_since_check >= params.check_interval) {
             ticks_since_check = 0;
-            if (host.monotonic(host.ctx) - batch_start > params.yield_budget_seconds) break;
+            if (host.monotonic(host.ctx) - batch_start > params.yield_budget_seconds) {
+                stop_reason = kStopBudget;
+                break;
+            }
         }
         int64_t cycles;
         bool paced = false;
         if (cpu.waiting) {
             if (pending_cycles != 0) {
-                if (!advance(pending_cycles)) return kBatchFault;
+                if (!advance(pending_cycles)) return done(kBatchFault, kStopFault);
                 pending_cycles = 0;
                 pending_count = 0;
             }
@@ -94,7 +125,7 @@ inline int run_batch(Cpu& cpu, Clock& clock, const BatchHost& host, const BatchP
                 if (idle_ticks > cap) idle_ticks = cap;
                 paced = true;
             }
-            if (!clock.tick_ticks(idle_ticks)) return kBatchFault;
+            if (!clock.tick_ticks(idle_ticks)) return done(kBatchFault, kStopFault);
             // The system clocks that jump covered, floored at one: an idle jump with no alarm advances time by nothing, and a PIO
             // frozen whenever the CPU parks in WFI with an empty alarm queue could never make the progress that wakes it again.
             cycles = static_cast<int64_t>(static_cast<double>(idle_ticks) / ticks_per_cycle);
@@ -102,35 +133,41 @@ inline int run_batch(Cpu& cpu, Clock& clock, const BatchHost& host, const BatchP
             if (params.tick_batch > 1) tick_budget = clock.has_alarm() ? clock.ticks_to_next_alarm() : kNoAlarm;
         } else {
             const int executed = cpu.execute();
-            if (executed < 0) return kBatchFault;
+            if (executed < 0) return done(kBatchFault, kStopFault);
             cycles = executed;
             if (params.tick_batch <= 1) {
-                if (!advance(cycles)) return kBatchFault;
+                if (!advance(cycles)) return done(kBatchFault, kStopFault);
             } else {
                 pending_cycles += cycles;
                 pending_count += 1;
                 // Rounded UP: an alarm is never flushed later than it is due, only (by under a tick) earlier.
                 if (tick_budget != kNoAlarm) tick_budget -= static_cast<int64_t>(std::ceil(static_cast<double>(cycles) * ticks_per_cycle));
                 if (tick_budget <= 0 || pending_count >= params.tick_batch) {
-                    if (!advance(pending_cycles)) return kBatchFault;
+                    if (!advance(pending_cycles)) return done(kBatchFault, kStopFault);
                     pending_cycles = 0;
                     pending_count = 0;
                     tick_budget = clock.has_alarm() ? clock.ticks_to_next_alarm() : kNoAlarm;
                 }
             }
         }
-        if (pio_flag0 != nullptr && !*pio_flag0 && !host.pio_advance(host.ctx, 0, cycles)) return kBatchFault;
-        if (pio_flag1 != nullptr && !*pio_flag1 && !host.pio_advance(host.ctx, 1, cycles)) return kBatchFault;
+        if (pio_flag0 != nullptr && !*pio_flag0 && !host.pio_advance(host.ctx, 0, cycles)) return done(kBatchFault, kStopFault);
+        if (pio_flag1 != nullptr && !*pio_flag1 && !host.pio_advance(host.ctx, 1, cycles)) return done(kBatchFault, kStopFault);
         for (int p = 2; p < pio_rest; ++p) {
-            if (!*host.pio_stopped[p] && !host.pio_advance(host.ctx, p, cycles)) return kBatchFault;
+            if (!*host.pio_stopped[p] && !host.pio_advance(host.ctx, p, cycles)) return done(kBatchFault, kStopFault);
         }
         i += 1;
-        if (paced) break;  // one capped idle jump per batch: the caller sleeps for the simulated time it covered
+        if (paced) {  // one capped idle jump per batch: the caller sleeps for the simulated time it covered
+            stop_reason = kStopPaced;
+            break;
+        }
+    }
+    if (stop_reason == kStopCeiling && i < params.instruction_ceiling) {  // the loop condition ended it
+        stop_reason = *host.stopped ? kStopRequested : kStopClockChanged;
     }
     if (pending_cycles != 0) {
-        if (!advance(pending_cycles)) return kBatchFault;
+        if (!advance(pending_cycles)) return done(kBatchFault, kStopFault);
     }
-    return 0;
+    return done(0, stop_reason);
 }
 
 }  // namespace rp2040core

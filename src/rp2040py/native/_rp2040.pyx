@@ -35,12 +35,13 @@ from rp2040py.native._memory_map cimport (
     kWordIndexed,
 )
 from rp2040py.native._pending cimport park_error, raise_if_pending
+from rp2040py.native._pio cimport PioBlock
 from rp2040py.native._bus cimport BusHost, kBusWarnInvalidRead, kBusWarnUnalignedRead
 from rp2040py.native._window_map cimport Read32Fn, Write32Fn, WindowHandler, kNoWindow
 from rp2040py.native._simulation_clock cimport SimulationClock
 
 from rp2040py.clock.clock import IClock
-from rp2040py.gpio_pin import GPIOPin, GPIOPinBank
+from rp2040py.native._gpio_pin import GPIOPin, GPIOPinBank
 from rp2040py.native._gpio_pin import GPIOPinBank as _NativeGPIOPinBank
 from rp2040py.native._pin_wiring import bind_pin_sources
 from rp2040py.irq import IRQ
@@ -52,68 +53,41 @@ from rp2040py.memory_map import (
     RAM_START_ADDRESS,
     SIO_START_ADDRESS,
 )
-from rp2040py.peripherals.adc import RPADC
-from rp2040py.peripherals.busctrl import RPBUSCTRL
-from rp2040py.peripherals.clocks import RPClocks
-from rp2040py.peripherals.pll import RPPLL
-from rp2040py.peripherals.dma import RPDMA, DREQChannel
-from rp2040py.peripherals.i2c import RPI2C
-from rp2040py.peripherals.io import RPIO
-from rp2040py.peripherals.pads import RPPADS
-from rp2040py.peripherals.vreg_and_chip_reset import HAD_POR, HAD_RUN, RPVREGAndChipReset
-from rp2040py.peripherals.xip_ctrl import RPXIPAux, RPXIPCtrl
+from rp2040py.native._adc import RPADC
+from rp2040py.native._busctrl import RPBUSCTRL
+from rp2040py.native._clocks import RPClocks
+from rp2040py.native._pll import RPPLL
+from rp2040py.native._dma import RPDMA
+from rp2040py.peripherals._dma import DREQChannel
+from rp2040py.native._i2c import RPI2C
+from rp2040py.native._io import RPIO
+from rp2040py.native._pads import RPPADS
+from rp2040py.native._vreg_and_chip_reset import HAD_POR, HAD_RUN, RPVREGAndChipReset
+from rp2040py.native._xip_ctrl import RPXIPAux, RPXIPCtrl
 from rp2040py.qspi_pads import QSPI_PAD_RESET_VALUES
 from rp2040py.reset_cause import ResetCause
-from rp2040py.peripherals.pio import RPPIO
-from rp2040py.peripherals.ppb import RPPPB
-from rp2040py.peripherals.psm import (
-    PSM_BITS_MASK,
-    RPPSM,
-    WDSEL_CLOCKS,
-    WDSEL_RESETS,
-    WDSEL_ROSC,
-    WDSEL_SIO,
-    WDSEL_XIP,
-    WDSEL_XOSC,
-)
-from rp2040py.peripherals.pwm import RPPWM
-from rp2040py.peripherals.reset import (
-    RESET_ADC,
-    RESET_BUSCTRL,
-    RESET_DMA,
-    RESET_I2C0,
-    RESET_I2C1,
-    RESET_IO_BANK0,
-    RESET_IO_QSPI,
-    RESET_PADS_BANK0,
-    RESET_PADS_QSPI,
-    RESET_PIO0,
-    RESET_PIO1,
-    RESET_PWM,
-    RESET_RTC,
-    RESET_SPI0,
-    RESET_SPI1,
-    RESET_SYSCFG,
-    RESET_TIMER,
-    RESET_UART0,
-    RESET_UART1,
-    RESET_USBCTRL,
-    RESETS_BITS_MASK,
-    RPReset,
-)
-from rp2040py.peripherals.rtc import RP2040RTC
-from rp2040py.peripherals.spi import RPSPI, ISPIDMAChannels
-from rp2040py.peripherals.ssi import RPSSI
-from rp2040py.peripherals.syscfg import RP2040SysCfg
-from rp2040py.peripherals.sysinfo import RP2040SysInfo
-from rp2040py.peripherals.tbman import RPTBMAN
-from rp2040py.peripherals.timer import RPTimer
-from rp2040py.peripherals.uart import RPUART, IUARTDMAChannels
-from rp2040py.peripherals.usb import RPUSBController
-from rp2040py.peripherals.watchdog import RPWatchdog
-from rp2040py.peripherals.rosc import RPROSC
-from rp2040py.peripherals.xosc import RPXOSC
-from rp2040py.sio import RPSIO
+from rp2040py.native._pio import RPPIO
+from rp2040py.native._ppb import RPPPB
+from rp2040py.native._psm import RPPSM
+from rp2040py.peripherals._psm import PSM_BITS_MASK, WDSEL_CLOCKS, WDSEL_RESETS, WDSEL_ROSC, WDSEL_SIO, WDSEL_XIP, WDSEL_XOSC
+from rp2040py.native._pwm import RPPWM
+from rp2040py.native._reset import RPReset
+from rp2040py.peripherals._reset import RESET_ADC, RESET_BUSCTRL, RESET_DMA, RESET_I2C0, RESET_I2C1, RESET_IO_BANK0, RESET_IO_QSPI, RESET_PADS_BANK0, RESET_PADS_QSPI, RESET_PIO0, RESET_PIO1, RESET_PWM, RESET_RTC, RESET_SPI0, RESET_SPI1, RESET_SYSCFG, RESET_TIMER, RESET_UART0, RESET_UART1, RESET_USBCTRL, RESETS_BITS_MASK
+from rp2040py.native._rtc import RP2040RTC
+from rp2040py.native._spi import RPSPI
+from rp2040py.peripherals._spi import ISPIDMAChannels
+from rp2040py.native._ssi import RPSSI
+from rp2040py.native._syscfg import RP2040SysCfg
+from rp2040py.native._sysinfo import RP2040SysInfo
+from rp2040py.native._tbman import RPTBMAN
+from rp2040py.native._timer import RPTimer
+from rp2040py.native._uart import RPUART
+from rp2040py.peripherals._uart import IUARTDMAChannels
+from rp2040py.native._usb import RPUSBController
+from rp2040py.native._watchdog import RPWatchdog
+from rp2040py.native._rosc import RPROSC
+from rp2040py.native._xosc import RPXOSC
+from rp2040py.native._sio import RPSIO
 from rp2040py.native._bit cimport u32, write_uint16_le
 from rp2040py.utils.logging import ConsoleLogger, LogLevel
 
@@ -343,7 +317,7 @@ cdef class RP2040:
         region.mask = 0xFFFFFFFFU
         region.data = <uint8_t*> &self._bootrom[0]
         region.flags = kWordIndexed
-        self._bus.mem.attach(region)
+        self._mcu.bus.mem.attach(region)
         # Flash: four 16 MiB aliases for reads (XIP, NOALLOC, NOCACHE, NOCACHE_NOALLOC); writes and
         # sub-word accesses only below the real flash size.
         region.base = FLASH_START
@@ -352,14 +326,14 @@ cdef class RP2040:
         region.mask = 0x00FFFFFFU
         region.data = <uint8_t*> &self._flash[0]
         region.flags = kSubWord | kXip  # the whole window is read-only to the bus; the XIP block (once built) is told of every access
-        self._bus.mem.attach(region)
+        self._mcu.bus.mem.attach(region)
         region.base = RAM_START
         region.window = self.ram_byte_size
         region.size = self.ram_byte_size
         region.mask = 0xFFFFFFFFU
         region.data = <uint8_t*> &self._sram[0]
         region.flags = kSubWord
-        self._bus.mem.attach(region)
+        self._mcu.bus.mem.attach(region)
         # USB DPRAM: a completed 32-bit write must reach `usb_ctrl.dpram_updated()`.
         region.base = DPRAM_START
         region.window = self.dpram_byte_size
@@ -367,18 +341,19 @@ cdef class RP2040:
         region.mask = 0xFFFFFFFFU
         region.data = <uint8_t*> &self._usb_dpram[0]
         region.flags = kNotifyOnWrite
-        self._bus.mem.attach(region)
+        self._mcu.bus.mem.attach(region)
 
     def __init__(self, clock: IClock | None = None):
         cdef BusHost bus_host
         bus_host.warn = _bus_warn
         bus_host.dpram_written = _bus_dpram_written
         bus_host.ctx = <void*> self
-        self._bus.init(bus_host)
+        self._mcu.bus.init(bus_host)
         # NOTE: must be set before constructing any peripheral below - several of them
         # (RPPPB, RPWatchdog, RPADC, RPPWM, RPPIO, RPUSBController, RPDMA) call
         # self.clock.create_alarm(...) from their own __init__.
         self.clock = clock if clock is not None else SimulationClock()
+        self._mcu.use_clock(&self.clock._clock)  # a clock handed in is used where it is: it may already hold time and alarms (the batch glue points the chip at its simulator's clock again on every run)
 
         # Clocks
         self.clk_sys = 125 * MHZ
@@ -805,7 +780,7 @@ cdef class RP2040:
         return unsubscribe
 
     cpdef unsigned int read_uint32(self, long long address) except? 0:
-        cdef unsigned int word = self._bus.read32(<unsigned int> (address & 0xFFFFFFFFU))
+        cdef unsigned int word = self._mcu.bus.read32(<unsigned int> (address & 0xFFFFFFFFU))
         raise_if_pending()
         return word
 
@@ -842,7 +817,7 @@ cdef class RP2040:
     @sio.setter
     def sio(self, value) -> None:
         self._sio = value
-        self._bus.set_sio(self._direct_handler(value, True))
+        self._mcu.bus.set_sio(self._direct_handler(value, True))
         self._bind_pin_sources()
 
     @property
@@ -852,7 +827,7 @@ cdef class RP2040:
     @ppb.setter
     def ppb(self, value) -> None:
         self._ppb = value
-        self._bus.set_ppb(self._direct_handler(value, False))
+        self._mcu.bus.set_ppb(self._direct_handler(value, False))
         self._rebind_clock_sinks()
 
     # The clock tree tells these five (with the DMA) of a change directly when they are native blocks (core/clock_sinks.hpp), so replacing one has to re-point the tree: every way of replacing is a property.
@@ -954,7 +929,7 @@ cdef class RP2040:
             hooks.sram_write = _python_xip_sram_write
             hooks.ctx = <void*> xip
             self._xip_owner = xip  # keeps the block (and so the context pointer) alive
-            self._bus.mem.set_xip(hooks)
+            self._mcu.bus.mem.set_xip(hooks)
         else:
             read_access, write_access, sram_read, sram_write, ctx = native_hooks(xip)
             hooks.read_access = <XipAccessFn> <size_t> read_access
@@ -963,7 +938,7 @@ cdef class RP2040:
             hooks.sram_write = <XipSramWriteFn> <size_t> sram_write
             hooks.ctx = <void*> <size_t> ctx
             self._xip_owner = xip  # keeps the block (and so the context pointer) alive
-            self._bus.mem.set_xip(hooks)
+            self._mcu.bus.mem.set_xip(hooks)
 
     def _native_flash_address(self):
         """The address and size of this chip's flash buffer, for a native block that works on it directly (the SSI): allocated once, only ever
@@ -971,10 +946,25 @@ cdef class RP2040:
         pure-Python chip) simply does not answer."""
         return (<size_t> &self._flash[0], self.flash_byte_size)
 
+    def _native_pio_address(self, index):
+        """The address of this chip's PIO block `index` (0 or 1), for the native PIO shell that is its Python view; None if there is no such block."""
+        cdef PioBlock* block = self._mcu.pio_block(index)
+        return <size_t> block if block != NULL else None
+
+    @staticmethod
+    def _native_run_flags(chip):
+        """The chip's stop byte and its "a device waits on the real world" byte as two one-byte buffers (what `Simulator._stop_flag` / `_real_io_flag` are over a native chip): the
+        batch loop reads the same bytes on every iteration. Looked up on the TYPE, so a stand-in for the chip does not answer. The buffers do not keep the chip alive: whoever holds
+        them (the Simulator) holds the chip too."""
+        cdef RP2040 rp = <RP2040> chip
+        cdef unsigned char[::1] stop = <unsigned char[:1]> rp._mcu.stop_address()
+        cdef unsigned char[::1] real_io = <unsigned char[:1]> rp._mcu.real_io_address()
+        return stop, real_io
+
     def _native_bus_address(self):
         """The address of this chip's C++ bus, for a native block that works on it directly (the DMA). Looked up as an
         attribute of the chip, so a chip without a C++ bus (the pure-Python one) simply does not answer."""
-        return <size_t> &self._bus
+        return <size_t> &self._mcu.bus
 
     cdef WindowHandler _direct_handler(self, object block, bint is_sio):
         """The handler the bus calls for SIO or the PPB. A block with `_native_window` on its TYPE lends its own C++
@@ -1039,16 +1029,16 @@ cdef class RP2040:
             handler.read32 = _python_window_read32
             handler.write32 = _python_window_write32
             handler.ctx = <void*> owner
-        self._bus.windows.attach(<uint32_t> (k << 12), handler)
+        self._mcu.bus.windows.attach(<uint32_t> (k << 12), handler)
 
     def _detach_window(self, key) -> None:
         if not isinstance(key, int) or key < 0 or key >= (1 << 20) or (key & 3):
             return
-        self._bus.windows.detach(<uint32_t> (<unsigned long long> key << 12))
+        self._mcu.bus.windows.detach(<uint32_t> (<unsigned long long> key << 12))
         self._window_owners.pop(key, None)
 
     def _clear_windows(self) -> None:
-        self._bus.windows.clear()
+        self._mcu.bus.windows.clear()
         self._window_owners.clear()
 
     def find_peripheral(self, address):
@@ -1056,29 +1046,29 @@ cdef class RP2040:
 
     cpdef unsigned int read_uint16(self, long long address):
         """We assume the address is 16-bit aligned."""
-        cdef unsigned int value = self._bus.read16(<unsigned int> (address & 0xFFFFFFFFU))
+        cdef unsigned int value = self._mcu.bus.read16(<unsigned int> (address & 0xFFFFFFFFU))
         raise_if_pending()
         return value
 
     cpdef unsigned int read_uint8(self, long long address):
-        cdef unsigned int value = self._bus.read8(<unsigned int> (address & 0xFFFFFFFFU))
+        cdef unsigned int value = self._mcu.bus.read8(<unsigned int> (address & 0xFFFFFFFFU))
         raise_if_pending()
         return value
 
     cpdef write_uint32(self, long long address, long long value):
         # The handlers get the ORIGINAL `value`, not a masked copy: sio.py's divider emulation relies on the true signed
         # Python int (see core/bus.hpp).
-        self._bus.write32(<unsigned int> (address & 0xFFFFFFFFU), value)
+        self._mcu.bus.write32(<unsigned int> (address & 0xFFFFFFFFU), value)
         raise_if_pending()
 
     cpdef write_uint8(self, long long address, long long value):
-        self._bus.write8(<unsigned int> (address & 0xFFFFFFFFU), <unsigned int> (value & 0xFF))
+        self._mcu.bus.write8(<unsigned int> (address & 0xFFFFFFFFU), <unsigned int> (value & 0xFF))
         raise_if_pending()
 
     cpdef write_uint16(self, long long address, long long value):
         # we assume that address is 16-bit aligned.
         # Ideally we should generate a fault if not!
-        self._bus.write16(<unsigned int> (address & 0xFFFFFFFFU), <unsigned int> (value & 0xFFFF))
+        self._mcu.bus.write16(<unsigned int> (address & 0xFFFFFFFFU), <unsigned int> (value & 0xFFFF))
         raise_if_pending()
 
     @property

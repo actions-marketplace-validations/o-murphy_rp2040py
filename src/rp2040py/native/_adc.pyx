@@ -27,7 +27,7 @@ from rp2040py.native._simulation_clock cimport SimulationClock
 from rp2040py.native._window_map cimport WindowHandler
 
 from rp2040py.irq import IRQ
-from rp2040py.peripherals.dma import DREQChannel
+from rp2040py.peripherals._dma import DREQChannel
 
 __all__ = ("RPADC",)
 

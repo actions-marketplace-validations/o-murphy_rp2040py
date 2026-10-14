@@ -46,7 +46,8 @@ and `reference/` for those). The structure itself is decided in
   `circuitpython-10x-boot-stall` → [0050]
   (all five on 2026-08-16), `queued-exec-erroring-flaky-test` → [0065] (2026-08-18, closed
   dormant/not-root-caused rather than by a fix), `usb-port` → [0098] (2026-10-13, the USB section
-  and the appended note).
+  and the appended note), `clocks-port` → [0098] (2026-10-14, the CLOCKS and PLL
+  section and the appended note).
   (`littlefs-fat12-exclusivity`, cited by [0036], was
   deleted before this convention existed and was **not** preserved anywhere.)
 - **`reference/`** — living how-to / checklists. Not numbered.
@@ -55,7 +56,6 @@ and `reference/` for those). The structure itself is decided in
 
 ### In progress / Proposed
 
-- [ ] [`tasks/clocks-port.md`](tasks/clocks-port.md) CLOCKS and PLL: audit against datasheet 2.15 / 2.18, then the C++ port (the tree owned by the core) | audit read, decisions made (two headers; the CPU's instruction time follows clk_sys; a disabled XOSC gives 0 Hz); PLL power bits / LOCK / ENABLED0-1 to fix in the reference first; resus, switch delays, clock gating documented not built
 - [ ] [0099] a WASM drop-in for the original rp2040js | proposed, nothing designed - once Phase 6 of 0096 boots MicroPython on wasmtime/node, try a TypeScript wrapper with rp2040js's public API and run its own specs against the core
 - [ ] [0098] the ported blocks against the RP2040 datasheet | code shipped, record open - every block ported so far is read against the datasheet and fixed (TIMER, ADC, PWM, UART, SPI, I2C, SIO, DMA, SSI, CLOCKS/PLL, PIO, SYSINFO, TBMAN, BUSCTRL, SYSCFG, VREG_AND_CHIP_RESET, PSM, XOSC, RESETS, WATCHDOG, RTC); the remaining blocks are read as they are ported; open features (PIO FJOIN/OUT_STICKY, DMA sniffer, clock frequency counter) are listed in the record
 - [ ] [0096] a C++ MCU core, statically linked through Cython, WASM host last | phased plan (phases 0-7) - Phases 0-3 done the SSI and the DMA of Phase 4 (clock/alarms, TIMER, SIO, the bus, the CPU, the batch loop, the pins, the CYW43 gSPI shifter, the PIO, the SSI flash path and the DMA are C++; the CDC host no longer ping-pongs; the PPB stays a Python window by decision; synthetic loop 14 -> ~110 Minstr/s, CircuitPython boot 12.4 -> 1.1 s, Pico W scan 9.8 -> 1.7 s), the UART, the SPI, the I2C, the ADC and the PWM (with its `Timer32`) are C++ too (record 0096); a real-world pacing fix keeps simulated time from outrunning the wall clock while the NAT waits on a reply; **the C++ port was paused on 2026-10-05 while the engine-room thread was removed (`Simulator.pump()`, thread-free by default, see the record) and resumed the same day with the PWM**; order now: the rest of Phase 4 (the USB controller - the small blocks, the RTC the last of them, are done; the PWM's reference bugs and the clock tree - PLLs, clk_sys/clk_peri, listeners - are done, with rp2040js 1.4.0 copied in full; seven ADC and three I2C reference bugs fixed, DMA with the I2C is in the backlog) -> QSPI pads/shared pin banks with WASM; USB has no speed case but is still owed to C++ (Phase 4 exit, WASM), CYW43 is a board peripheral and leaves this record (a native CYW43 may follow separately); CI green on Linux/macOS/Windows; Python API unchanged
@@ -74,6 +74,7 @@ and `reference/` for those). The structure itself is decided in
 
 ### Implemented
 
+- [x] [0098] CLOCKS and PLL: audit against datasheet 2.15 / 2.18, then the C++ port | the PLL's power bits / `LOCK`, `ENABLED0/1` and a stopped crystal giving 0 Hz fixed in the reference (`tests/test_clocks_xosc_pll.py`), `core/clocks.hpp` + `core/pll.hpp` + `core/clock_sinks.hpp` + `_clocks.pyx` / `_pll.pyx` held to a lockstep oracle (57 logic mutants) and mutation-tested C++ checks; the CPU's instruction time follows `clk_sys`, the crystal starting retunes the tree; resus, switch delays, clock gating documented not built (the row of 0098 below stays open for the rest of the blocks)
 - [x] [0098] USB: audit against datasheet 4.1 and TinyUSB, then the C++ port | the reference follows the datasheet (twelve findings, `tests/test_usb_datasheet.py`), `core/usb.hpp` + `_usb.pyx` held to a lockstep oracle (66 logic mutants) and to `tests/cpp/test_usb.cpp`; first mutation testing of a C++ block (`scripts/audit/cpp_mutants.py`); token-level wire, suspend/resume, device SOF documented not built (the row of 0098 below stays open for the rest of the blocks)
 - [x] [0100] an integer time base for the simulation clock | int64 ticks of 1/16 ns end to end; `rp2_dma` passes in the full official-suite sequence; the benchmark is within noise
 - [x] [0097] a Pyodide/WASM wheel for rp2040py | root-caused and fixed - a native clock/block reference cycle invisible to the GC exhausted the 32-bit/wasm address space one leaked chip at a time; `[tool.cibuildwheel.pyodide]`/`publish.yml`'s pyodide row now run the full test suite like every other platform

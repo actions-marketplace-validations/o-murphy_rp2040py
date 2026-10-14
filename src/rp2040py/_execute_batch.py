@@ -41,6 +41,18 @@ _PACED_IDLE_NANOS = 1_000_000.0
 
 
 def execute_batch(simulator: "Simulator", tick_batch: int) -> None:
+    """One batch (see `_run_batch`), ended early by a change of `clk_sys`: the CPU's time per instruction is `1 / clk_sys` (docs/tasks/clocks-port.md, decision 2), the batch fixes it at its start,
+    and a firmware that sets the clock tree mid-batch must see the new rate on the very next instruction - a clock listener raises the flag the loop checks, and the next batch starts at the new rate."""
+    rp2040 = simulator.rp2040
+    changed = [False]
+    unsubscribe = rp2040.add_clock_listener(lambda _new, _old: changed.__setitem__(0, True))
+    try:
+        _run_batch(simulator, tick_batch, changed)
+    finally:
+        unsubscribe()
+
+
+def _run_batch(simulator: "Simulator", tick_batch: int, changed: list[bool]) -> None:
     """Runs up to 1,000,000 instructions/idle-jumps, or until `simulator.stopped` is set, or until
     the batch itself has eaten its own real-time budget (_BATCH_YIELD_BUDGET_SECONDS) - whichever
     comes first. Synchronous and self-contained (no `await` anywhere in here) so it can be driven
@@ -95,7 +107,7 @@ def execute_batch(simulator: "Simulator", tick_batch: int) -> None:
     # stalled). A stalled machine is now simply excluded from `RPPIO.next_due_fp` instead, and
     # `check_wait()` lowers it again the moment the stall ends.
     pios = rp2040.pio
-    cycle_nanos = 1e9 / 125_000_000  # 125 MHz
+    cycle_nanos = 1e9 / rp2040.clk_sys  # one system clock: 125 MHz until firmware configures the clock tree
     # One system clock in ticks of 1/16 ns: not a whole number in general (133 MHz is 120.30), so time advances in CYCLES with the fraction carried by the clock (docs/records/0100).
     ticks_per_cycle = cycle_nanos * TICKS_PER_NANO
     # The common case (125 MHz: 128 ticks) is a whole number of ticks per cycle: plain integer arithmetic, no remainder to carry.
@@ -116,7 +128,7 @@ def execute_batch(simulator: "Simulator", tick_batch: int) -> None:
     pending_cycles = 0
     pending_count = 0
     tick_budget = clock.ticks_to_next_alarm if clock.has_scheduled_alarm else None
-    while i < 1000000 and not simulator.stopped:
+    while i < 1000000 and not simulator.stopped and not changed[0]:
         # Checked every _TIME_CHECK_INTERVAL iterations regardless of idle/busy - not just
         # during an uninterrupted idle run. A real device idling at the REPL isn't purely
         # WFI'd end to end: a periodic timer interrupt (SysTick, watchdog, ...) briefly flips

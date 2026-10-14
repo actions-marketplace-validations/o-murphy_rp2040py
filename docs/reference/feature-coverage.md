@@ -70,6 +70,7 @@ Follows the datasheet's own table of contents (chapter.section), so a row is som
 | 2.5.5.2 | DMA: CRC sniffer | Missing | `SNIFF_CTRL`, `SNIFF_DATA`; the algorithm's bit order needs a hardware-sourced vector | Go-ahead |
 | 2.5.5.3 | DMA: channel abort | Done | | - |
 | 2.5.5.4 | DMA: debug (`DBG_CTDREQ`) | Missing | | Go-ahead |
+| 2.15 | CPU time follows `clk_sys` | Done | an instruction costs `1 / clk_sys` of simulated time (`machine.freq(250_000_000)` halves a loop's simulated time; live boot 2026-10-14), a batch ends on a change of clk_sys; a bare chip stays at 125 MHz | - |
 | 2.5 | DMA: transfer rate | Done | an unpaced transfer takes one `clk_sys` cycle per word ("one read access and one write access ... every clock cycle"); `rp2_dma` timing case passes (0098) | - |
 | 2.5 | DMA: `HIGH_PRIORITY` and arbitration, read/write/AHB error flags, bus contention | Missing | a transfer never waits for the bus; the flags are stored | Go-ahead |
 | 2.6.1 | ROM | Done | the real boot ROM image | - |

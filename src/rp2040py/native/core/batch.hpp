@@ -30,6 +30,9 @@ struct BatchHost {
     // it is capped at `BatchParams::paced_idle_nanos` and ends the batch, and the caller sleeps for the simulated time the batch covered (`Simulator.execute()`).
     // Null: never paced.
     const volatile uint8_t* real_io = nullptr;
+    // Optional. Nonzero: `clk_sys` changed since the batch began, so the cycle period in `BatchParams::cycle_nanos` is stale - the batch ends at the next iteration (whatever time is pending is flushed
+    // at the old rate, which is what the instructions that accrued it cost) and the caller starts the next one at the new rate. Null: the period is fixed for the batch.
+    const volatile uint8_t* clk_changed = nullptr;
     // PIO blocks stepped once per iteration, by the system clocks that iteration covered. `pio_stopped[i]` points at block i's own
     // "stopped" flag; `pio_advance` is called only for a block that is not stopped and returns false if it failed (parked).
     static constexpr int kMaxPio = 4;
@@ -71,7 +74,7 @@ inline int run_batch(Cpu& cpu, Clock& clock, const BatchHost& host, const BatchP
     const volatile int* const pio_flag1 = host.pio_count > 1 ? host.pio_stopped[1] : nullptr;
     const int pio_rest = host.pio_count > 2 ? host.pio_count : 0;
 
-    while (i < params.instruction_ceiling && !*host.stopped) {
+    while (i < params.instruction_ceiling && !*host.stopped && !(host.clk_changed != nullptr && *host.clk_changed != 0)) {
         ticks_since_check += 1;
         if (ticks_since_check >= params.check_interval) {
             ticks_since_check = 0;

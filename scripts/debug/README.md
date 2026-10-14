@@ -6,6 +6,7 @@ Small scripts that were written to find one specific problem and are worth keepi
 |---|---|
 | `usb_trace.py` | every access of a firmware to the USB controller, with the time, and the last accesses when it hangs (the pico-sdk 1.2.0-1.4.0 enumeration, record 0098) |
 | `build_pico_hello_usb.sh` | builds pico-examples' `hello_usb` for one pico-sdk version (needs an ARM toolchain), to reproduce a "Test Pi Pico SDK" failure locally |
+| `live_freq.py` | MicroPython times the same loop at 125 MHz, after `machine.freq(250_000_000)` and back: the CPU's simulated time follows `clk_sys` (decision 2 of docs/tasks/clocks-port.md) |
 | `live_boots.sh` | MicroPython / CircuitPython / Kaluma boots with timings |
 | `gdb_clock_alarms.py` | from gdb, the alarm list of a spinning native emulator (record 0100) |
 | `../audit/effect_probe.py` | does writing a register change anything (behind `register_status.py`'s stub list) |

@@ -61,6 +61,7 @@ cdef cppbool _sys_sink(void* ctx, double hz, double old) noexcept:
     try:
         rp2040 = block.rp2040
         rp2040.clk_sys = hz
+        block._sys_dirty = 1
         rp2040.ppb.clk_sys_changed(hz)
         pwm = rp2040.pwm
         for channel in pwm.channels:

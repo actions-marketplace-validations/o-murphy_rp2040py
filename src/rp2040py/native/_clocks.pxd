@@ -70,3 +70,4 @@ cdef class RPClocks:
     cdef public object clock
     cdef object _pll_sys
     cdef object _pll_usb
+    cdef public unsigned char _sys_dirty  # raised whenever clk_sys changes: the batch loop ends its batch on it (core/batch.hpp `clk_changed`)

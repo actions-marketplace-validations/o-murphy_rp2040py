@@ -26,6 +26,7 @@ from libc.stdint cimport int64_t, uint8_t
 from libcpp cimport bool
 
 from rp2040py.native._batch cimport BatchHost, BatchParams, kBatchFault, run_batch
+from rp2040py.native._clocks cimport RPClocks
 from rp2040py.native._cortex_m0_core cimport CortexM0Core
 from rp2040py.native._pending cimport park_error, raise_if_pending
 from rp2040py.native._pio cimport RPPIO
@@ -34,8 +35,6 @@ from rp2040py.native._simulation_clock cimport SimulationClock
 
 # Looked up through Python attribute access on purpose: `SimulationClock.tick` spelled directly would be the C method.
 _BASE_CLOCK_CLASS = SimulationClock
-
-cdef double CYCLE_NANOS = 1e9 / 125_000_000  # 125 MHz
 
 # Mirrors simulator.py's own module-level constants exactly - see that file's docstrings for the full rationale (why 256/0.005s, why the
 # idle jump must not be weighted by simulated nanoseconds).
@@ -84,6 +83,7 @@ def execute_batch(simulator: object, tick_batch: int) -> None:
     cdef int result
     cdef int i
     cdef RPPIO pio
+    cdef RPClocks clocks
 
     if rp2040.run_pin_low:
         # RUN held low - the chip is in reset and executes nothing. See _execute_batch.py's own comment here for the full rationale; the
@@ -94,6 +94,12 @@ def execute_batch(simulator: object, tick_batch: int) -> None:
             f"{type(clock).__name__} overrides tick(); the native batch loop ticks the C++ clock directly "
             "(use the pure-Python _execute_batch.execute_batch with it)"
         )
+    if not isinstance(rp2040.clocks, RPClocks):
+        raise TypeError(
+            f"the native batch loop follows clk_sys through the native clock tree; {type(rp2040.clocks).__name__} is not one "
+            "(use the pure-Python _execute_batch.execute_batch with it)"
+        )
+    clocks = rp2040.clocks
     pios = list(rp2040.pio)
     if len(pios) > 4:
         raise TypeError(f"the native batch loop steps at most 4 PIO blocks, the chip has {len(pios)}")
@@ -105,6 +111,8 @@ def execute_batch(simulator: object, tick_batch: int) -> None:
             )
     context = _BatchContext(pios)  # keeps the blocks alive for the whole batch (their flag addresses are in `host`)
 
+    clocks._sys_dirty = 0  # raised by the tree's sys sink when clk_sys changes: the batch ends and the next one starts at the new rate
+    host.clk_changed = <const uint8_t*> &clocks._sys_dirty
     host.stopped = <const uint8_t*> &stop_flag[0]
     host.real_io = <const uint8_t*> &real_io_flag[0]
     host.pio_count = len(pios)
@@ -115,7 +123,7 @@ def execute_batch(simulator: object, tick_batch: int) -> None:
     host.monotonic = _monotonic
     host.ctx = <void*> context
     params.tick_batch = tick_batch
-    params.cycle_nanos = CYCLE_NANOS
+    params.cycle_nanos = 1e9 / <double> rp2040.clk_sys  # one system clock: 125 MHz until firmware configures the tree
     params.instruction_ceiling = BATCH_INSTRUCTION_CEILING
     params.yield_budget_seconds = BATCH_YIELD_BUDGET_SECONDS
     params.check_interval = TIME_CHECK_INTERVAL

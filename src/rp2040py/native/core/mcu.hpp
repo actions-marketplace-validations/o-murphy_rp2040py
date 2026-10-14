@@ -24,6 +24,7 @@
 #include "bus.hpp"
 #include "clock.hpp"
 #include "cpu.hpp"
+#include "dma.hpp"
 #include "pin.hpp"
 #include "pio.hpp"
 
@@ -70,6 +71,24 @@ public:
         irq_hook_ctx_ = ctx;
     }
 
+    // The DMA requests (step 2c). Every block with a DREQ calls this (directly, through the adapters below, once its shell has bound it) and it reaches the DMA block the host
+    // attached - unless a hook is over it (a test double that records the requests, a DMA that is not the native one): the hook then gets the request *instead of* the DMA, as a
+    // replaced `rp2040.dma` always did. With neither, a request goes nowhere (a chip without a DMA). False: waking a channel failed (the host has parked its error).
+    // The attached block must outlive its attachment: the host re-attaches (or detaches, with null) whenever it replaces the DMA. Until the DMA is a member of this class (3a) it is the host's.
+    using DreqHook = bool (*)(void* ctx, uint32_t number, bool asserted);
+    bool set_dreq(uint32_t number, bool asserted) noexcept {
+        if (dreq_hook_ != nullptr) return dreq_hook_(dreq_hook_ctx_, number, asserted);
+        if (dma_ == nullptr) return true;
+        if (asserted) return dma_->set_dreq(number);
+        dma_->clear_dreq(number);
+        return true;
+    }
+    void attach_dma(DmaBlock* dma) noexcept { dma_ = dma; }
+    void set_dreq_hook(DreqHook hook, void* ctx) noexcept {
+        dreq_hook_ = hook;
+        dreq_hook_ctx_ = ctx;
+    }
+
     // The run flags. `request_stop()` may be called from any thread; the loop leaves at its next iteration and `run()` then reports `kStopRequested`. `real_io` is nonzero while
     // some device waits on the *real* world (a relayed DNS reply, a TCP connect in flight): an idle jump is then capped and ends the batch, so simulated time cannot outrun the
     // wall clock while the reply is on its way. The addresses are for a host whose own object is a view of the byte (the Cython shell hands them to Python as buffers).
@@ -100,6 +119,9 @@ private:
     PioBlock pio_[kPioBlocks];
     IrqHook irq_hook_ = nullptr;
     void* irq_hook_ctx_ = nullptr;
+    DmaBlock* dma_ = nullptr;
+    DreqHook dreq_hook_ = nullptr;
+    void* dreq_hook_ctx_ = nullptr;
     volatile uint8_t stop_ = 0;
     volatile uint8_t real_io_ = 0;
     BatchHost host_;
@@ -125,6 +147,36 @@ inline bool mcu_irq_lines(void* ctx, uint32_t line, bool level) noexcept {
     const McuIrqLines* l = static_cast<const McuIrqLines*>(ctx);
     return l->mcu->set_interrupt(l->base + line, level);
 }
+
+// A block's DMA request, bound to the chip: the context a shell hands the block as its `dreq_ctx`, and the function that goes with it, by the shape of the block's own `dreq`.
+// `McuDreqLine`: one request, `dreq(ctx, asserted)` (ADC, XIP stream). `McuDreqPair`: a TX and an RX request, `dreq(ctx, which, asserted)` - `if_true` is the request `which == true`
+// selects (the UART passes `rx`, the SPI and SSI `tx`, so each shell says which is which). `McuDreqBase`: the PWM's `dreq(ctx, channel)`, which only ever asserts (the pulse of a
+// wrap), the request being `base + channel`. The PIO needs no adapter state: its `dreq(ctx, number, asserted)` already carries the absolute number, so its context is the `Mcu`.
+struct McuDreqLine {
+    Mcu* mcu = nullptr;
+    uint32_t number = 0;
+};
+inline bool mcu_dreq_line(void* ctx, bool asserted) noexcept {
+    const McuDreqLine* l = static_cast<const McuDreqLine*>(ctx);
+    return l->mcu->set_dreq(l->number, asserted);
+}
+struct McuDreqPair {
+    Mcu* mcu = nullptr;
+    uint32_t if_true = 0, if_false = 0;
+};
+inline bool mcu_dreq_pair(void* ctx, bool which, bool asserted) noexcept {
+    const McuDreqPair* l = static_cast<const McuDreqPair*>(ctx);
+    return l->mcu->set_dreq(which ? l->if_true : l->if_false, asserted);
+}
+struct McuDreqBase {
+    Mcu* mcu = nullptr;
+    uint32_t base = 0;
+};
+inline bool mcu_dreq_base(void* ctx, uint32_t channel) noexcept {
+    const McuDreqBase* l = static_cast<const McuDreqBase*>(ctx);
+    return l->mcu->set_dreq(l->base + channel, true);
+}
+inline bool mcu_dreq_number(void* ctx, uint32_t number, bool asserted) noexcept { return static_cast<Mcu*>(ctx)->set_dreq(number, asserted); }
 
 // The IO_BANK0 interrupt line: the level of it is "any pin's IRQ value is set", re-evaluated on the pin bank whenever a pin says its own value may have changed.
 struct McuIoIrq {

@@ -22,7 +22,7 @@ from libc.stdint cimport int64_t, uint32_t
 from libcpp cimport bool as cppbool
 
 from rp2040py.native._clock cimport Alarm
-from rp2040py.native._mcu_irq cimport Mcu, McuIrqLine, mcu_irq_line, native_mcu
+from rp2040py.native._mcu_irq cimport Mcu, McuIrqLine, mcu_irq_line, native_mcu, McuDreqLine, mcu_dreq_line
 from rp2040py.native._pending cimport park_error, pending_flag, raise_if_pending
 from rp2040py.native._simulation_clock cimport SimulationClock
 from rp2040py.native._window_map cimport WindowHandler
@@ -185,7 +185,15 @@ cdef class RPADC:
         else:
             host.irq = _irq_trampoline
             host.irq_ctx = NULL
-        host.dreq = _dreq_trampoline
+        if mcu != NULL:
+            # the request goes from the C++ block straight to the chip (and its DMA), with no Python in between
+            self._dreq_line.mcu = mcu
+            self._dreq_line.number = <uint32_t> int(self.dreq)
+            host.dreq = mcu_dreq_line
+            host.dreq_ctx = &self._dreq_line
+        else:
+            host.dreq = _dreq_trampoline
+            host.dreq_ctx = NULL
         host.read = _read_trampoline
         host.channel_value = _channel_value_trampoline
         host.warn = _warn_trampoline

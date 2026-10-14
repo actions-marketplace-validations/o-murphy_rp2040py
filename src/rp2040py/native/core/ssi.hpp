@@ -52,6 +52,7 @@ struct SsiHost {
     SsiIrqFn irq = nullptr;
     void* irq_ctx = nullptr;  // the context of `irq` alone, when it is not `ctx` (a line bound straight to the chip, core/mcu.hpp)
     SsiDreqFn dreq = nullptr;
+    void* dreq_ctx = nullptr;  // the context of `dreq` alone, when it is not `ctx` (a request bound straight to the chip, core/mcu.hpp)
     void* ctx = nullptr;
 };
 
@@ -327,12 +328,12 @@ private:
         const bool tx = (stored_[DMACR_INDEX] & DMACR_TDMAE) != 0 && txflr_ <= stored_[DMATDLR_INDEX];
         if (tx != dreq_tx_) {
             dreq_tx_ = tx;
-            if (host_.dreq != nullptr && !host_.dreq(host_.ctx, true, tx)) return false;
+            if (host_.dreq != nullptr && !raise_dreq(true, tx)) return false;
         }
         const bool rx = (stored_[DMACR_INDEX] & DMACR_RDMAE) != 0 && rx_count_ >= stored_[DMARDLR_INDEX] + 1;
         if (rx != dreq_rx_) {
             dreq_rx_ = rx;
-            if (host_.dreq != nullptr && !host_.dreq(host_.ctx, false, rx)) return false;
+            if (host_.dreq != nullptr && !raise_dreq(false, rx)) return false;
         }
         return true;
     }
@@ -399,6 +400,7 @@ private:
 
     uint8_t* flash_ = nullptr;
     uint32_t flash_size_ = 0;
+    bool raise_dreq(bool which, bool asserted) noexcept { return host_.dreq(host_.dreq_ctx != nullptr ? host_.dreq_ctx : host_.ctx, which, asserted); }
     bool raise_irq(bool level) noexcept { return host_.irq(host_.irq_ctx != nullptr ? host_.irq_ctx : host_.ctx, level); }
     SsiHost host_;
     PinBank* bank_ = nullptr;

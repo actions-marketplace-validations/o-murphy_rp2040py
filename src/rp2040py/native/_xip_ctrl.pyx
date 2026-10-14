@@ -19,6 +19,7 @@ from rp2040py.native._pending cimport park_error, pending_flag, raise_if_pending
 from rp2040py.native._simulation_clock cimport SimulationClock
 from rp2040py.native._window_map cimport WindowHandler
 
+from rp2040py.native._mcu_irq cimport Mcu, McuDreqLine, mcu_dreq_line, native_mcu
 from rp2040py.peripherals._xip_ctrl import DREQ_XIP_STREAM, SSI_BAUDR
 
 __all__ = ("RPXIPAux", "RPXIPCtrl")
@@ -94,7 +95,16 @@ cdef class RPXIPCtrl:
         self.name = name
         self.clock = clock
         host.warn = _warn_trampoline
-        host.dreq = _dreq_trampoline
+        mcu = native_mcu(rp2040)
+        if mcu != NULL:
+            # the request goes from the C++ block straight to the chip (and its DMA), with no Python in between
+            self._dreq_line.mcu = mcu
+            self._dreq_line.number = <uint32_t> DREQ_XIP_STREAM
+            host.dreq = mcu_dreq_line
+            host.dreq_ctx = &self._dreq_line
+        else:
+            host.dreq = _dreq_trampoline
+            host.dreq_ctx = NULL
         host.clk_sys = _clk_sys_trampoline
         host.baudr = _baudr_trampoline
         host.ctx = <void*> self

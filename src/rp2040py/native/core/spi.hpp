@@ -51,6 +51,7 @@ struct SpiHost {
     SpiIrqFn irq = nullptr;
     void* irq_ctx = nullptr;  // the context of `irq` alone, when it is not `ctx` (a line bound straight to the chip, core/mcu.hpp)
     SpiDreqFn dreq = nullptr;
+    void* dreq_ctx = nullptr;  // the context of `dreq` alone, when it is not `ctx` (a request bound straight to the chip, core/mcu.hpp)
     SpiTransmitFn transmit = nullptr;
     SpiBitFn bit_ns = nullptr;
     SpiWarnFn warn = nullptr;
@@ -241,8 +242,8 @@ public:
 
 private:
     // "All request signals are deasserted if the PrimeCell SSP is disabled, or the DMA enable signal is cleared" (datasheet 4.4.3.16).
-    bool update_dma_tx() noexcept { return host_.dreq(host_.ctx, true, !tx.full() && enabled() && (dma_control & spi_regs::DMACR_TXDMAE)); }
-    bool update_dma_rx() noexcept { return host_.dreq(host_.ctx, false, !rx.empty() && enabled() && (dma_control & spi_regs::DMACR_RXDMAE)); }
+    bool update_dma_tx() noexcept { return raise_dreq(true, !tx.full() && enabled() && (dma_control & spi_regs::DMACR_TXDMAE)); }
+    bool update_dma_rx() noexcept { return raise_dreq(false, !rx.empty() && enabled() && (dma_control & spi_regs::DMACR_RXDMAE)); }
 
     // Sends the next byte if the wire is free. The block is busy from before the host call until the device completes it - which may be before the host call returns.
     bool do_tx() noexcept {
@@ -304,6 +305,7 @@ private:
         return update_dma_rx();
     }
 
+    bool raise_dreq(bool which, bool asserted) noexcept { return host_.dreq(host_.dreq_ctx != nullptr ? host_.dreq_ctx : host_.ctx, which, asserted); }
     bool raise_irq(bool level) noexcept { return host_.irq(host_.irq_ctx != nullptr ? host_.irq_ctx : host_.ctx, level); }
 
     SpiHost host_;

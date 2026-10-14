@@ -37,6 +37,7 @@ using XipRateFn = bool (*)(void* ctx, double* value);       // clk_sys in Hz / S
 struct XipHost {
     XipWarnFn warn = nullptr;
     XipDreqFn dreq = nullptr;
+    void* dreq_ctx = nullptr;  // the context of `dreq` alone, when it is not `ctx` (a request bound straight to the chip, core/mcu.hpp)
     XipRateFn clk_sys = nullptr;
     XipRateFn baudr = nullptr;
     void* ctx = nullptr;
@@ -292,7 +293,7 @@ private:
     }
 
     // False: a failure is pending.
-    bool update_dreq() noexcept { return host_.dreq(host_.ctx, fifo_len > 0); }
+    bool update_dreq() noexcept { return host_.dreq(host_.dreq_ctx != nullptr ? host_.dreq_ctx : host_.ctx, fifo_len > 0); }
 
     bool maybe_start_stream() noexcept {
         using namespace xip_regs;

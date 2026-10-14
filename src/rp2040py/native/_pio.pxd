@@ -28,6 +28,7 @@ cdef extern from "pio.hpp" namespace "rp2040core":
         PioIrqFn set_irq
         void* set_irq_ctx
         PioDreqFn dreq
+        void* dreq_ctx
         PioLogFn log
         PioPinUpdateFn pin_update
         PioPinInputFn pin_input

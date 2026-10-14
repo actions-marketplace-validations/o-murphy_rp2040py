@@ -5,6 +5,7 @@ from libc.stdint cimport int16_t, int64_t, uint8_t, uint32_t
 from libcpp cimport bool as cppbool
 
 from rp2040py.native._clock cimport Clock
+from rp2040py.native._mcu_irq cimport McuDreqLine
 from rp2040py.native._memory_map cimport XipHooks
 from rp2040py.native._window_map cimport WindowHandler
 
@@ -22,6 +23,7 @@ cdef extern from "xip_ctrl.hpp" namespace "rp2040core":
         XipHost() noexcept
         XipWarnFn warn
         XipDreqFn dreq
+        void* dreq_ctx
         XipRateFn clk_sys
         XipRateFn baudr
         void* ctx
@@ -62,6 +64,7 @@ cdef extern from "xip_ctrl.hpp" namespace "rp2040core":
 
 cdef class RPXIPCtrl:
     cdef XipBlock _block
+    cdef McuDreqLine _dreq_line  # the request straight to the chip, when it has one (core/mcu.hpp)
     cdef public object rp2040
     cdef public object name
     cdef public object clock

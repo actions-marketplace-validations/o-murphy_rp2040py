@@ -53,6 +53,7 @@ struct UartHost {
     UartIrqFn irq = nullptr;
     void* irq_ctx = nullptr;  // the context of `irq` alone, when it is not `ctx` (a line bound straight to the chip, core/mcu.hpp's `mcu_irq_line`)
     UartDreqFn dreq = nullptr;
+    void* dreq_ctx = nullptr;  // the context of `dreq` alone, when it is not `ctx` (a request bound straight to the chip, core/mcu.hpp)
     UartByteFn on_byte = nullptr;
     UartBaudFn baud_changed = nullptr;
     UartBitFn bit_ns = nullptr;
@@ -107,6 +108,7 @@ public:
     Alarm tx_alarm;
 
     bool failed() const noexcept { return host_failed(host_.failed); }
+    bool raise_dreq(bool which, bool asserted) noexcept { return host_.dreq(host_.dreq_ctx != nullptr ? host_.dreq_ctx : host_.ctx, which, asserted); }
     bool raise_irq(bool level) noexcept { return host_.irq(host_.irq_ctx != nullptr ? host_.irq_ctx : host_.ctx, level); }
     int64_t raw_write_value() const noexcept { return raw_write_value_; }
 
@@ -190,8 +192,8 @@ public:
         const bool ready = enabled();
         const bool tx = ready && tx_enabled() && (dmacr & DMACR_TXDMAE) != 0 && !tx_full();  // UARTTXDMASREQ: at least one empty place in the TX FIFO
         const bool rx = ready && rx_enabled() && (dmacr & DMACR_RXDMAE) != 0 && !rx_empty() && !((dmacr & DMACR_DMAONERR) != 0 && (interrupt_status & INT_ERRORS) != 0);
-        if (!host_.dreq(host_.ctx, false, tx)) return false;
-        return host_.dreq(host_.ctx, true, rx);
+        if (!raise_dreq(false, tx)) return false;
+        return raise_dreq(true, rx);
     }
 
     // A byte arrives from the wire (the CLI's console, a test). A disabled receiver (or UART) takes nothing; on a full FIFO the byte is dropped and OE and its interrupt are set.

@@ -8,6 +8,7 @@ from rp2040py.native._batch cimport BatchParams, BatchResult
 from rp2040py.native._bus cimport Bus
 from rp2040py.native._clock cimport Clock
 from rp2040py.native._cpu cimport Cpu
+from rp2040py.native._dma cimport DmaBlock
 from rp2040py.native._pio cimport PioBlock
 
 cdef extern from "mcu.hpp" namespace "rp2040core":
@@ -15,6 +16,7 @@ cdef extern from "mcu.hpp" namespace "rp2040core":
     ctypedef BatchResult McuResult
     ctypedef double (*McuMonotonicFn)(void* chip) noexcept
     ctypedef bool (*McuIrqHook)(void* ctx, uint32_t irq, bool level) noexcept
+    ctypedef bool (*McuDreqHook)(void* ctx, uint32_t number, bool asserted) noexcept
 
     cdef cppclass Mcu:
         Mcu() noexcept
@@ -24,6 +26,9 @@ cdef extern from "mcu.hpp" namespace "rp2040core":
         void use_clock(Clock* clock) noexcept
         bool set_interrupt(uint32_t irq, bool level) noexcept
         void set_irq_hook(McuIrqHook hook, void* ctx) noexcept
+        bool set_dreq(uint32_t number, bool asserted) noexcept
+        void attach_dma(DmaBlock* dma) noexcept
+        void set_dreq_hook(McuDreqHook hook, void* ctx) noexcept
         bool owns_clock() noexcept
         void request_stop(bool stop) noexcept
         bool stop_requested() noexcept

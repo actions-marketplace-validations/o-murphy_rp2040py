@@ -21,7 +21,7 @@ from libc.stdint cimport int64_t, uint32_t
 from libcpp cimport bool as cppbool
 
 from rp2040py.native._clock cimport Clock
-from rp2040py.native._mcu_irq cimport Mcu, McuIrqLine, mcu_irq_line, native_mcu
+from rp2040py.native._mcu_irq cimport Mcu, McuIrqLine, mcu_irq_line, native_mcu, McuDreqBase, mcu_dreq_base
 from rp2040py.native._pending cimport park_error, pending_flag, raise_if_pending
 from rp2040py.native._simulation_clock cimport SimulationClock
 from rp2040py.native._window_map cimport WindowHandler
@@ -400,7 +400,15 @@ cdef class RPPWM:
         else:
             host.irq = _irq_trampoline
             host.irq_ctx = NULL
-        host.dreq = _dreq_trampoline
+        if mcu != NULL:
+            # the request goes from the C++ block straight to the chip (and its DMA), with no Python in between
+            self._dreq_base.mcu = mcu
+            self._dreq_base.base = <uint32_t> int(DREQChannel.DREQ_PWM_WRAP0)
+            host.dreq = mcu_dreq_base
+            host.dreq_ctx = &self._dreq_base
+        else:
+            host.dreq = _dreq_trampoline
+            host.dreq_ctx = NULL
         host.pin_changed = _pin_changed_trampoline
         host.pin_read = _pin_read_trampoline
         host.warn = _warn_trampoline

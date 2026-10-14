@@ -21,7 +21,7 @@ names), `int_status`, `enabled`, `data_bits`, `master_mode`, `spi_mode`, `clock_
 from libc.stdint cimport int64_t, uint32_t
 from libcpp cimport bool as cppbool
 
-from rp2040py.native._mcu_irq cimport Mcu, McuIrqLine, mcu_irq_line, native_mcu
+from rp2040py.native._mcu_irq cimport Mcu, McuIrqLine, mcu_irq_line, native_mcu, McuDreqPair, mcu_dreq_pair
 from rp2040py.native._pending cimport park_error, pending_flag, raise_if_pending
 from rp2040py.native._simulation_clock cimport SimulationClock
 from rp2040py.native._window_map cimport WindowHandler
@@ -167,7 +167,16 @@ cdef class RPSPI:
         else:
             host.irq = _irq_trampoline
             host.irq_ctx = NULL
-        host.dreq = _dreq_trampoline
+        if mcu != NULL:
+            # the request goes from the C++ block straight to the chip (and its DMA), with no Python in between
+            self._dreq_pair.mcu = mcu
+            self._dreq_pair.if_true = <uint32_t> int(self.dreq.tx)
+            self._dreq_pair.if_false = <uint32_t> int(self.dreq.rx)
+            host.dreq = mcu_dreq_pair
+            host.dreq_ctx = &self._dreq_pair
+        else:
+            host.dreq = _dreq_trampoline
+            host.dreq_ctx = NULL
         host.transmit = _transmit_trampoline
         host.bit_ns = _bit_trampoline
         host.warn = _warn_trampoline

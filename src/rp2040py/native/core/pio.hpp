@@ -64,6 +64,7 @@ struct PioHost {
     PioIrqFn set_irq = nullptr;
     void* set_irq_ctx = nullptr;  // the context of `set_irq` alone, when it is not `ctx` (a line bound straight to the chip, core/mcu.hpp)
     PioDreqFn dreq = nullptr;
+    void* dreq_ctx = nullptr;  // the context of `dreq` alone, when it is not `ctx` (a request bound straight to the chip, core/mcu.hpp)
     PioLogFn log = nullptr;
     PioPinUpdateFn pin_update = nullptr;
     PioPinInputFn pin_input = nullptr;
@@ -640,11 +641,11 @@ private:
 
 inline bool PioMachine::update_dma_tx() noexcept {
     const PioHost& h = block->host();
-    return h.dreq == nullptr || h.dreq(h.ctx, dreq_tx, !tx.full());
+    return h.dreq == nullptr || h.dreq(h.dreq_ctx != nullptr ? h.dreq_ctx : h.ctx, dreq_tx, !tx.full());
 }
 inline bool PioMachine::update_dma_rx() noexcept {
     const PioHost& h = block->host();
-    return h.dreq == nullptr || h.dreq(h.ctx, dreq_rx, !rx.empty());
+    return h.dreq == nullptr || h.dreq(h.dreq_ctx != nullptr ? h.dreq_ctx : h.ctx, dreq_rx, !rx.empty());
 }
 
 inline void PioMachine::apply_fjoin() noexcept {

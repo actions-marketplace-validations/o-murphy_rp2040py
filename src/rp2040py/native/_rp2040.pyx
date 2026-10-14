@@ -35,6 +35,7 @@ from rp2040py.native._memory_map cimport (
     kSubWord,
     kWordIndexed,
 )
+from rp2040py.native._dma cimport RPDMA
 from rp2040py.native._mcu cimport Mcu
 from rp2040py.native._pending cimport park_error, raise_if_pending
 from rp2040py.native._pio cimport PioBlock
@@ -59,7 +60,6 @@ from rp2040py.native._adc import RPADC
 from rp2040py.native._busctrl import RPBUSCTRL
 from rp2040py.native._clocks import RPClocks
 from rp2040py.native._pll import RPPLL
-from rp2040py.native._dma import RPDMA
 from rp2040py.peripherals._dma import DREQChannel
 from rp2040py.native._i2c import RPI2C
 from rp2040py.native._io import RPIO
@@ -286,6 +286,23 @@ cdef bool _irq_hook(void* ctx, uint32_t irq, bool level) noexcept:
     cdef RP2040 chip = <RP2040> ctx
     try:
         chip._irq_override(irq, level)
+    except BaseException as error:
+        park_error(error)
+        return False
+    return True
+
+
+cdef dict _DREQ_BY_NUMBER = {int(channel): channel for channel in DREQChannel}
+
+
+cdef bool _dreq_hook(void* ctx, uint32_t number, bool asserted) noexcept:
+    cdef RP2040 chip = <RP2040> ctx
+    try:
+        channel = _DREQ_BY_NUMBER.get(number, number)
+        if asserted:
+            chip._dma.set_dreq(channel)
+        else:
+            chip._dma.clear_dreq(channel)
     except BaseException as error:
         park_error(error)
         return False
@@ -912,6 +929,14 @@ cdef class RP2040:
     @dma.setter
     def dma(self, value) -> None:
         self._dma = value
+        # The DMA requests of the blocks go to `Mcu::set_dreq` (core/mcu.hpp). The chip's own native DMA is attached to it, so a request reaches its C++ block with no Python in
+        # between; anything else (a recorder, a test double, a pure-Python DMA) gets the requests through a hook, instead of the DMA, as it always did.
+        if type(value) is RPDMA:
+            self._mcu.set_dreq_hook(NULL, NULL)
+            self._mcu.attach_dma(&(<RPDMA> value)._block)
+        else:
+            self._mcu.attach_dma(NULL)
+            self._mcu.set_dreq_hook(_dreq_hook, <void*> self)
         self._rebind_clock_sinks()
 
     @property

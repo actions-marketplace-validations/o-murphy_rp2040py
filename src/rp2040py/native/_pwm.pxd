@@ -4,7 +4,7 @@
 from libc.stdint cimport int64_t, uint32_t
 from libcpp cimport bool as cppbool
 
-from rp2040py.native._mcu_irq cimport McuIrqLine
+from rp2040py.native._mcu_irq cimport McuIrqLine, McuDreqBase
 
 from rp2040py.native._clock cimport Clock
 from rp2040py.native._window_map cimport WindowHandler
@@ -53,6 +53,7 @@ cdef extern from "pwm.hpp" namespace "rp2040core":
         PwmHost() noexcept
         PwmIrqFn irq
         void* irq_ctx
+        void* dreq_ctx
         PwmDreqFn dreq
         PwmPinChangedFn pin_changed
         PwmPinReadFn pin_read
@@ -127,6 +128,7 @@ cdef extern from "pwm.hpp" namespace "rp2040core":
         WindowHandler window_handler() noexcept
 
 cdef class RPPWM:
+    cdef McuDreqBase _dreq_base  # the DMA request straight to the chip, when it has one (core/mcu.hpp)
     cdef McuIrqLine _irq_line  # the line straight to the chip, when it has one (core/mcu.hpp)
     cdef PwmBlock _block
     cdef public object rp2040

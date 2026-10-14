@@ -170,6 +170,64 @@ int main() {
         CHECK(mcu_io_interrupt(&io) && (m.cpu.pending_interrupts & (1u << 13)) == 0);  // and the line follows it down
     }
 
+    // The DMA requests: `set_dreq` reaches the attached DMA block, a hook takes the request instead of it, none attached goes nowhere, and the adapters map a block's own shape onto
+    // the absolute DREQ number.
+    {
+        Mcu m;
+        Clock clock;
+        DmaHost dma_host;
+        DmaBlock dma;
+        dma.init(&m.bus, &clock, dma_host);
+        CHECK(m.set_dreq(5, true) && !dma.dreq(5));  // no DMA attached: nowhere to go, not a failure
+        m.attach_dma(&dma);
+        CHECK(m.set_dreq(5, true) && dma.dreq(5));
+        CHECK(m.set_dreq(5, false) && !dma.dreq(5));
+
+        McuDreqLine line;
+        line.mcu = &m;
+        line.number = 36;
+        CHECK(mcu_dreq_line(&line, true) && dma.dreq(36));
+        CHECK(mcu_dreq_line(&line, false) && !dma.dreq(36));
+
+        McuDreqPair pair;
+        pair.mcu = &m;
+        pair.if_true = 20;
+        pair.if_false = 21;
+        CHECK(mcu_dreq_pair(&pair, true, true) && dma.dreq(20) && !dma.dreq(21));
+        CHECK(mcu_dreq_pair(&pair, false, true) && dma.dreq(21));
+        CHECK(mcu_dreq_pair(&pair, true, false) && !dma.dreq(20) && dma.dreq(21));
+
+        McuDreqBase base;
+        base.mcu = &m;
+        base.base = 24;
+        CHECK(mcu_dreq_base(&base, 3) && dma.dreq(27));  // the PWM only ever asserts (a wrap)
+
+        CHECK(mcu_dreq_number(&m, 9, true) && dma.dreq(9) && mcu_dreq_number(&m, 9, false) && !dma.dreq(9));  // the PIO: the number is already absolute
+
+        struct Seen {
+            int n = 0;
+            uint32_t number = 0;
+            bool asserted = false;
+            bool result = true;
+        } seen;
+        m.set_dreq_hook(
+            [](void* ctx, uint32_t number, bool asserted) noexcept {
+                Seen* x = static_cast<Seen*>(ctx);
+                ++x->n;
+                x->number = number;
+                x->asserted = asserted;
+                return x->result;
+            },
+            &seen);
+        CHECK(m.set_dreq(12, true) && seen.n == 1 && seen.number == 12 && seen.asserted && !dma.dreq(12));  // the hook got it instead of the DMA
+        seen.result = false;
+        CHECK(!m.set_dreq(13, true));  // its failure is the caller's
+        m.set_dreq_hook(nullptr, nullptr);
+        CHECK(m.set_dreq(12, true) && seen.n == 2 && dma.dreq(12));
+        m.attach_dma(nullptr);
+        CHECK(m.set_dreq(14, true) && !dma.dreq(14));
+    }
+
     if (failures == 0) std::printf("test_mcu: ok\n");
     return failures == 0 ? 0 : 1;
 }

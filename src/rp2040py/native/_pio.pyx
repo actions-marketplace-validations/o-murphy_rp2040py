@@ -21,7 +21,7 @@ from libcpp cimport bool as cppbool
 
 from rp2040py.native._dma cimport RPDMA
 from rp2040py.native._gpio_pin cimport GPIOPin
-from rp2040py.native._mcu_irq cimport Mcu, McuIrqLines, mcu_irq_lines, native_mcu
+from rp2040py.native._mcu_irq cimport Mcu, McuIrqLines, mcu_irq_lines, native_mcu, mcu_dreq_number
 from rp2040py.native._pending cimport park_error, raise_if_pending
 from rp2040py.native._pin cimport PinBank
 from rp2040py.native._window_map cimport WindowHandler
@@ -601,7 +601,13 @@ cdef class RPPIO:
         else:
             host.set_irq = _irq_trampoline
             host.set_irq_ctx = NULL
-        host.dreq = _dreq_trampoline
+        if mcu != NULL:
+            # the request goes from the C++ block straight to the chip (and its DMA), with no Python in between
+            host.dreq = mcu_dreq_number
+            host.dreq_ctx = mcu
+        else:
+            host.dreq = _dreq_trampoline
+            host.dreq_ctx = NULL
         host.log = _log_trampoline
         host.pin_update = _pin_update_trampoline
         host.pin_input = _pin_input_trampoline

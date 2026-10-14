@@ -17,7 +17,7 @@ from libc.stdint cimport int64_t, uint8_t, uint32_t
 from libcpp cimport bool as cppbool
 
 from rp2040py.native._gpio_pin cimport GPIOPin
-from rp2040py.native._mcu_irq cimport Mcu, McuIrqLine, mcu_irq_line, native_mcu
+from rp2040py.native._mcu_irq cimport Mcu, McuIrqLine, mcu_irq_line, native_mcu, McuDreqPair, mcu_dreq_pair
 from rp2040py.native._pending cimport park_error, raise_if_pending
 from rp2040py.native._window_map cimport WindowHandler
 
@@ -157,7 +157,16 @@ cdef class RPSSI:
         else:
             host.irq = _irq_trampoline
             host.irq_ctx = NULL
-        host.dreq = _dreq_trampoline
+        if mcu != NULL:
+            # the request goes from the C++ block straight to the chip (and its DMA), with no Python in between
+            self._dreq_pair.mcu = mcu
+            self._dreq_pair.if_true = <uint32_t> DREQ_XIP_SSITX
+            self._dreq_pair.if_false = <uint32_t> DREQ_XIP_SSIRX
+            host.dreq = mcu_dreq_pair
+            host.dreq_ctx = &self._dreq_pair
+        else:
+            host.dreq = _dreq_trampoline
+            host.dreq_ctx = NULL
         host.ctx = <void*> self
         self._block.init(<uint8_t*> <size_t> flash_address, <uint32_t> flash_size, host)
         if isinstance(self._cs_pin, GPIOPin):

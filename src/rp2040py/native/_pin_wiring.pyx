@@ -37,7 +37,7 @@ cdef _keep(GPIOPinBank bank, block):
 
 def bind_pin_sources(GPIOPinBank bank, chip):
     """Binds the bank's sources to the native blocks of `chip` that have them, and hands the rest back to the host."""
-    cdef PinBank* b = &bank._bank
+    cdef PinBank* b = bank._bank
     cdef RPSIO sio
     cdef RPPIO pio
     cdef RPPWM pwm

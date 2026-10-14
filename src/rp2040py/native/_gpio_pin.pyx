@@ -71,28 +71,8 @@ cdef tuple _STATES = (
 
 cdef cppbool _source_trampoline(void* ctx, uint32_t source, uint32_t* out) noexcept:
     cdef GPIOPinBank owner = <GPIOPinBank> ctx
-    cdef object rp = owner.rp2040
     try:
-        if source == kSrcSioOe:
-            out[0] = <unsigned int> rp.sio.gpio_output_enable
-        elif source == kSrcSioValue:
-            out[0] = <unsigned int> rp.sio.gpio_value
-        elif source == kSrcPio0Oe:
-            out[0] = <unsigned int> rp.pio[0].pin_directions
-        elif source == kSrcPio0Value:
-            out[0] = <unsigned int> rp.pio[0].pin_values
-        elif source == kSrcPio1Oe:
-            out[0] = <unsigned int> rp.pio[1].pin_directions
-        elif source == kSrcPio1Value:
-            out[0] = <unsigned int> rp.pio[1].pin_values
-        elif source == kSrcSioQspiOe:
-            out[0] = <unsigned int> rp.sio.qspi_gpio_output_enable
-        elif source == kSrcSioQspiValue:
-            out[0] = <unsigned int> rp.sio.qspi_gpio_value
-        elif source == kSrcPwmDirection:
-            out[0] = <unsigned int> rp.pwm.gpio_direction
-        else:  # kSrcPwmValue
-            out[0] = <unsigned int> rp.pwm.gpio_value
+        out[0] = <uint32_t> owner._world_source(source)
     except BaseException as error:
         park_error(error)
         return False
@@ -101,13 +81,8 @@ cdef cppbool _source_trampoline(void* ctx, uint32_t source, uint32_t* out) noexc
 
 cdef cppbool _change_trampoline(void* ctx, uint32_t pin_index, int new_state, int old_state) noexcept:
     cdef GPIOPinBank owner = <GPIOPinBank> ctx
-    cdef GPIOPin pin
     try:
-        pin = <GPIOPin> owner.shells[pin_index - owner.first]
-        value = _STATES[new_state]
-        last_value = _STATES[old_state]
-        for listener in pin._listeners:
-            listener(value, last_value)
+        owner._world_changed(pin_index, new_state, old_state)
     except BaseException as error:
         park_error(error)
         return False
@@ -126,19 +101,8 @@ cdef cppbool _io_interrupt_trampoline(void* ctx) noexcept:
 
 cdef cppbool _input_trampoline(void* ctx, uint32_t pin_index, cppbool function_is_pwm) noexcept:
     cdef GPIOPinBank owner = <GPIOPinBank> ctx
-    cdef object rp = owner.rp2040
     try:
-        if function_is_pwm:
-            rp.pwm.gpio_on_input(pin_index)
-        for pio in rp.pio:
-            for machine in pio.machines:
-                if (
-                    machine.enabled
-                    and machine.waiting
-                    and machine.wait_type == WaitType.PIN
-                    and machine.wait_index == pin_index
-                ):
-                    machine.check_wait()
+        owner._world_input(pin_index, bool(function_is_pwm))
     except BaseException as error:
         park_error(error)
         return False
@@ -158,7 +122,7 @@ cdef class GPIOPinBank:
         self.shells = []
         self._direct_refs = []
 
-    def __init__(self, rp2040, unsigned int count, always_output_enabled=False, unsigned int first=0):
+    def __init__(self, rp2040, unsigned int count, always_output_enabled=False, unsigned int first=0, int mcu_bank=-1):
         cdef PinHost host
         cdef cppbool always[32]
         cdef unsigned int i
@@ -169,13 +133,18 @@ cdef class GPIOPinBank:
         self.shells = [None] * count
         for i in range(count):
             always[i] = bool(always_output_enabled)
+        if mcu_bank >= 0:
+            # the chip's C++ `Mcu` holds this bank (and the IO and PADS blocks on it): this object is the Python view of it
+            self._bank = <PinBank*> <size_t> rp2040._native_pins_address(mcu_bank)
+            return
+        self._bank = &self._own
         host.source = _source_trampoline
         host.on_change = _change_trampoline
         mcu = native_mcu(rp2040)
         if mcu != NULL and first == 0 and count == 30:
             # the chip's GPIO bank: its IO_BANK0 line goes from the C++ pins straight to the chip's CPU. (The QSPI bank, and a pin on its own, ask `update_io_interrupt()`.)
             self._io_irq.mcu = mcu
-            self._io_irq.bank = &self._bank
+            self._io_irq.bank = self._bank
             self._io_irq.line = 13  # IRQ.IO_BANK0
             host.io_interrupt = mcu_io_interrupt
             host.io_interrupt_ctx = &self._io_irq
@@ -186,8 +155,52 @@ cdef class GPIOPinBank:
         host.ctx = <void*> self
         # Mirrors the Python constructor's field-initializer ordering: each pin's `_last_state` is captured with ctrl = 0 and
         # pad_value = 0 *before* the real defaults are written (core/pin.hpp's init does exactly that).
-        if not self._bank.init(count, host, always, first):
+        if not self._own.init(count, host, always, first):
             raise_if_pending()
+
+    # What the C++ bank asks of the world, as methods: the trampolines above call them for a bank made directly, and the chip's host calls them for the bank the `Mcu` holds.
+    def _world_source(self, source):
+        rp = self.rp2040
+        if source == kSrcSioOe:
+            return <unsigned int> rp.sio.gpio_output_enable
+        if source == kSrcSioValue:
+            return <unsigned int> rp.sio.gpio_value
+        if source == kSrcPio0Oe:
+            return <unsigned int> rp.pio[0].pin_directions
+        if source == kSrcPio0Value:
+            return <unsigned int> rp.pio[0].pin_values
+        if source == kSrcPio1Oe:
+            return <unsigned int> rp.pio[1].pin_directions
+        if source == kSrcPio1Value:
+            return <unsigned int> rp.pio[1].pin_values
+        if source == kSrcSioQspiOe:
+            return <unsigned int> rp.sio.qspi_gpio_output_enable
+        if source == kSrcSioQspiValue:
+            return <unsigned int> rp.sio.qspi_gpio_value
+        if source == kSrcPwmDirection:
+            return <unsigned int> rp.pwm.gpio_direction
+        return <unsigned int> rp.pwm.gpio_value  # kSrcPwmValue
+
+    def _world_changed(self, pin_index, new_state, old_state):
+        cdef GPIOPin pin = <GPIOPin> self.shells[pin_index - self.first]
+        value = _STATES[new_state]
+        last_value = _STATES[old_state]
+        for listener in pin._listeners:
+            listener(value, last_value)
+
+    def _world_input(self, pin_index, function_is_pwm):
+        rp = self.rp2040
+        if function_is_pwm:
+            rp.pwm.gpio_on_input(pin_index)
+        for pio in rp.pio:
+            for machine in pio.machines:
+                if (
+                    machine.enabled
+                    and machine.waiting
+                    and machine.wait_type == WaitType.PIN
+                    and machine.wait_index == pin_index
+                ):
+                    machine.check_wait()
 
     def __len__(self):
         return self._bank.count()
@@ -226,7 +239,7 @@ cdef class GPIOPin:
         self.name = name if name is not None else str(index)
         self._listeners = set()
         self._owner = owner
-        self._bankp = &owner._bank
+        self._bankp = owner._bank
         self._slot = slot
         self._pin = owner._bank.pin_ptr(slot)
         self._direct_refs = owner._direct_refs

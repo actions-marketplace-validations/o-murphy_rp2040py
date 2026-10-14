@@ -36,7 +36,7 @@ from rp2040py.native._memory_map cimport (
     kWordIndexed,
 )
 from rp2040py.native._dma cimport RPDMA
-from rp2040py.native._mcu cimport kMcuBlockBusctrl, kMcuBlockRtc, kMcuBlockSyscfg, kMcuBlockSysinfo, kMcuBlockTbman, kMcuBlockVreg, Mcu, McuHost, kMcuBlockAdc, kMcuBlockClocks, kMcuBlockDma, kMcuBlockI2c0, kMcuBlockI2c1, kMcuBlockPllSys, kMcuBlockPllUsb, kMcuBlockPpb, kMcuBlockRosc, kMcuBlockSpi0, kMcuBlockSpi1, kMcuBlockTimer, kMcuBlockUart0, kMcuBlockUart1, kMcuBlockWatchdog, kMcuBlockXosc
+from rp2040py.native._mcu cimport kMcuBlockBusctrl, kMcuBlockRtc, kMcuBlockSyscfg, kMcuBlockSysinfo, kMcuBlockTbman, kMcuBlockVreg, Mcu, McuHost, kMcuBlockAdc, kMcuBlockClocks, kMcuBlockDma, kMcuBlockI2c0, kMcuBlockI2c1, kMcuBlockIoBank0, kMcuBlockIoQspi, kMcuBlockPadsBank0, kMcuBlockPadsQspi, kMcuBlockPllSys, kMcuBlockPllUsb, kMcuBlockPpb, kMcuBlockRosc, kMcuBlockSpi0, kMcuBlockSpi1, kMcuBlockTimer, kMcuBlockUart0, kMcuBlockUart1, kMcuBlockWatchdog, kMcuBlockXosc
 from rp2040py.native._pending cimport park_error, pending_flag, raise_if_pending
 from rp2040py.native._pio cimport PioBlock
 from rp2040py.native._bus cimport BusHost, kBusWarnInvalidRead, kBusWarnUnalignedRead
@@ -314,6 +314,10 @@ cdef dict _BLOCK_WINDOW = {
     kMcuBlockRosc: 0x40060,
     kMcuBlockWatchdog: 0x40058,
     kMcuBlockDma: 0x50000,
+    kMcuBlockIoBank0: 0x40014,
+    kMcuBlockIoQspi: 0x40018,
+    kMcuBlockPadsBank0: 0x4001C,
+    kMcuBlockPadsQspi: 0x40020,
 }  # the block the `Mcu` built -> its key in the peripherals table
 
 
@@ -360,6 +364,40 @@ cdef bool _w_spi_transmit(void* ctx, uint32_t instance, uint32_t value) noexcept
 
 XOSC_STATUS = 0x04
 XOSC_STATUS_STABLE = 1 << 31
+
+
+cdef object _bank_of(RP2040 chip, uint32_t bank):
+    return chip._gpio_bank if bank == 0 else chip._qspi_bank
+
+
+cdef bool _w_pin_source(void* ctx, uint32_t bank, uint32_t source, uint32_t* value) noexcept:
+    cdef RP2040 chip = <RP2040> ctx
+    try:
+        value[0] = <uint32_t> _bank_of(chip, bank)._world_source(source)
+    except BaseException as error:
+        park_error(error)
+        return False
+    return True
+
+
+cdef bool _w_pin_changed(void* ctx, uint32_t bank, uint32_t pin, int new_state, int old_state) noexcept:
+    cdef RP2040 chip = <RP2040> ctx
+    try:
+        _bank_of(chip, bank)._world_changed(pin, new_state, old_state)
+    except BaseException as error:
+        park_error(error)
+        return False
+    return True
+
+
+cdef bool _w_pin_input_changed(void* ctx, uint32_t bank, uint32_t pin, bool function_is_pwm) noexcept:
+    cdef RP2040 chip = <RP2040> ctx
+    try:
+        _bank_of(chip, bank)._world_input(pin, function_is_pwm)
+    except BaseException as error:
+        park_error(error)
+        return False
+    return True
 
 
 cdef void _w_system_reset_request(void* ctx) noexcept:
@@ -585,6 +623,9 @@ cdef class RP2040:
         world.failed = pending_flag()
         world.uart_byte = _w_uart_byte
         world.uart_baud = _w_uart_baud
+        world.pin_source = _w_pin_source
+        world.pin_changed = _w_pin_changed
+        world.pin_input_changed = _w_pin_input_changed
         world.system_reset_request = _w_system_reset_request
         world.watchdog_trigger = _w_watchdog_trigger
         world.watchdog_tick = _w_watchdog_tick
@@ -626,8 +667,8 @@ cdef class RP2040:
         # The chip's pins are slots of two banks (30 GPIO pins, 6 QSPI pins). The native ones share two C++ banks: the IO_BANK0 / IO_QSPI / PADS windows work on them directly, and the
         # chip asks the bank for what is a property of all its pins at once (`gpio_values`, the IO_BANK0 interrupt line). The facade hands out the pure-Python pins and banks instead when
         # the native ones are switched off (RP2040PY_SKIP_CYTHON=1): the same interface, the pure-Python windows go with them. `gpio` / `qspi` are the banks' own pin lists.
-        self._gpio_bank = GPIOPinBank(self, 30)
-        self._qspi_bank = GPIOPinBank(self, 6, True)
+        self._gpio_bank = GPIOPinBank(self, 30, False, 0, 0)
+        self._qspi_bank = GPIOPinBank(self, 6, True, 0, 1)
         self.gpio = self._gpio_bank.shells
         for i in range(30):
             GPIOPin(self, i, bank=self._gpio_bank)
@@ -670,8 +711,8 @@ cdef class RP2040:
         self.pll_usb = RPPLL(self, "PLL_USB_BASE", 1)
         self.resets = RPReset(self, "RESETS_BASE")
         self.psm = RPPSM(self, "PSM_BASE")
-        self.pads_bank0 = RPPADS(self, "PADS_BANK0_BASE", "bank0")
-        self.pads_qspi = RPPADS(self, "PADS_QSPI_BASE", "qspi")
+        self.pads_bank0 = RPPADS(self, "PADS_BANK0_BASE", "bank0", 0)
+        self.pads_qspi = RPPADS(self, "PADS_QSPI_BASE", "qspi", 1)
         self.timer = RPTimer(self, "TIMER_BASE", 0)
         self.rtc = RP2040RTC(self, "RTC_BASE")
         self.clocks = RPClocks(self, "CLOCKS_BASE", 0)  # after the PLLs and the blocks it drives (PPB, PWM, watchdog, RTC): the native tree points at their C++ blocks
@@ -681,8 +722,8 @@ cdef class RP2040:
         self._attach_xip_hooks(self.xip_ctrl)
         self.ssi = RPSSI(self, "SSI")
         self.xosc = RPXOSC(self, "XOSC_BASE", 0)
-        self.io_bank0 = RPIO(self, "IO_BANK0_BASE")
-        self.io_qspi = RPIO(self, "IO_QSPI_BASE", pins=self.qspi)
+        self.io_bank0 = RPIO(self, "IO_BANK0_BASE", None, 0)
+        self.io_qspi = RPIO(self, "IO_QSPI_BASE", self.qspi, 1)
         self.rosc = RPROSC(self, "ROSC_BASE", 0)
 
         self.peripherals = {
@@ -1368,6 +1409,15 @@ cdef class RP2040:
     @clk_peri.setter
     def clk_peri(self, value) -> None:
         self._mcu.clocks().force_clk_peri(<double> value)
+
+    def _native_pins_address(self, bank):
+        return <size_t> &self._mcu.pins(<uint32_t> bank)
+
+    def _native_io_address(self, bank):
+        return <size_t> &self._mcu.io(<uint32_t> bank)
+
+    def _native_pads_address(self, bank):
+        return <size_t> &self._mcu.pads(<uint32_t> bank)
 
     def _native_ppb_address(self):
         return <size_t> &self._mcu.ppb()

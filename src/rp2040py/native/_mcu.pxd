@@ -8,6 +8,9 @@ from rp2040py.native._batch cimport BatchParams, BatchResult
 from rp2040py.native._bus cimport Bus
 from rp2040py.native._clock cimport Clock
 from rp2040py.native._cpu cimport Cpu
+from rp2040py.native._io cimport IoBlock
+from rp2040py.native._pads cimport PadsBlock
+from rp2040py.native._pin cimport PinBank
 from rp2040py.native._dma cimport DmaBlock
 from rp2040py.native._pio cimport PioBlock
 from rp2040py.native._adc cimport AdcBlock
@@ -59,6 +62,10 @@ cdef extern from "mcu.hpp" namespace "rp2040core":
     cdef const uint32_t kMcuBlockPpb
     cdef const uint32_t kMcuBlockWatchdog
     cdef const uint32_t kMcuBlockDma
+    cdef const uint32_t kMcuBlockIoBank0
+    cdef const uint32_t kMcuBlockIoQspi
+    cdef const uint32_t kMcuBlockPadsBank0
+    cdef const uint32_t kMcuBlockPadsQspi
 
     cdef cppclass McuHost:
         McuHost() noexcept
@@ -73,6 +80,9 @@ cdef extern from "mcu.hpp" namespace "rp2040core":
         bool (*i2c_write)(void* ctx, uint32_t instance, uint32_t value) noexcept
         bool (*i2c_read)(void* ctx, uint32_t instance, bool ack) noexcept
         bool (*i2c_stop)(void* ctx, uint32_t instance) noexcept
+        bool (*pin_source)(void* ctx, uint32_t bank, uint32_t source, uint32_t* value) noexcept
+        bool (*pin_changed)(void* ctx, uint32_t bank, uint32_t pin, int new_state, int old_state) noexcept
+        bool (*pin_input_changed)(void* ctx, uint32_t bank, uint32_t pin, bool function_is_pwm) noexcept
         void (*system_reset_request)(void* ctx) noexcept
         bool (*watchdog_trigger)(void* ctx) noexcept
         bool (*watchdog_tick)(void* ctx, double tick_hz) noexcept
@@ -107,6 +117,9 @@ cdef extern from "mcu.hpp" namespace "rp2040core":
         VregBlock& vreg() noexcept
         SysInfoBlock& sysinfo() noexcept
         SyscfgBlock& syscfg() noexcept
+        PinBank& pins(uint32_t bank) noexcept
+        IoBlock& io(uint32_t bank) noexcept
+        PadsBlock& pads(uint32_t bank) noexcept
         PpbBlock& ppb() noexcept
         WatchdogBlock& watchdog() noexcept
         DmaBlock& dma() noexcept

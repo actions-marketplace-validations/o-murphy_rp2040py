@@ -239,6 +239,9 @@ int main() {
             int transmits = 0;
             int uart_bytes = 0;
             int resets = 0, triggers = 0, ticks = 0;
+            int pin_changes = 0;
+            uint32_t pin_bank = 99, pin_number = 99;
+            int pin_new = -1, pin_old = -1;
             double last_tick = -1.0;
             uint32_t uart_instance = 99, uart_value = 0;
             uint32_t transmit_instance = 99, transmit_value = 0;
@@ -259,6 +262,15 @@ int main() {
             ++w->uart_bytes;
             w->uart_instance = instance;
             w->uart_value = byte;
+            return true;
+        };
+        host.pin_changed = [](void* ctx, uint32_t bank, uint32_t pin, int new_state, int old_state) {
+            World* w = static_cast<World*>(ctx);
+            ++w->pin_changes;
+            w->pin_bank = bank;
+            w->pin_number = pin;
+            w->pin_new = new_state;
+            w->pin_old = old_state;
             return true;
         };
         host.system_reset_request = [](void* ctx) { ++static_cast<World*>(ctx)->resets; };
@@ -417,6 +429,29 @@ int main() {
         CHECK(world.ticks >= 1 && world.last_tick == 1e6);              // ... and then the host hears of it
         m.bus.write32(0xE000ED0C, 0x05FA0004);  // AIRCR: VECTKEY | SYSRESETREQ
         CHECK(world.resets == 1);
+
+        // The pins (group 5a): two banks and the IO / PADS blocks on them, held by the Mcu. Windows, warnings, the IO_BANK0 line and the listeners' notice.
+        {
+            const uint32_t pin_blocks[4] = {0x40014000, 0x40018000, 0x4001C000, 0x40020000};
+            const uint32_t pin_ids[4] = {kMcuBlockIoBank0, kMcuBlockIoQspi, kMcuBlockPadsBank0, kMcuBlockPadsQspi};
+            for (int k = 0; k < 4; ++k) {
+                const int w = world.warns;
+                (void)m.bus.read32(pin_blocks[k] + 0x600);
+                CHECK(world.warns == w + 1 && world.block == pin_ids[k]);
+            }
+        }
+        CHECK(m.bus.read32(0x4001C000 + 0x04) == 0x56 && m.bus.read32(0x40020000 + 0x04) == 0x56);  // PADS GPIO0 / SCLK power-on value (the chip's QSPI resets are the host's)
+        CHECK(m.bus.read32(0x40014000 + 0x04) == 0x1F);                                          // IO_BANK0.GPIO0_CTRL: FUNCSEL null
+        // IO_BANK0's line is "any GPIO pin's IRQ value": forcing one (PROC0_INTF0) raises it on the CPU, and clearing the force lowers it.
+        CHECK((m.cpu.pending_interrupts & (1u << 13)) == 0);
+        m.bus.write32(0x40014000 + 0x110, 1);
+        CHECK((m.cpu.pending_interrupts & (1u << 13)) != 0);
+        m.bus.write32(0x40014000 + 0x110, 0);
+        CHECK((m.cpu.pending_interrupts & (1u << 13)) == 0);
+        // A pin whose output the firmware drives (override: output high, enabled): the state change reaches the host's listeners with the bank and the pin.
+        const int changes = world.pin_changes;
+        m.bus.write32(0x40014000 + 0x04 + 8 * 5, 5 | (3u << 8) | (3u << 12));  // GPIO5_CTRL: SIO, OUTOVER = high, OEOVER = enable
+        CHECK(world.pin_changes == changes + 1 && world.pin_bank == 0 && world.pin_number == 5 && world.pin_new == 1);  // HIGH
     }
 
     if (failures == 0) std::printf("test_mcu: ok\n");

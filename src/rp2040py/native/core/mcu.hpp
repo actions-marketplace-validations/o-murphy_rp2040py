@@ -27,6 +27,9 @@
 #include "cpu.hpp"
 #include "dma.hpp"
 #include "i2c.hpp"
+#include "io.hpp"
+#include "pads.hpp"
+#include "pin.hpp"
 #include "pll.hpp"
 #include "ppb.hpp"
 #include "pin.hpp"
@@ -55,7 +58,7 @@ using McuResult = BatchResult;
 // What the world supplies to a chip that builds itself (step 3a of the revised plan, record 0096): the one interface the blocks go through for what the core cannot answer alone.
 // For now it is the warning (a register access the block does not implement: the logger of the host); the pins, the console and the rest come with the blocks that need them.
 // `warn(ctx, block, kind, offset, value)`: `block` is a `McuBlock`, `kind` the `kRegWarn*` code of core_host.hpp. `failed` is the host's parked-failure flag, shared by every block.
-enum McuBlock : uint32_t { kMcuBlockRtc = 0, kMcuBlockTbman = 1, kMcuBlockBusctrl = 2, kMcuBlockVreg = 3, kMcuBlockSysinfo = 4, kMcuBlockSyscfg = 5, kMcuBlockTimer = 6, kMcuBlockAdc = 7, kMcuBlockUart0 = 8, kMcuBlockUart1 = 9, kMcuBlockSpi0 = 10, kMcuBlockSpi1 = 11, kMcuBlockI2c0 = 12, kMcuBlockI2c1 = 13, kMcuBlockClocks = 14, kMcuBlockPllSys = 15, kMcuBlockPllUsb = 16, kMcuBlockXosc = 17, kMcuBlockRosc = 18, kMcuBlockPpb = 19, kMcuBlockWatchdog = 20, kMcuBlockDma = 21 };
+enum McuBlock : uint32_t { kMcuBlockRtc = 0, kMcuBlockTbman = 1, kMcuBlockBusctrl = 2, kMcuBlockVreg = 3, kMcuBlockSysinfo = 4, kMcuBlockSyscfg = 5, kMcuBlockTimer = 6, kMcuBlockAdc = 7, kMcuBlockUart0 = 8, kMcuBlockUart1 = 9, kMcuBlockSpi0 = 10, kMcuBlockSpi1 = 11, kMcuBlockI2c0 = 12, kMcuBlockI2c1 = 13, kMcuBlockClocks = 14, kMcuBlockPllSys = 15, kMcuBlockPllUsb = 16, kMcuBlockXosc = 17, kMcuBlockRosc = 18, kMcuBlockPpb = 19, kMcuBlockWatchdog = 20, kMcuBlockDma = 21, kMcuBlockIoBank0 = 22, kMcuBlockIoQspi = 23, kMcuBlockPadsBank0 = 24, kMcuBlockPadsQspi = 25 };
 struct McuHost {
     void (*warn)(void* ctx, uint32_t block, uint32_t kind, uint32_t offset, int64_t value) = nullptr;
     void* ctx = nullptr;
@@ -72,6 +75,12 @@ struct McuHost {
     bool (*i2c_write)(void* ctx, uint32_t instance, uint32_t value) = nullptr;          // ... to take a byte ...
     bool (*i2c_read)(void* ctx, uint32_t instance, bool ack) = nullptr;                 // ... to give a byte ...
     bool (*i2c_stop)(void* ctx, uint32_t instance) = nullptr;                           // ... to produce a STOP; each answers with the block's `complete_*()`
+    // The pins. `bank` is 0 for the 30 GPIO pins, 1 for the 6 QSPI pins. A pin's level comes from the registers of other blocks (`source`: SIO's, a PIO's, the PWM's - read by the host only for a block the
+    // chip does not hold itself); a pin that changed state is announced to whoever listens on it (`pin_changed`, with the pin's number and the old and the new state code: the devices the host attached);
+    // an input level that moved reaches the PWM and the PIOs' waits (`pin_input_changed`) until those are the chip's.
+    bool (*pin_source)(void* ctx, uint32_t bank, uint32_t source, uint32_t* value) = nullptr;
+    bool (*pin_changed)(void* ctx, uint32_t bank, uint32_t pin, int new_state, int old_state) = nullptr;
+    bool (*pin_input_changed)(void* ctx, uint32_t bank, uint32_t pin, bool function_is_pwm) = nullptr;
     void (*system_reset_request)(void* ctx) = nullptr;                                  // AIRCR.SYSRESETREQ; without it the core alone is reset
     bool (*watchdog_trigger)(void* ctx) = nullptr;                                      // the watchdog fired (or was triggered): the chip's reset; without it nothing happens
     bool (*watchdog_tick)(void* ctx, double tick_hz) = nullptr;                         // the tick changed (0: stopped), after the TIMER and SysTick have followed it
@@ -82,6 +91,8 @@ struct McuHost {
 };
 
 constexpr uint32_t kRtcBase = 0x4005C000;    // RTC_BASE
+constexpr uint32_t kIoBank0Base = 0x40014000, kIoQspiBase = 0x40018000, kPadsBank0Base = 0x4001C000, kPadsQspiBase = 0x40020000;
+constexpr uint32_t kIrqIoBank0 = 13;  // IO_IRQ_BANK0
 constexpr uint32_t kWatchdogBase = 0x40058000, kDmaBase = 0x50000000;
 constexpr uint32_t kIrqDma[2] = {11, 12};
 constexpr uint32_t kMaxHardwareIrq = 25;  // the highest NVIC line the chip wires (RTC_IRQ)
@@ -179,6 +190,36 @@ public:
         bus.windows.attach(kPllUsbBase, pll_[1].window_handler());
         bus.windows.attach(kXoscBase, xosc_.window_handler());
         bus.windows.attach(kRoscBase, rosc_.window_handler());
+
+        // The pins: two banks (30 GPIO, 6 QSPI) and the four blocks that work on them. A bank asks the host only for what the chip does not hold (a replaced SIO, PIO or PWM) and tells it only of
+        // the changes the host's listeners want; the IO_BANK0 line is the GPIO bank's "any pin's IRQ value", and the QSPI bank's changes re-evaluate the same line.
+        for (uint32_t b = 0; b < 2; ++b) {
+            bank_ctx_[b] = {this, b};
+            PinHost ph;
+            ph.source = pin_source;
+            ph.on_change = pin_change;
+            ph.io_interrupt = pin_io_interrupt;
+            ph.input_changed = pin_input_changed;
+            ph.ctx = &bank_ctx_[b];
+            bool always[PinBank::kMaxPins];
+            for (uint32_t k = 0; k < PinBank::kMaxPins; ++k) always[k] = b == 1;
+            (void)(b == 0 ? gpio_bank_ : qspi_bank_).init(b == 0 ? 30 : 6, ph, always, 0);
+        }
+        IoPadsHost io;
+        io.warn = block_warn<kMcuBlockIoBank0>;
+        io.ctx = this;
+        io.failed = host.failed;
+        io_bank0_.init(&gpio_bank_, false, io);
+        io.warn = block_warn<kMcuBlockIoQspi>;
+        io_qspi_.init(&qspi_bank_, true, io);
+        io.warn = block_warn<kMcuBlockPadsBank0>;
+        pads_bank0_.init(&gpio_bank_, false, io);
+        io.warn = block_warn<kMcuBlockPadsQspi>;
+        pads_qspi_.init(&qspi_bank_, true, io);
+        bus.windows.attach(kIoBank0Base, io_bank0_.window_handler());
+        bus.windows.attach(kIoQspiBase, io_qspi_.window_handler());
+        bus.windows.attach(kPadsBank0Base, pads_bank0_.window_handler());
+        bus.windows.attach(kPadsQspiBase, pads_qspi_.window_handler());
 
         // The core's own peripherals and the DMA: PPB (SysTick, NVIC, SCB on the CPU), the watchdog (it tells the TIMER and SysTick their tick) and the DMA (on the bus, reading clk_sys from the tree).
         PpbHost pp;
@@ -317,6 +358,9 @@ public:
     VregBlock& vreg() noexcept { return vreg_; }
     SysInfoBlock& sysinfo() noexcept { return sysinfo_; }
     SyscfgBlock& syscfg() noexcept { return syscfg_; }
+    PinBank& pins(uint32_t bank) noexcept { return bank == 0 ? gpio_bank_ : qspi_bank_; }
+    IoBlock& io(uint32_t bank) noexcept { return bank == 0 ? io_bank0_ : io_qspi_; }
+    PadsBlock& pads(uint32_t bank) noexcept { return bank == 0 ? pads_bank0_ : pads_qspi_; }
     PpbBlock& ppb() noexcept { return ppb_; }
     WatchdogBlock& watchdog() noexcept { return watchdog_; }
     DmaBlock& dma() noexcept { return own_dma_; }
@@ -418,6 +462,28 @@ private:
     static bool tree_changed(void* chip) noexcept {
         Mcu* m = static_cast<Mcu*>(chip);
         return m->tree_hook_ != nullptr ? m->tree_hook_(m->tree_hook_ctx_) : m->clocks_.retune();
+    }
+    // The pin banks' host: `ctx` is a `McuInstance` (the bank).
+    static bool pin_source(void* ctx, uint32_t source, uint32_t* out) noexcept {
+        const McuInstance* i = static_cast<const McuInstance*>(ctx);
+        const McuHost& w = i->mcu->host_world_;
+        *out = 0;
+        return w.pin_source == nullptr || w.pin_source(w.ctx, i->index, source, out);
+    }
+    static bool pin_change(void* ctx, uint32_t pin, int new_state, int old_state) noexcept {
+        const McuInstance* i = static_cast<const McuInstance*>(ctx);
+        const McuHost& w = i->mcu->host_world_;
+        return w.pin_changed == nullptr || w.pin_changed(w.ctx, i->index, pin, new_state, old_state);
+    }
+    static bool pin_input_changed(void* ctx, uint32_t pin, bool function_is_pwm) noexcept {
+        const McuInstance* i = static_cast<const McuInstance*>(ctx);
+        const McuHost& w = i->mcu->host_world_;
+        return w.pin_input_changed == nullptr || w.pin_input_changed(w.ctx, i->index, pin, function_is_pwm);
+    }
+    // A pin's IRQ value changed (either bank): IO_BANK0's line follows "any GPIO pin's IRQ value" - the QSPI bank's changes re-evaluate the same line, as they always did.
+    static bool pin_io_interrupt(void* ctx) noexcept {
+        const McuInstance* i = static_cast<const McuInstance*>(ctx);
+        return i->mcu->set_interrupt(kIrqIoBank0, i->mcu->gpio_bank_.any_irq_value());
     }
     static void ppb_reset_request(void* chip) noexcept {
         Mcu* m = static_cast<Mcu*>(chip);
@@ -559,6 +625,10 @@ private:
     VregBlock vreg_;
     SysInfoBlock sysinfo_;
     SyscfgBlock syscfg_;
+    PinBank gpio_bank_, qspi_bank_;
+    IoBlock io_bank0_, io_qspi_;
+    PadsBlock pads_bank0_, pads_qspi_;
+    McuInstance bank_ctx_[2];
     TimerBlock timer_;
     PpbBlock ppb_;
     WatchdogBlock watchdog_;

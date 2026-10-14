@@ -188,3 +188,34 @@ def test_a_watchdog_trigger_is_the_chips_reset_whatever_the_hook_is(chip):
     chip.watchdog.on_watchdog_trigger = lambda: calls.append("reset")  # type: ignore[method-assign]
     chip.write_uint32(0x40058000 + 0x00, 1 << 31)  # WATCHDOG.CTRL.TRIGGER
     assert calls == ["reset"]
+
+
+@pytest.mark.parametrize(
+    "base, name",
+    [
+        (0x40014000, "IO_BANK0_BASE"),
+        (0x40018000, "IO_QSPI_BASE"),
+        (0x4001C000, "PADS_BANK0_BASE"),
+        (0x40020000, "PADS_QSPI_BASE"),
+    ],
+)
+def test_the_io_and_pads_blocks_on_the_pin_banks_warn_under_their_own_names(chip, base, name):
+    chip.read_uint32(base + 0x600)
+    assert chip.logger.messages == [("warning", name, "Unimplemented peripheral read from 0x600")]
+
+
+def test_a_pin_driven_by_the_firmware_tells_its_listeners(chip):
+    heard: list[tuple] = []
+    chip.gpio[5]._listeners.add(lambda new, old: heard.append((new.name, old.name)))
+    chip.write_uint32(
+        0x40014000 + 0x04 + 8 * 5, 5 | (3 << 8) | (3 << 12)
+    )  # GPIO5_CTRL: SIO, OUTOVER = high, OEOVER = enable
+    assert heard and heard[-1][0] == "HIGH"
+
+
+def test_the_io_bank0_line_follows_a_forced_pin_irq_and_comes_down_with_it(chip):
+    assert not chip.core.pending_interrupts & (1 << IRQ.IO_BANK0)
+    chip.write_uint32(0x40014000 + 0x110, 1)  # PROC0_INTF0: force pin 0's level-low interrupt
+    assert chip.core.pending_interrupts & (1 << IRQ.IO_BANK0)
+    chip.write_uint32(0x40014000 + 0x110, 0)
+    assert not chip.core.pending_interrupts & (1 << IRQ.IO_BANK0)

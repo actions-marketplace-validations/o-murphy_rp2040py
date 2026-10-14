@@ -22,18 +22,13 @@ cdef uint32_t _WARN_READ = 0, _WARN_READ_ATOMIC = 1
 cdef void _warn_trampoline(void* ctx, uint32_t kind, uint32_t offset, int64_t value) noexcept:
     cdef RPPADS block = <RPPADS> ctx
     try:
-        if kind == _WARN_READ:
-            block.warn(f"Unimplemented peripheral read from 0x{offset:x}")
-        elif kind == _WARN_READ_ATOMIC:
-            block.warn("Unimplemented read from peripheral in the atomic operation region")
-        else:
-            block.warn(f"Unimplemented peripheral write to 0x{offset:x}: 0x{value:x}")
+        block._warn_kind(kind, offset, value)
     except BaseException as error:
         park_error(error)
 
 
 cdef class RPPADS:
-    def __init__(self, rp2040, name, bank):
+    def __init__(self, rp2040, name, bank, mcu_index=-1):
         cdef IoPadsHost host
         cdef GPIOPin pin
         cdef GPIOPinBank owner = None
@@ -54,10 +49,24 @@ cdef class RPPADS:
         self.name = name
         self.bank = bank
         self._owner = owner
+        if mcu_index >= 0:
+            # the chip's C++ `Mcu` holds this bank (and the IO and PADS blocks on it): this object is the Python view of it
+            self._block = <PadsBlock*> <size_t> rp2040._native_pads_address(mcu_index)
+            return
+        self._block = &self._own
         host.warn = _warn_trampoline
         host.ctx = <void*> self
         host.failed = pending_flag()
-        self._block.init(&owner._bank, bank == "qspi", host)
+        self._own.init(owner._bank, bank == "qspi", host)
+
+    def _warn_kind(self, kind, offset, value):
+        """A register access the block does not implement, as the logger's message (the chip's host calls this for the block it built)."""
+        if kind == _WARN_READ:
+            self.warn(f"Unimplemented peripheral read from 0x{offset:x}")
+        elif kind == _WARN_READ_ATOMIC:
+            self.warn("Unimplemented read from peripheral in the atomic operation region")
+        else:
+            self.warn(f"Unimplemented peripheral write to 0x{offset:x}: 0x{value:x}")
 
     @property
     def raw_write_value(self):

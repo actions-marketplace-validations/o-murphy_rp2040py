@@ -3,6 +3,7 @@ from collections.abc import Callable
 from enum import IntEnum
 from typing import TYPE_CHECKING
 
+from rp2040py._pin_bank import GPIOPinBank
 from rp2040py.peripherals.pio_registers import WaitType
 
 if TYPE_CHECKING:
@@ -68,7 +69,31 @@ CTRL_MASK = 0x3003331F  # IRQOVER 29:28, INOVER 17:16, OEOVER 13:12, OUTOVER 9:8
 
 
 class GPIOPin:
-    def __init__(self, rp2040: "RP2040", index: int, name: str | None = None, always_output_enabled: bool = False):
+    def __init__(
+        self,
+        rp2040: "RP2040",
+        index: int,
+        name: str | None = None,
+        always_output_enabled: bool = False,
+        bank: GPIOPinBank | None = None,
+    ):
+        """`bank` is the shared `GPIOPinBank` this pin is a slot of (slot = `index` less the bank's first pin; the bank decides `always_output_enabled`); without one the pin gets a
+        private bank of its own, so a pin on its own (tests, a stand-in chip) behaves as before. The same contract as the native `GPIOPin`."""
+        if bank is None:
+            bank = GPIOPinBank(rp2040, 1, always_output_enabled, index)
+            slot = 0
+        else:
+            if index < bank.first or index - bank.first >= len(bank.shells):
+                raise ValueError(
+                    f"pin {index} is not in the bank (pins {bank.first}..{bank.first + len(bank.shells) - 1})"
+                )
+            slot = index - bank.first
+            if bank.shells[slot] is not None:
+                raise ValueError(f"pin {index} of the bank already has an object")
+            always_output_enabled = bank.always_output_enabled
+        self._bank = bank
+        self._slot = slot
+        bank.shells[slot] = self
         self.rp2040 = rp2040
         self.index = index
         self.name = name if name is not None else str(index)

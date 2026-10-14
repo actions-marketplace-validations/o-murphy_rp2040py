@@ -25,6 +25,7 @@ from collections.abc import Callable
 from typing import Any
 
 from rp2040py import _gpio_pin as G
+from rp2040py import _pin_bank as G_bank
 from rp2040py.rp2040 import RP2040
 from utils.is32bit import IS32BIT
 
@@ -85,7 +86,11 @@ class Rig:
     """One chip plus the timestamped log of everything that left its pins."""
 
     def __init__(
-        self, kind: str, factory: "Callable[..., Any] | None" = None, windows: "tuple[Any, Any] | None" = None
+        self,
+        kind: str,
+        factory: "Callable[..., Any] | None" = None,
+        windows: "tuple[Any, Any] | None" = None,
+        bank_module: Any = None,
     ) -> None:
         self.kind = kind
         self.chip = RP2040()
@@ -96,20 +101,27 @@ class Rig:
         if kind in ("pure", "mutant"):
             pin_class = G.GPIOPin if kind == "pure" else factory
             assert pin_class is not None
-            self._replace_the_pins(pin_class, windows)
+            self._replace_the_pins(pin_class, windows, bank_module or G_bank)
         self._tap()
 
-    def _replace_the_pins(self, pin_class: Callable[..., Any], windows: "tuple[Any, Any] | None" = None) -> None:
+    def _replace_the_pins(
+        self, pin_class: Callable[..., Any], windows: "tuple[Any, Any] | None" = None, bank_module: Any = G_bank
+    ) -> None:
         """Both banks' pins, as the chip builds them (the QSPI pins always output-enabled, with the pad resets of record 0050)."""
         from rp2040py.qspi_pads import QSPI_PAD_RESET_VALUES
 
         chip = self.chip
+        # ... in banks of the reference's own (the chip asks its banks for GPIO_IN and the IO_BANK0 interrupt line, and the chip's native banks would answer for the native pins)
+        gpio_bank = bank_module.GPIOPinBank(chip, GPIO_PINS)
+        qspi_bank = bank_module.GPIOPinBank(chip, QSPI_PINS, True)
+        names = [pin.name for pin in chip.qspi]
+        chip._gpio_bank, chip._qspi_bank = gpio_bank, qspi_bank
+        chip.gpio, chip.qspi = gpio_bank.shells, qspi_bank.shells
         for index in range(GPIO_PINS):
-            chip.gpio[index] = pin_class(chip, index)
+            pin_class(chip, index, bank=gpio_bank)
         for index in range(QSPI_PINS):
-            pin = pin_class(chip, index, name=chip.qspi[index].name, always_output_enabled=True)
+            pin = pin_class(chip, index, name=names[index], bank=qspi_bank)
             pin.reset(io=False, pad_reset=QSPI_PAD_RESET_VALUES[index])
-            chip.qspi[index] = pin
         # ... and the pure-Python register windows over them: the facade's would be the native ones, which work on the native pin bank
         from rp2040py.peripherals import _io, _pads
 
@@ -217,6 +229,14 @@ class Rig:
             out[f"extra.{block.name}"] = tuple(tuple(masks) for dest in (1, 2) for masks in block._extra[dest])
         for base, offsets, _count in BLOCKS:
             out[f"regs.{base:x}"] = tuple(int(chip.read_uint32(base + offset)) for offset in offsets)
+        # what a property of all the pins at once is (a chip asks its bank for these)
+        out["banks"] = (
+            int(chip.gpio_values),
+            int(chip._gpio_bank.input_values()),
+            bool(chip._gpio_bank.any_irq_value()),
+            int(chip._qspi_bank.input_values()),
+            bool(chip._qspi_bank.any_irq_value()),
+        )
         out["sio"] = (
             int(chip.sio.gpio_value),
             int(chip.sio.gpio_output_enable),
@@ -337,7 +357,28 @@ WINDOW_MUTATIONS: dict[str, tuple[str, str, str, int]] = {
     "pads_read_gives_another_pad": ("pads", "            gpio = self.get_pin_from_offset(offset)\n            return gpio.pad_value", "            gpio = self.get_pin_from_offset(offset + 4)\n            return gpio.pad_value", 1),
 }  # fmt: skip
 
-MUTANTS = tuple(MUTATIONS) + tuple(WINDOW_MUTATIONS)
+# name -> (the exact text in _pin_bank.py, what replaces it, how many times it occurs): the reference of what a property of all the pins at once is.
+BANK_MUTATIONS: dict[str, tuple[str, str, int]] = {
+    "bank_input_bit_shifted": ("                result |= 1 << index\n", "                result |= 1 << (index + 1)\n", 1),
+    "bank_input_inverted": ("            if pin.input_value:\n", "            if not pin.input_value:\n", 1),
+    "bank_input_stops_at_first": ("                result |= 1 << index\n", "                return 1 << index\n", 1),
+    "bank_irq_inverted": ("            if pin.irq_value:\n", "            if not pin.irq_value:\n", 1),
+    "bank_irq_raw": ("            if pin.irq_value:\n", "            if pin.raw_interrupt:\n", 1),
+    "bank_irq_last_pin_only": ("        for pin in self.shells:\n            if pin.irq_value:\n                return True\n        return False\n", "        return bool(self.shells[-1].irq_value)\n", 1),
+}  # fmt: skip
+
+MUTANTS = tuple(MUTATIONS) + tuple(WINDOW_MUTATIONS) + tuple(BANK_MUTATIONS)
+
+
+def _bank_module(name: str) -> types.ModuleType:
+    old, new, count = BANK_MUTATIONS[name]
+    source = inspect.getsource(G_bank)
+    assert source.count(old) == count, (
+        f"{name}: {old!r} occurs {source.count(old)} times in _pin_bank.py, expected {count}"
+    )
+    module = types.ModuleType(f"rp2040py._pin_bank_mutant_{name}")
+    exec(compile(source.replace(old, new), f"<_pin_bank mutant {name}>", "exec"), module.__dict__)  # noqa: S102 - the point of the exercise
+    return module
 
 
 def _mutant_module(name: str) -> types.ModuleType:
@@ -370,6 +411,8 @@ def mutant_rig(name: str) -> Rig:
     """A rig whose pins (or register windows) are the pure-Python ones with one expression changed, to prove the comparison sees a change of *logic*."""
     if name in WINDOW_MUTATIONS:
         return Rig("mutant", G.GPIOPin, windows=_window_modules(name))
+    if name in BANK_MUTATIONS:
+        return Rig("mutant", G.GPIOPin, bank_module=_bank_module(name))
     return Rig("mutant", _mutant_module(name).GPIOPin)
 
 

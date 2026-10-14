@@ -4,7 +4,7 @@ from typing import TYPE_CHECKING, Any
 from rp2040py.clock.clock import IClock
 from rp2040py.clock.simulation_clock import SimulationClock
 from rp2040py.cortex_m0_core import CortexM0Core
-from rp2040py.gpio_pin import GPIOPin
+from rp2040py.gpio_pin import GPIOPin, GPIOPinBank
 from rp2040py.irq import IRQ
 from rp2040py.memory_map import (
     APB_START_ADDRESS,
@@ -176,16 +176,17 @@ class RP2040:
         self.pwm = RPPWM(self, "PWM_BASE")
         self.adc = RPADC(self, "ADC")
 
-        self.gpio = [GPIOPin(self, i) for i in range(30)]
+        # The chip's pins are slots of two banks (30 GPIO pins, 6 QSPI pins) - the same objects the native build has, so the chip asks the bank for what is a property of all
+        # its pins at once (`gpio_values`, the IO_BANK0 interrupt line) in either build. `gpio` / `qspi` are the banks' own pin lists.
+        self._gpio_bank = GPIOPinBank(self, 30)
+        self._qspi_bank = GPIOPinBank(self, 6, True)
+        self.gpio = self._gpio_bank.shells
+        for i in range(30):
+            GPIOPin(self, i, bank=self._gpio_bank)
 
-        self.qspi = [
-            GPIOPin(self, 0, "SCLK", always_output_enabled=True),
-            GPIOPin(self, 1, "SS", always_output_enabled=True),
-            GPIOPin(self, 2, "SD0", always_output_enabled=True),
-            GPIOPin(self, 3, "SD1", always_output_enabled=True),
-            GPIOPin(self, 4, "SD2", always_output_enabled=True),
-            GPIOPin(self, 5, "SD3", always_output_enabled=True),
-        ]
+        self.qspi = self._qspi_bank.shells
+        for i, name in enumerate(("SCLK", "SS", "SD0", "SD1", "SD2", "SD3")):
+            GPIOPin(self, i, name, bank=self._qspi_bank)
         # GPIOPin's own constructor default is PADS_BANK0's reset value, which is wrong for this
         # bank: PADS_QSPI resets each pad differently (RP2040 datasheet 2.19.6.3), and the
         # difference is load-bearing. GPIO_QSPI_SS is the only pad with a pull-up, which is what
@@ -704,21 +705,13 @@ class RP2040:
 
     @property
     def gpio_values(self) -> int:
-        result = 0
-        for gpio_index in range(len(self.gpio)):
-            if self.gpio[gpio_index].input_value:
-                result |= 1 << gpio_index
-        return result
+        return self._gpio_bank.input_values()
 
     def set_interrupt(self, irq: int, value: bool) -> None:
         self.core.set_interrupt(irq, value)
 
     def update_io_interrupt(self) -> None:
-        interrupt_value = False
-        for pin in self.gpio:
-            if pin.irq_value:
-                interrupt_value = True
-        self.set_interrupt(IRQ.IO_BANK0, interrupt_value)
+        self.set_interrupt(IRQ.IO_BANK0, self._gpio_bank.any_irq_value())
 
     def step(self) -> None:
         self.core.execute_instruction()

@@ -3,3 +3,4 @@
 # Lets mypy/IDEs see the native backend's API instead of the ignore_missing_imports fallback.
 
 from rp2040py._gpio_pin import GPIOPin as GPIOPin
+from rp2040py._pin_bank import GPIOPinBank as GPIOPinBank

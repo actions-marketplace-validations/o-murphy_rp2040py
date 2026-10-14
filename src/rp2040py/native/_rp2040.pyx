@@ -40,9 +40,8 @@ from rp2040py.native._window_map cimport Read32Fn, Write32Fn, WindowHandler, kNo
 from rp2040py.native._simulation_clock cimport SimulationClock
 
 from rp2040py.clock.clock import IClock
-from rp2040py.gpio_pin import GPIOPin
-from rp2040py.native._gpio_pin import GPIOPin as _NativeGPIOPin
-from rp2040py.native._gpio_pin import GPIOPinBank
+from rp2040py.gpio_pin import GPIOPin, GPIOPinBank
+from rp2040py.native._gpio_pin import GPIOPinBank as _NativeGPIOPinBank
 from rp2040py.native._pin_wiring import bind_pin_sources
 from rp2040py.irq import IRQ
 from rp2040py.memory_map import (
@@ -403,26 +402,18 @@ cdef class RP2040:
         self.pwm = RPPWM(self, "PWM_BASE")
         self.adc = RPADC(self, "ADC")
 
-        # The chip's native pins share two C++ banks (30 GPIO pins, 6 QSPI pins): the IO_BANK0 / IO_QSPI / PADS windows work on them directly. The facade hands out the
-        # pure-Python pins instead when the native ones are switched off (RP2040PY_SKIP_CYTHON=1): those stand alone and the pure-Python windows go with them.
-        if GPIOPin is _NativeGPIOPin:
-            self._gpio_bank = GPIOPinBank(self, 30)
-            self._qspi_bank = GPIOPinBank(self, 6, True)
-            gpio_kwargs = {"bank": self._gpio_bank}
-            qspi_kwargs = {"bank": self._qspi_bank}
-        else:
-            gpio_kwargs = {}
-            qspi_kwargs = {"always_output_enabled": True}
-        self.gpio = [GPIOPin(self, i, **gpio_kwargs) for i in range(30)]
+        # The chip's pins are slots of two banks (30 GPIO pins, 6 QSPI pins). The native ones share two C++ banks: the IO_BANK0 / IO_QSPI / PADS windows work on them directly, and the
+        # chip asks the bank for what is a property of all its pins at once (`gpio_values`, the IO_BANK0 interrupt line). The facade hands out the pure-Python pins and banks instead when
+        # the native ones are switched off (RP2040PY_SKIP_CYTHON=1): the same interface, the pure-Python windows go with them. `gpio` / `qspi` are the banks' own pin lists.
+        self._gpio_bank = GPIOPinBank(self, 30)
+        self._qspi_bank = GPIOPinBank(self, 6, True)
+        self.gpio = self._gpio_bank.shells
+        for i in range(30):
+            GPIOPin(self, i, bank=self._gpio_bank)
 
-        self.qspi = [
-            GPIOPin(self, 0, "SCLK", **qspi_kwargs),
-            GPIOPin(self, 1, "SS", **qspi_kwargs),
-            GPIOPin(self, 2, "SD0", **qspi_kwargs),
-            GPIOPin(self, 3, "SD1", **qspi_kwargs),
-            GPIOPin(self, 4, "SD2", **qspi_kwargs),
-            GPIOPin(self, 5, "SD3", **qspi_kwargs),
-        ]
+        self.qspi = self._qspi_bank.shells
+        for i, name in enumerate(("SCLK", "SS", "SD0", "SD1", "SD2", "SD3")):
+            GPIOPin(self, i, name, bank=self._qspi_bank)
         # GPIOPin's own constructor default is PADS_BANK0's reset value, which is wrong for this
         # bank: PADS_QSPI resets each pad differently (RP2040 datasheet 2.19.6.3), and the
         # difference is load-bearing. GPIO_QSPI_SS is the only pad with a pull-up, which is what
@@ -801,10 +792,9 @@ cdef class RP2040:
 
     def _bind_pin_sources(self):
         """Points the chip's native pin banks at the registers of the native SIO / PIO / PWM blocks, where there are such (core/pin.hpp's direct sources); callable again whenever one is replaced."""
-        bank = getattr(self, "_gpio_bank", None)
-        if bank is not None:
-            bind_pin_sources(bank, self)
-            bind_pin_sources(self._qspi_bank, self)
+        for bank in (getattr(self, "_gpio_bank", None), getattr(self, "_qspi_bank", None)):
+            if isinstance(bank, _NativeGPIOPinBank):  # a pure-Python bank (an oracle's reference pins) reads the blocks itself
+                bind_pin_sources(bank, self)
 
     # The pins read the registers of these three blocks directly (see `_bind_pin_sources`), so replacing one has to re-point them: every way of replacing is a property or a list that does it.
     @property
@@ -1074,22 +1064,13 @@ cdef class RP2040:
 
     @property
     def gpio_values(self) -> int:
-        cdef unsigned int result = 0
-        cdef unsigned int gpio_index
-        for gpio_index in range(len(self.gpio)):
-            if self.gpio[gpio_index].input_value:
-                result |= 1 << gpio_index
-        return result
+        return self._gpio_bank.input_values()
 
     def set_interrupt(self, irq: int, value: bool) -> None:
         self.core.set_interrupt(irq, value)
 
     def update_io_interrupt(self) -> None:
-        interrupt_value = False
-        for pin in self.gpio:
-            if pin.irq_value:
-                interrupt_value = True
-        self.set_interrupt(IRQ.IO_BANK0, interrupt_value)
+        self.set_interrupt(IRQ.IO_BANK0, self._gpio_bank.any_irq_value())
 
     def step(self) -> None:
         self.core.execute_instruction()

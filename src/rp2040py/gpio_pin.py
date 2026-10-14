@@ -6,7 +6,7 @@ back to the plain-Python reference implementation in `_gpio_pin.py` otherwise. E
 
 `GPIOPinState`/`FUNCTION_*`/`GPIOPinListener` are value/type definitions with no compiled variant -
 always sourced from `_gpio_pin.py` so there's a single definition every module shares (the native
-`GPIOPin` returns those same `GPIOPinState` members). Only the `GPIOPin` class has a native port.
+`GPIOPin` returns those same `GPIOPinState` members). Only the `GPIOPin` class and the `GPIOPinBank` its pins are slots of have a native port.
 """
 
 from rp2040py._gpio_pin import (
@@ -22,9 +22,10 @@ from rp2040py._native_gate import native_disabled
 try:
     if native_disabled():
         raise ImportError("RP2040PY_SKIP_CYTHON=1 set, forcing pure-Python fallback")
-    from rp2040py.native._gpio_pin import GPIOPin
+    from rp2040py.native._gpio_pin import GPIOPin, GPIOPinBank
 except ImportError:
     from rp2040py._gpio_pin import GPIOPin
+    from rp2040py._pin_bank import GPIOPinBank
 
 __all__ = (
     "FUNCTION_PIO0",
@@ -32,6 +33,7 @@ __all__ = (
     "FUNCTION_PWM",
     "FUNCTION_SIO",
     "GPIOPin",
+    "GPIOPinBank",
     "GPIOPinListener",
     "GPIOPinState",
 )

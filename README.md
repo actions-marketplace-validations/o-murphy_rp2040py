@@ -595,6 +595,27 @@ exist for cases where you want to control this explicitly:
 - `RP2040PY_SKIP_NATIVE_BUILD=1` - skip compiling the extension at *build* time, for a
   deliberately pure-Python install/wheel.
 
+### CoreMark: a busy core, not boot-and-idle
+
+The speed-up quoted above is for a boot that mostly idles, where the emulator can jump over the time
+nothing happens. A core that never stops is the other end: [CoreMark](https://github.com/protik09/CoreMark-RP2040)
+(the single-core v1.0.0 build) keeps the CPU running for about 12 s of *simulated* chip time, so the wall time is a direct
+measure of instruction throughput. [`demo/coremark_single_thread.py`](demo/coremark_single_thread.py) runs it and stops on the result line.
+
+| Variant | Wall time | Speed vs. the chip | Iterations/Sec |
+|---|---|---|---|
+| CPython + native extension | 32 s | ~0.4x | 248.46 |
+| PyPy 3.10, pure Python | 171 s | ~0.07x | 248.46 |
+| CPython, pure Python | **5349 s (89 min)** | ~0.002x | 248.46 |
+
+- The score is the same in all three (1.99 CoreMark/MHz at 125 MHz), so the builds agree on what the firmware computes.
+- The native extension is ~167x faster than pure CPython and ~5x faster than PyPy; PyPy is ~31x faster than pure CPython.
+- On a busy core the native build runs at roughly 0.4x of real time. The "~100x" above is a figure for idle time, not for instruction
+  throughput - do not read it as the speed of a busy core.
+- One run per variant on one machine, not an average: treat the factors as an order of magnitude. The pure-CPython run was cut at the
+  result line (`--expect-regex`), so its log has no "Correct operation validated" line; the score and the total time are there, and the
+  validation is confirmed for the native and PyPy runs.
+
 ## Differences from upstream rp2040js
 
 rp2040py started as a straight port of [rp2040js](https://github.com/wokwi/rp2040js) - the core

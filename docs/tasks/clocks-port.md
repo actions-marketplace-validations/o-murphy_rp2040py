@@ -1,6 +1,6 @@
 # CLOCKS and PLL: audit against the datasheet, then the C++ port (working note)
 
-Status: audit read, decisions made, reference fixed (2026-10-13, `2c90ed2`), `clocks.py`/`pll.py` are facades over `_clocks.py`/`_pll.py`; oracle and C++ not started. Recipe: [core-block-recipe.md](../reference/core-block-recipe.md), section A first. Folded into record 0098 (a CLOCKS/PLL section, as for USB) when done.
+Status: audit read, decisions made, reference fixed (2026-10-13, `2c90ed2`), `clocks.py`/`pll.py` are facades over `_clocks.py`/`_pll.py`, C++ `core/clocks.hpp` + `core/pll.hpp` (mutation-tested) and the native shells in, oracle `tests/test_clocks_diff.py` (63 reference mutants) agrees; open: C++-to-C++ sink wiring, CPU time following clk_sys, XOSC state-change retune, live boots, docs. Recipe: [core-block-recipe.md](../reference/core-block-recipe.md), section A first. Folded into record 0098 (a CLOCKS/PLL section, as for USB) when done.
 
 Why this is in the C++ plan at all: record 0096's rule (2026-10-06) is that the core owns every behaviour firmware can observe with no host attached, and it lists the clock tree among the debt (item 2): "a core that is to run alone has to own `clk_sys`/`clk_peri` itself - the DMA already asks the host for `clk_sys` through a callback, which a headless host cannot answer". The 2026-10-05 entry that left the tree in Python "on purpose" predates the rule.
 

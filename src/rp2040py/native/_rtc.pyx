@@ -13,7 +13,6 @@ The API is the reference's: the register attributes (`clkdiv_m1`, `setup0`, `set
 from libc.stdint cimport int64_t, uint32_t
 from libcpp cimport bool as cppbool
 
-from rp2040py.native._mcu_irq cimport Mcu, McuIrqLine, mcu_irq_line, native_mcu
 from rp2040py.native._pending cimport park_error, pending_flag, raise_if_pending
 from rp2040py.native._simulation_clock cimport SimulationClock
 from rp2040py.native._window_map cimport WindowHandler
@@ -59,24 +58,32 @@ cdef class RP2040RTC:
         self.rp2040 = rp2040
         self.name = name
         self.clock = clock
+        address = getattr(rp2040, "_native_rtc_address", None)
+        if address is not None:
+            # the chip's C++ `Mcu` has built the block already - on its clock, with its window on the bus and its line on the CPU - and this object is the Python view of it
+            self._block = <RtcBlock*> <size_t> address()
+            return
+        # a stand-in chip (an oracle's, a test's) has no `Mcu`: the shell owns a block and wires it to the stand-in's `set_interrupt` and logger
+        self._block = &self._own
         host.warn = _warn_trampoline
-        mcu = native_mcu(rp2040)
-        if mcu != NULL:
-            # the line goes from the C++ block straight to the chip's CPU, with no Python in between
-            self._irq_line.mcu = mcu
-            self._irq_line.line = <uint32_t> int(IRQ.RTC)
-            host.irq = mcu_irq_line
-            host.irq_ctx = &self._irq_line
-        else:
-            host.irq = _irq_trampoline
-            host.irq_ctx = NULL
+        host.irq = _irq_trampoline
+        host.irq_ctx = NULL
         host.ctx = <void*> self
         host.failed = pending_flag()
-        self._block.init(&(<SimulationClock> clock)._clock, host)
+        self._own.init(&(<SimulationClock> clock)._clock, host)
 
     def __dealloc__(self):
-        # Unlink the second from the clock before the block goes away.
-        self._block.detach()
+        # Unlink the second from the clock before the block goes away (the chip's own block is the `Mcu`'s to detach).
+        self._own.detach()
+
+    def _warn_kind(self, kind, offset, value):
+        """A register access the block does not implement, as the logger's message (the chip's host calls this for the block it built)."""
+        if kind == kRtcWarnRead:
+            self.warn(f"Unimplemented peripheral read from 0x{offset:x}")
+        elif kind == kRtcWarnReadAtomicArea:
+            self.warn("Unimplemented read from peripheral in the atomic operation region")
+        else:
+            self.warn(f"Unimplemented peripheral write to 0x{offset:x}: 0x{value:x}")
 
     @property
     def raw_write_value(self):

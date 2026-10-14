@@ -27,12 +27,26 @@
 #include "dma.hpp"
 #include "pin.hpp"
 #include "pio.hpp"
+#include "rtc.hpp"
 
 namespace rp2040core {
 
 // The limits of one `run()`: the batch's parameters (the cycle period, the instruction ceiling, the real-time budget, ...). Named for what a host calls it.
 using McuLimits = BatchParams;
 using McuResult = BatchResult;
+
+// What the world supplies to a chip that builds itself (step 3a of the revised plan, record 0096): the one interface the blocks go through for what the core cannot answer alone.
+// For now it is the warning (a register access the block does not implement: the logger of the host); the pins, the console and the rest come with the blocks that need them.
+// `warn(ctx, block, kind, offset, value)`: `block` is a `McuBlock`, `kind` the `kRegWarn*` code of core_host.hpp. `failed` is the host's parked-failure flag, shared by every block.
+enum McuBlock : uint32_t { kMcuBlockRtc = 0 };
+struct McuHost {
+    void (*warn)(void* ctx, uint32_t block, uint32_t kind, uint32_t offset, int64_t value) = nullptr;
+    void* ctx = nullptr;
+    const int* failed = nullptr;
+};
+
+constexpr uint32_t kRtcBase = 0x4005C000;  // RTC_BASE
+constexpr uint32_t kIrqRtc = 25;           // RTC_IRQ
 
 class Mcu {
 public:
@@ -49,6 +63,21 @@ public:
     }
     Mcu(const Mcu&) = delete;
     Mcu& operator=(const Mcu&) = delete;
+    ~Mcu() { rtc_.detach(); }  // (unlinks the second from the clock, which may be gone already: safe)
+
+    // Builds the blocks that live in this class: initialises each on the chip's clock, maps its window on the bus and binds its interrupt line, all here and not in a shell. Call once,
+    // after `use_clock()` (the RTC's second is an alarm of that clock) and with the host that answers for what the chip cannot. The blocks come over one at a time (record 0096, 3a): the RTC first.
+    void build(const McuHost& host) noexcept {
+        host_world_ = host;
+        RtcHost h;
+        h.warn = rtc_warn;
+        h.irq = rtc_irq;
+        h.ctx = this;
+        h.failed = host.failed;
+        rtc_.init(clock_, h);
+        bus.windows.attach(kRtcBase, rtc_.window_handler());
+    }
+    RtcBlock& rtc() noexcept { return rtc_; }
 
     // The parts the chip owns. A host fills the bus's memory map and window table and calls `cpu.init(&bus, host, max_irq)` itself until the host interface does it.
     Cpu cpu;
@@ -115,8 +144,15 @@ public:
 private:
     static bool step_pio(void* chip, int index, int64_t cycles) noexcept { return static_cast<Mcu*>(chip)->pio_[index].advance(cycles); }
     static double no_time(void*) noexcept { return 0.0; }
+    static void rtc_warn(void* chip, uint32_t kind, uint32_t offset, int64_t value) noexcept {
+        Mcu* mcu = static_cast<Mcu*>(chip);
+        if (mcu->host_world_.warn != nullptr) mcu->host_world_.warn(mcu->host_world_.ctx, kMcuBlockRtc, kind, offset, value);
+    }
+    static bool rtc_irq(void* chip, bool level) noexcept { return static_cast<Mcu*>(chip)->set_interrupt(kIrqRtc, level); }
 
     PioBlock pio_[kPioBlocks];
+    RtcBlock rtc_;
+    McuHost host_world_;
     IrqHook irq_hook_ = nullptr;
     void* irq_hook_ctx_ = nullptr;
     DmaBlock* dma_ = nullptr;

@@ -236,7 +236,7 @@ cdef class RPClocks:
             else self._block.add_ref_sink(_watchdog_python_sink, <void*> self)
         )
         ok = ok and (
-            self._block.add_rtc_sink(rtc_rtc_sink, <void*> &(<RP2040RTC> rtc)._block)
+            self._block.add_rtc_sink(rtc_rtc_sink, <void*> (<RP2040RTC> rtc)._block)
             if isinstance(rtc, RP2040RTC)
             else self._block.add_rtc_sink(_rtc_python_sink, <void*> self)
         )

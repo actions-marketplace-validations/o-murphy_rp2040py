@@ -36,8 +36,8 @@ from rp2040py.native._memory_map cimport (
     kWordIndexed,
 )
 from rp2040py.native._dma cimport RPDMA
-from rp2040py.native._mcu cimport Mcu
-from rp2040py.native._pending cimport park_error, raise_if_pending
+from rp2040py.native._mcu cimport kMcuBlockRtc, Mcu, McuHost
+from rp2040py.native._pending cimport park_error, pending_flag, raise_if_pending
 from rp2040py.native._pio cimport PioBlock
 from rp2040py.native._bus cimport BusHost, kBusWarnInvalidRead, kBusWarnUnalignedRead
 from rp2040py.native._window_map cimport Read32Fn, Write32Fn, WindowHandler, kNoWindow
@@ -292,6 +292,16 @@ cdef bool _irq_hook(void* ctx, uint32_t irq, bool level) noexcept:
     return True
 
 
+cdef void _mcu_warn(void* ctx, uint32_t block, uint32_t kind, uint32_t offset, int64_t value) noexcept:
+    # What a block that the `Mcu` built says about a register access it does not implement: the shell of that block words it for the logger.
+    cdef RP2040 chip = <RP2040> ctx
+    try:
+        if block == kMcuBlockRtc:
+            chip._rtc._warn_kind(kind, offset, value)
+    except BaseException as error:
+        park_error(error)
+
+
 cdef dict _DREQ_BY_NUMBER = {int(channel): channel for channel in DREQChannel}
 
 
@@ -383,6 +393,14 @@ cdef class RP2040:
         # self.clock.create_alarm(...) from their own __init__.
         self.clock = clock if clock is not None else SimulationClock()
         self._mcu.use_clock(&self.clock._clock)  # a clock handed in is used where it is: it may already hold time and alarms (the batch glue points the chip at its simulator's clock again on every run)
+
+        # The blocks that live in the C++ `Mcu` are built by it - on this clock, with their windows on the bus and their lines on the CPU (record 0096, 3a); the host it is given is what answers for what the
+        # core cannot (the logger, so far).
+        cdef McuHost world
+        world.warn = _mcu_warn
+        world.ctx = <void*> self
+        world.failed = pending_flag()
+        self._mcu.build(world)
 
         # Clocks
         self.clk_sys = 125 * MHZ
@@ -1111,6 +1129,10 @@ cdef class RP2040:
     @property
     def gpio_values(self) -> int:
         return self._gpio_bank.input_values()
+
+    def _native_rtc_address(self):
+        """The address of the RTC block the `Mcu` built, for the shell that is its Python view."""
+        return <size_t> &self._mcu.rtc()
 
     def _native_mcu_address(self):
         """The address of this chip's C++ `Mcu`, for a native block that raises its interrupt line straight on it. Looked up as an attribute of the chip, so a chip without one

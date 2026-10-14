@@ -228,6 +228,49 @@ int main() {
         CHECK(m.set_dreq(14, true) && !dma.dreq(14));
     }
 
+    // The RTC, built by the chip (record 0096, 3a): `build()` initialises it on the chip's clock, maps its window and binds its line - all without a shell. The host only answers for
+    // the warning. A write to INTF forces the line, a read of a register that does not exist is a warning, and the second counts on the chip's clock.
+    {
+        struct World {
+            int warns = 0;
+            uint32_t block = 99, kind = 99, offset = 0;
+        } world;
+        Mcu m;
+        m.cpu.init(&m.bus, {}, 25);
+        McuHost host;
+        host.ctx = &world;
+        host.warn = [](void* ctx, uint32_t block, uint32_t kind, uint32_t offset, int64_t) {
+            World* w = static_cast<World*>(ctx);
+            ++w->warns;
+            w->block = block;
+            w->kind = kind;
+            w->offset = offset;
+        };
+        m.build(host);
+        const uint32_t rtc = 0x4005C000;  // (literal: the constant under test must not vouch for itself)
+        CHECK((m.cpu.pending_interrupts & (1u << 25)) == 0);
+        m.bus.write32(rtc + 0x28, 1);  // INTF: force the interrupt
+        CHECK((m.cpu.pending_interrupts & (1u << 25)) != 0);
+        m.bus.write32(rtc + 0x28, 0);
+        CHECK(m.bus.read32(rtc + 0x20) == 0 && m.bus.read32(rtc + 0x2C) == 0);  // INTR, INTS: nothing pending
+
+        CHECK(world.warns == 0);
+        (void)m.bus.read32(rtc + 0x3C);  // no such register
+        CHECK(world.warns == 1 && world.block == kMcuBlockRtc && world.kind == kRtcWarnRead && world.offset == 0x3C);
+
+        // 1 Hz clk_rtc, 2024-02-29 (a leap year) 23:59:58: two seconds later it is 2024-03-01 00:00:00.
+        CHECK(m.rtc().clk_rtc_changed(1.0));
+        m.bus.write32(rtc + 0x00, 0);  // CLKDIV_M1: one clk_rtc tick per second
+        m.bus.write32(rtc + 0x04, (2024u << 12) | (2u << 8) | 29u);
+        m.bus.write32(rtc + 0x08, (4u << 24) | (23u << 16) | (59u << 8) | 58u);
+        m.bus.write32(rtc + 0x0C, 1u << 4);  // LOAD
+        m.bus.write32(rtc + 0x0C, 1u);       // ENABLE
+        CHECK(m.rtc().running());
+        CHECK(m.clock().tick(2e9));
+        CHECK(m.bus.read32(rtc + 0x1C) == ((5u << 24) | 0u));  // RTC_0: Friday, 00:00:00 (dotw 4 -> 5)
+        CHECK(m.bus.read32(rtc + 0x18) == ((2024u << 12) | (3u << 8) | 1u));  // RTC_1: 2024-03-01
+    }
+
     if (failures == 0) std::printf("test_mcu: ok\n");
     return failures == 0 ? 0 : 1;
 }

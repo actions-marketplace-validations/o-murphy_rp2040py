@@ -1,8 +1,10 @@
 # 0096. A C++ MCU core, statically linked through Cython, with a WASM host last
 
-- Status: **Proposed - a phased implementation plan, nothing built (2026-10-03).** Written per
-  CLAUDE.md's "document vs. implement" rule: this record is the plan and the evidence behind it,
-  and authorizes no code. Each phase below needs its own explicit go-ahead.
+- Status: **In progress (2026-10-14).** Phases 0-3 are done; in Phase 4 every block is C++ (USB, XIP_CTRL, CLOCKS/PLL last). The C++ core is to become a
+  self-sufficient, embeddable library (the decision and the gate G1-G8 are in the progress log, entries of 2026-10-14); **step 0 of that order (small closures) is done**
+  (the DMA reads `clk_sys` from the tree, the pin banks exist in both builds, the oscillators reach the tree directly; the SIO FIFO refusal was tried and withdrawn); **next is
+  step 1, the written plan** for the cascade, the wiring, the host interface, the threading contract and the chip-level oracle, then step 2 onward. Written per CLAUDE.md's
+  "document vs. implement" rule: each step needs its own explicit go-ahead.
 - Conceived: 2026-10-03
 - Related: [0013](0013-cython-core.md) (the Cython core this replaces the *implementation* of, not
   the API of), [0031](0031-pio-cython-tick-batching.md) / [0034](0034-execute-batch-native-port.md) /

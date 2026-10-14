@@ -34,7 +34,8 @@ struct PllHost {
 namespace pll_regs {
 constexpr uint32_t REG_CS = 0x00, REG_PWR = 0x04, REG_FBDIV_INT = 0x08, REG_PRIM = 0x0C;
 constexpr uint32_t CS_LOCK = 0x80000000u, CS_BYPASS = 0x100, CS_REFDIV_MASK = 0x3F, CS_WRITE_MASK = CS_BYPASS | CS_REFDIV_MASK, CS_RESET = 0x1;
-constexpr uint32_t PWR_PD = 1u << 0, PWR_DSMPD = 1u << 2, PWR_POSTDIVPD = 1u << 3, PWR_VCOPD = 1u << 5, PWR_WRITE_MASK = 0x2D, PWR_RESET = 0x2D;
+[[maybe_unused]] constexpr uint32_t PWR_DSMPD = 1u << 2;  // (stored, no effect on the output: only the checks name it)
+constexpr uint32_t PWR_PD = 1u << 0, PWR_POSTDIVPD = 1u << 3, PWR_VCOPD = 1u << 5, PWR_WRITE_MASK = 0x2D, PWR_RESET = 0x2D;
 constexpr uint32_t FBDIV_MASK = 0xFFF;
 constexpr uint32_t PRIM_WRITE_MASK = 0x77000, PRIM_RESET = 0x77000, PRIM_POSTDIV1_SHIFT = 16, PRIM_POSTDIV2_SHIFT = 12, PRIM_POSTDIV_MASK = 0x7;
 }  // namespace pll_regs

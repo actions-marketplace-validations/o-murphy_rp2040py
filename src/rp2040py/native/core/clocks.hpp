@@ -116,6 +116,8 @@ public:
 
     double clk_sys() const noexcept { return clk_sys_; }
     double clk_peri() const noexcept { return clk_peri_; }
+    // The peripheral clock as the peripherals see it, set by a host that wants a rate the registers do not give (a test, a board's fixed peripheral clock); the next re-derivation overwrites it.
+    void force_clk_peri(double hz) noexcept { clk_peri_ = hz; }
 
     // Every CLK_*_CTRL/DIV back to its power-on value (a divisor of 1.0 is 0x100); the stored registers and FC0 too. clk_sys / clk_peri are `reset_tree()`'s.
     void reset() noexcept {

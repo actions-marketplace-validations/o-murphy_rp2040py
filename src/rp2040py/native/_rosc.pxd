@@ -27,6 +27,7 @@ cdef extern from "rosc.hpp" namespace "rp2040core":
         RoscWarnFn warn
         RoscFrequencyFn frequency_changed
         RoscBitFn random_bit
+        void* random_ctx
         void* ctx
         const int* failed
 
@@ -35,6 +36,7 @@ cdef extern from "rosc.hpp" namespace "rp2040core":
         void init(Clock* clock, const RoscHost& host) noexcept
         void detach() noexcept
         void bind_frequency_listener(RoscFrequencyFn fn, void* ctx) noexcept
+        void bind_random_source(RoscBitFn fn, void* ctx) noexcept
         int64_t raw_write_value() noexcept
         cppbool reset() noexcept
         double frequency() noexcept
@@ -57,10 +59,11 @@ cdef extern from "rosc.hpp" namespace "rp2040core":
         WindowHandler window_handler() noexcept
 
 cdef class RPROSC:
-    cdef RoscBlock _block
+    cdef RoscBlock* _block  # the chip's (`Mcu` builds and wires it), or `_own` for a block made directly (a stand-in chip, a test)
+    cdef RoscBlock _own
     cdef public object rp2040
     cdef public object name
     cdef public object clock
-    cdef public object random_bit
+    cdef object _random_bit
     cdef object _rng
     cdef object _bound_tree  # the native clock tree this block tells directly (None: it tells the chip through Python)

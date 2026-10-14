@@ -237,9 +237,6 @@ cdef class RPUART:
         if callback:
             callback(self.baud_rate)
 
-    def _world_bit_ns(self):
-        return _bit_ns(self.rp2040.clk_peri, self.baud_divider)
-
     def _warn_kind(self, kind, offset, value):
         """A register access the block does not implement, as the logger's message (the chip's host calls this for the block it built)."""
         if kind == kUartWarnRead:

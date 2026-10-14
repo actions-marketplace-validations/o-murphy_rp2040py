@@ -40,7 +40,8 @@ struct RoscHost {
     RoscWarnFn warn = nullptr;
     RoscFrequencyFn frequency_changed = nullptr;
     void* frequency_ctx = nullptr;  // the context `frequency_changed` is called with; null: `ctx` (see `bind_frequency_listener`)
-    RoscBitFn random_bit = nullptr;
+    RoscBitFn random_bit = nullptr;  // optional: without it the block uses its own seeded generator (the same bits on every run)
+    void* random_ctx = nullptr;     // the context `random_bit` is called with; null: `ctx` (see `bind_random_source`)
     void* ctx = nullptr;
     const int* failed = nullptr;  // the shared parked-failure flag (see _pending.pyx)
 };
@@ -76,6 +77,12 @@ public:
     void bind_frequency_listener(RoscFrequencyFn fn, void* ctx) noexcept {
         host_.frequency_changed = fn;
         host_.frequency_ctx = ctx;
+    }
+
+    // A host that wants the bit from somewhere else (a test's deterministic source, real entropy) hands its function in; `fn == nullptr` goes back to the block's own generator.
+    void bind_random_source(RoscBitFn fn, void* ctx) noexcept {
+        host_.random_bit = fn;
+        host_.random_ctx = ctx;
     }
 
     // Takes the block off the clock's rebase list; the owner calls it before the block goes away.
@@ -137,7 +144,11 @@ public:
             case REG_RANDOMBIT:
                 if (enabled) {
                     uint32_t bit = 0;
-                    if (!host_.random_bit(host_.ctx, &bit)) return false;
+                    if (host_.random_bit != nullptr) {
+                        if (!host_.random_bit(host_.random_ctx != nullptr ? host_.random_ctx : host_.ctx, &bit)) return false;
+                    } else {
+                        bit = next_own_bit();
+                    }
                     last_bit = bit & 1u;
                 }
                 *out = last_bit;
@@ -251,6 +262,14 @@ public:
     WindowHandler window_handler() noexcept { return BlockWindow<RoscBlock>::handler(this); }
 
 private:
+    // The block's own source of RANDOMBIT: xorshift32, seeded the same on every run, so a simulation is reproducible. (The pure-Python reference seeds Python's generator; no test compares the two sequences.)
+    uint32_t next_own_bit() noexcept {
+        rng_ ^= rng_ << 13;
+        rng_ ^= rng_ >> 17;
+        rng_ ^= rng_ << 5;
+        return rng_ & 1u;
+    }
+    uint32_t rng_ = 0x2040;
     static void on_rebase(void* ctx, int64_t delta) noexcept {
         auto* self = static_cast<RoscBlock*>(ctx);
         self->count_epoch -= delta;

@@ -34,12 +34,7 @@ XOSC_STATUS_STABLE = 1 << 31
 cdef void _warn_trampoline(void* ctx, uint32_t kind, uint32_t offset, int64_t value) noexcept:
     cdef RPClocks block = <RPClocks> ctx
     try:
-        if kind == kClocksWarnRead:
-            block.warn(f"Unimplemented peripheral read from 0x{offset:x}")
-        elif kind == kClocksWarnReadAtomicArea:
-            block.warn("Unimplemented read from peripheral in the atomic operation region")
-        else:
-            block.warn(f"Unimplemented peripheral write to 0x{offset:x}: 0x{value:x}")
+        block._warn_kind(kind, offset, value)
     except BaseException as error:
         park_error(error)
 
@@ -143,11 +138,22 @@ cdef cppbool _peri_sink(void* ctx, double hz, double old) noexcept:
 
 
 cdef class RPClocks:
-    def __init__(self, rp2040, name):
+    def __init__(self, rp2040, name, mcu_index=-1):
         cdef ClocksHost host
         pll_sys = rp2040.pll_sys  # the chip builds the PLLs first: the tree points at their C++ blocks
         pll_usb = rp2040.pll_usb
         clock = rp2040.clock
+        if mcu_index >= 0:
+            # the chip's C++ `Mcu` has built this block already - with its window on the bus and its notices to the clock tree - and this object is the Python view of it
+            self.rp2040 = rp2040
+            self.name = name
+            self.clock = clock
+            self._pll_sys = pll_sys
+            self._pll_usb = pll_usb
+            self._block = <ClocksBlock*> <size_t> rp2040._native_clocks_address()
+            self.rebind_consumers()
+            return
+        self._block = &self._own
         if not isinstance(clock, SimulationClock):
             raise TypeError(
                 "the native CLOCKS block counts its frequency counter against the native SimulationClock; "
@@ -166,7 +172,7 @@ cdef class RPClocks:
         host.rosc_hz = _rosc_trampoline
         host.ctx = <void*> self
         host.failed = pending_flag()
-        self._block.init(&(<SimulationClock> clock)._clock, host, &(<RPPLL> pll_sys)._block, &(<RPPLL> pll_usb)._block)
+        self._own.init(&(<SimulationClock> clock)._clock, host, (<RPPLL> pll_sys)._block, (<RPPLL> pll_usb)._block)
         self.rebind_consumers()
 
     def release_consumers(self):
@@ -184,6 +190,9 @@ cdef class RPClocks:
         self._block.bind_xosc(NULL)
         self._block.bind_rosc(NULL)
         self._consumers = None
+        tree = getattr(self.rp2040, "_native_tree", None)
+        if tree is not None:
+            tree(False)  # whatever replaces this tree is told through the chip's `update_clocks()`
 
     def rebind_consumers(self):
         """(Re)registers the sinks, in the order of the reference's `update_clocks()`: the chip's `clk_sys`, SysTick, the PWM counters, the host's listeners; the chip's `clk_peri` and the UARTs (their
@@ -191,6 +200,9 @@ cdef class RPClocks:
         pure-Python reference swapped in by an oracle - through its Python methods. Called by the chip whenever one of the four is replaced; the blocks bound now are kept alive until then."""
         rp2040 = self.rp2040
         ppb, pwm, watchdog, rtc, dma = rp2040.ppb, rp2040.pwm, rp2040.watchdog, rp2040.rtc, rp2040.dma
+        tree = getattr(rp2040, "_native_tree", None)
+        if tree is not None:
+            tree(self._block != &self._own)  # the chip's own tree is told by the oscillators and the PLLs inside the Mcu; a tree made directly is told through the chip
         xosc, rosc = rp2040.xosc, rp2040.rosc
         self._consumers = (ppb, pwm, watchdog, rtc, dma, xosc, rosc, self._pll_sys, self._pll_usb)
         self._block.clear_sinks()
@@ -209,23 +221,23 @@ cdef class RPClocks:
         # frequency is the board's (`chip.xosc_freq`, a parameter of the world). Anything else (a recorder, a reference swapped in by an oracle) is read and told through its Python methods.
         self._block.set_crystal_hz(<double> rp2040.xosc_freq)
         if isinstance(xosc, RPXOSC):
-            self._block.bind_xosc(&(<RPXOSC> xosc)._block)
-            (<RPXOSC> xosc)._block.bind_stable_listener(clocks_retune, <void*> &self._block)
+            self._block.bind_xosc((<RPXOSC> xosc)._block)
+            (<RPXOSC> xosc)._block.bind_stable_listener(clocks_retune, <void*> self._block)
             (<RPXOSC> xosc)._bound_tree = self
         else:
             self._block.bind_xosc(NULL)
         if isinstance(rosc, RPROSC):
-            self._block.bind_rosc(&(<RPROSC> rosc)._block)
-            (<RPROSC> rosc)._block.bind_frequency_listener(clocks_retune_hz, <void*> &self._block)
+            self._block.bind_rosc((<RPROSC> rosc)._block)
+            (<RPROSC> rosc)._block.bind_frequency_listener(clocks_retune_hz, <void*> self._block)
             (<RPROSC> rosc)._bound_tree = self
         else:
             self._block.bind_rosc(NULL)
         for pll in (self._pll_sys, self._pll_usb):
-            (<RPPLL> pll)._block.bind_reference(clocks_xosc_hz, <void*> &self._block)
+            (<RPPLL> pll)._block.bind_reference(clocks_xosc_hz, <void*> self._block)
             (<RPPLL> pll)._bound_tree = self
         if isinstance(dma, RPDMA):
             # the DMA reads clk_sys from the tree and the tree keeps its cycle time current: the Python listener it registered for that is not needed any more
-            (<RPDMA> dma)._block.bind_clock(clocks_clk_sys, <void*> &self._block, self._block.clk_sys())
+            (<RPDMA> dma)._block.bind_clock(clocks_clk_sys, <void*> self._block, self._block.clk_sys())
             (<RPDMA> dma)._leave_the_python_clock(self)
             ok = ok and self._block.add_sys_sink(dma_sys_sink, <void*> &(<RPDMA> dma)._block)
         ok = ok and self._block.add_sys_sink(_listeners_sink, <void*> self)
@@ -242,6 +254,15 @@ cdef class RPClocks:
         )
         if not ok:
             raise RuntimeError("the clock tree's sink lists are full")
+
+    def _warn_kind(self, kind, offset, value):
+        """A register access the block does not implement, as the logger's message (the chip's host calls this for the block it built)."""
+        if kind == kClocksWarnRead:
+            self.warn(f"Unimplemented peripheral read from 0x{offset:x}")
+        elif kind == kClocksWarnReadAtomicArea:
+            self.warn("Unimplemented read from peripheral in the atomic operation region")
+        else:
+            self.warn(f"Unimplemented peripheral write to 0x{offset:x}: 0x{value:x}")
 
     @property
     def raw_write_value(self):
@@ -426,8 +447,9 @@ cdef class RPClocks:
         self._block.rtc_div = <uint32_t> (value & 0xFFFFFFFF)
 
     def __dealloc__(self):
-        # Off the clock's alarm list before the block goes away (a no-op if the clock is gone already).
-        self._block.detach()
+        # Off the clock's alarm list before the block goes away (a no-op if the clock is gone already). The chip's own block is the `Mcu`'s to detach.
+        if self._block == &self._own:
+            self._own.detach()
 
     def debug(self, msg):
         self.rp2040.logger.debug(self.name, msg)

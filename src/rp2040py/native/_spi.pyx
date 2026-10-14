@@ -202,9 +202,6 @@ cdef class RPSPI:
         callback(value)
         return True
 
-    def _world_bit_ns(self):
-        return _bit_ns(self.rp2040.clk_peri, self._block.clock_divisor, (self._block.control0 >> SCR_SHIFT) & SCR_MASK)
-
     def _warn_kind(self, kind, offset, value):
         """A register access the block does not implement, as the logger's message (the chip's host calls this for the block it built)."""
         if kind == kSpiWarnRead:

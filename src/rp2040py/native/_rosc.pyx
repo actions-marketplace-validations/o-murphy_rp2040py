@@ -23,24 +23,7 @@ __all__ = ("RPROSC",)
 cdef void _warn_trampoline(void* ctx, uint32_t kind, uint32_t offset, int64_t value) noexcept:
     cdef RPROSC block = <RPROSC> ctx
     try:
-        if kind == kRoscWarnRead:
-            block.warn(f"Unimplemented peripheral read from 0x{offset:x}")
-        elif kind == kRoscWarnReadAtomicArea:
-            block.warn("Unimplemented read from peripheral in the atomic operation region")
-        elif kind == kRoscWarnInvalidFreqRange:
-            block.warn(f"Invalid FREQ_RANGE value written: 0x{value:x}")
-        elif kind == kRoscWarnInvalidEnable:
-            block.warn(f"Invalid ENABLE value written: 0x{value:x}")
-        elif kind == kRoscWarnInvalidFreqPasswd:
-            block.warn(f"Invalid FREQ password written: 0x{value:x}")
-        elif kind == kRoscWarnInvalidDormant:
-            block.warn(f"Invalid DORMANT value written: 0x{value:x}")
-        elif kind == kRoscWarnInvalidDiv:
-            block.warn(f"Invalid DIV value written: 0x{value:x}")
-        elif kind == kRoscWarnInvalidPhasePasswd:
-            block.warn(f"Invalid PHASE password written: 0x{value:x}")
-        else:
-            block.warn(f"Unimplemented peripheral write to 0x{offset:x}: 0x{value:x}")
+        block._warn_kind(kind, offset, value)
     except BaseException as error:
         park_error(error)
 
@@ -59,7 +42,7 @@ cdef cppbool _frequency_trampoline(void* ctx, double hz) noexcept:
 cdef cppbool _bit_trampoline(void* ctx, uint32_t* bit) noexcept:
     cdef RPROSC block = <RPROSC> ctx
     try:
-        bit[0] = <uint32_t> (int(block.random_bit()) & 1)
+        bit[0] = <uint32_t> (int(block._random_bit()) & 1)
     except BaseException as error:
         park_error(error)
         return False
@@ -67,7 +50,7 @@ cdef cppbool _bit_trampoline(void* ctx, uint32_t* bit) noexcept:
 
 
 cdef class RPROSC:
-    def __init__(self, rp2040, name):
+    def __init__(self, rp2040, name, mcu_index=-1):
         cdef RoscHost host
         clock = rp2040.clock
         if not isinstance(clock, SimulationClock):
@@ -79,22 +62,50 @@ cdef class RPROSC:
         self.rp2040 = rp2040
         self.name = name
         self.clock = clock
+        self._random_bit = None
+        if mcu_index >= 0:
+            # the chip's C++ `Mcu` has built this block already - with its window on the bus and its notices to the clock tree - and this object is the Python view of it
+            # (its RANDOMBIT comes from the block's own seeded generator until a source is set: `random_bit = fn`)
+            self._block = <RoscBlock*> <size_t> rp2040._native_rosc_address()
+            return
+        self._block = &self._own
         # The reference's default source, seeded the same way: the same firmware sees the same bits on every run
         self._rng = random.Random(0x2040)
-        self.random_bit = lambda: self._rng.getrandbits(1)
+        self._random_bit = lambda: self._rng.getrandbits(1)
         host.warn = _warn_trampoline
         host.frequency_changed = _frequency_trampoline
         host.random_bit = _bit_trampoline
         host.ctx = <void*> self
         host.failed = pending_flag()
-        self._block.init(&(<SimulationClock> clock)._clock, host)
+        self._own.init(&(<SimulationClock> clock)._clock, host)
 
     def _rejoin_the_python_tree(self, tree):
         """`tree` is going away (the chip's clock tree was replaced): tell the chip through Python again, if this block was telling that tree."""
         if self._bound_tree is not tree:
             return
         self._bound_tree = None
-        self._block.bind_frequency_listener(_frequency_trampoline, NULL)
+        self._block.bind_frequency_listener(_frequency_trampoline, <void*> self)
+
+    def _warn_kind(self, kind, offset, value):
+        """A register access the block does not implement, as the logger's message (the chip's host calls this for the block it built)."""
+        if kind == kRoscWarnRead:
+            self.warn(f"Unimplemented peripheral read from 0x{offset:x}")
+        elif kind == kRoscWarnReadAtomicArea:
+            self.warn("Unimplemented read from peripheral in the atomic operation region")
+        elif kind == kRoscWarnInvalidFreqRange:
+            self.warn(f"Invalid FREQ_RANGE value written: 0x{value:x}")
+        elif kind == kRoscWarnInvalidEnable:
+            self.warn(f"Invalid ENABLE value written: 0x{value:x}")
+        elif kind == kRoscWarnInvalidFreqPasswd:
+            self.warn(f"Invalid FREQ password written: 0x{value:x}")
+        elif kind == kRoscWarnInvalidDormant:
+            self.warn(f"Invalid DORMANT value written: 0x{value:x}")
+        elif kind == kRoscWarnInvalidDiv:
+            self.warn(f"Invalid DIV value written: 0x{value:x}")
+        elif kind == kRoscWarnInvalidPhasePasswd:
+            self.warn(f"Invalid PHASE password written: 0x{value:x}")
+        else:
+            self.warn(f"Unimplemented peripheral write to 0x{offset:x}: 0x{value:x}")
 
     @property
     def raw_write_value(self):
@@ -220,8 +231,23 @@ cdef class RPROSC:
         self._block.hz = <double> value
 
     def __dealloc__(self):
-        # Off the clock's rebase list before the block goes away (a no-op if the clock is gone already).
-        self._block.detach()
+        # Off the clock's rebase list before the block goes away (a no-op if the clock is gone already). The chip's own block is the `Mcu`'s to detach.
+        if self._block == &self._own:
+            self._own.detach()
+
+    @property
+    def random_bit(self):
+        """The source of RANDOMBIT (the reference's hook). On the chip's own block, until one is set, the block uses its own seeded generator and this is None."""
+        return self._random_bit
+
+    @random_bit.setter
+    def random_bit(self, value):
+        self._random_bit = value
+        if self._block != &self._own:  # the chip's block: hand it (or take away) the source
+            if value is None:
+                self._block.bind_random_source(NULL, NULL)
+            else:
+                self._block.bind_random_source(_bit_trampoline, <void*> self)
 
     def reset(self):
         """Back to power-on (enabled, div 16, LOW range). Gated on `PSM.WDSEL`'s ROSC bit by `RP2040.reset()` (see the reference)."""

@@ -42,6 +42,7 @@ cdef extern from "clocks.hpp" namespace "rp2040core":
         cppbool add_rtc_sink(ClockSinkFn fn, void* ctx) noexcept
         double clk_sys() noexcept
         double clk_peri() noexcept
+        void force_clk_peri(double hz) noexcept
         void reset() noexcept
         cppbool reset_tree() noexcept
         double ref_freq() noexcept
@@ -81,7 +82,8 @@ cdef extern from "clock_sinks.hpp" namespace "rp2040core":
     cppbool rtc_rtc_sink(void* ctx, double hz, double old) noexcept
 
 cdef class RPClocks:
-    cdef ClocksBlock _block
+    cdef ClocksBlock* _block  # the chip's (`Mcu` builds and wires it), or `_own` for a block made directly (a stand-in chip, a test)
+    cdef ClocksBlock _own
     cdef public object rp2040
     cdef public object name
     cdef public object clock

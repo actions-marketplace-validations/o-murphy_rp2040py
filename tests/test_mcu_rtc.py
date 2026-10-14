@@ -138,3 +138,24 @@ def test_an_spi_word_on_the_wire_goes_to_the_device_the_host_attached(chip):
     chip.write_uint32(0x4003C000 + 0x04, 0x2)  # SSPCR1: SSE
     chip.write_uint32(0x4003C000 + 0x08, 0x5A)  # SSPDR
     assert words == [0x5A]
+
+
+@pytest.mark.parametrize(
+    "base, name",
+    [
+        (0x40008000, "CLOCKS_BASE"),
+        (0x40028000, "PLL_SYS_BASE"),
+        (0x4002C000, "PLL_USB_BASE"),
+        (0x40024000, "XOSC_BASE"),
+        (0x40060000, "ROSC_BASE"),
+    ],
+)
+def test_the_clock_tree_and_the_oscillators_warn_under_their_own_names(chip, base, name):
+    chip.read_uint32(base + 0x200)
+    assert chip.logger.messages == [("warning", name, "Unimplemented peripheral read from 0x200")]
+
+
+def test_the_peripheral_clock_is_the_trees_and_can_be_fixed_by_the_host(chip):
+    assert chip.clk_peri == 125e6
+    chip.clk_peri = 48e6
+    assert chip.clk_peri == 48e6

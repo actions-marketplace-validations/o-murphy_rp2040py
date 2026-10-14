@@ -27,9 +27,13 @@
 #include "cpu.hpp"
 #include "dma.hpp"
 #include "i2c.hpp"
+#include "pll.hpp"
 #include "pin.hpp"
 #include "pio.hpp"
 #include "busctrl.hpp"
+#include "clock_sinks.hpp"
+#include "clocks.hpp"
+#include "rosc.hpp"
 #include "rtc.hpp"
 #include "spi.hpp"
 #include "syscfg.hpp"
@@ -38,6 +42,7 @@
 #include "timer.hpp"
 #include "uart.hpp"
 #include "vreg.hpp"
+#include "xosc.hpp"
 
 namespace rp2040core {
 
@@ -48,30 +53,31 @@ using McuResult = BatchResult;
 // What the world supplies to a chip that builds itself (step 3a of the revised plan, record 0096): the one interface the blocks go through for what the core cannot answer alone.
 // For now it is the warning (a register access the block does not implement: the logger of the host); the pins, the console and the rest come with the blocks that need them.
 // `warn(ctx, block, kind, offset, value)`: `block` is a `McuBlock`, `kind` the `kRegWarn*` code of core_host.hpp. `failed` is the host's parked-failure flag, shared by every block.
-enum McuBlock : uint32_t { kMcuBlockRtc = 0, kMcuBlockTbman = 1, kMcuBlockBusctrl = 2, kMcuBlockVreg = 3, kMcuBlockSysinfo = 4, kMcuBlockSyscfg = 5, kMcuBlockTimer = 6, kMcuBlockAdc = 7, kMcuBlockUart0 = 8, kMcuBlockUart1 = 9, kMcuBlockSpi0 = 10, kMcuBlockSpi1 = 11, kMcuBlockI2c0 = 12, kMcuBlockI2c1 = 13 };
+enum McuBlock : uint32_t { kMcuBlockRtc = 0, kMcuBlockTbman = 1, kMcuBlockBusctrl = 2, kMcuBlockVreg = 3, kMcuBlockSysinfo = 4, kMcuBlockSyscfg = 5, kMcuBlockTimer = 6, kMcuBlockAdc = 7, kMcuBlockUart0 = 8, kMcuBlockUart1 = 9, kMcuBlockSpi0 = 10, kMcuBlockSpi1 = 11, kMcuBlockI2c0 = 12, kMcuBlockI2c1 = 13, kMcuBlockClocks = 14, kMcuBlockPllSys = 15, kMcuBlockPllUsb = 16, kMcuBlockXosc = 17, kMcuBlockRosc = 18 };
 struct McuHost {
     void (*warn)(void* ctx, uint32_t block, uint32_t kind, uint32_t offset, int64_t value) = nullptr;
     void* ctx = nullptr;
     const int* failed = nullptr;
 
-    // The devices the world attaches to the peripherals, and the clock values the chip does not own yet. Every one is optional: with none, a bus has no device on it (an I2C that NACKs every
-    // address, an SPI that reads back 0, an ADC that converts what the default device gives), a UART's bytes go nowhere and a bit takes no time. `instance` is the UART / SPI / I2C number.
+    // The devices the world attaches to the peripherals, and the oscillators a host may have swapped for its own (`xosc_hz` / `rosc_hz`: the output in Hz, 0 while not running). Every one is optional: with none, a bus has no device on it (an I2C that NACKs every
+    // address, an SPI that reads back 0, an ADC that converts what the default device gives), a UART's bytes go nowhere. `instance` is the UART / SPI / I2C number.
     // False from any of them: the host has parked its error (as everywhere), and the block's access fails with it.
     bool (*uart_byte)(void* ctx, uint32_t instance, uint32_t byte) = nullptr;           // a transmitted byte
     bool (*uart_baud)(void* ctx, uint32_t instance) = nullptr;                          // IBRD/FBRD changed: the host reads the new baud rate off the block
-    bool (*uart_bit_ns)(void* ctx, uint32_t instance, double* nanos) = nullptr;         // the time of one bit on the wire, from clk_peri and the divisor (until the tree is the chip's)
     bool (*spi_transmit)(void* ctx, uint32_t instance, uint32_t value) = nullptr;       // a word is on the wire; the device answers with the block's `complete_transmit()`
-    bool (*spi_bit_ns)(void* ctx, uint32_t instance, double* nanos) = nullptr;          // one SSPCLKOUT period
     bool (*i2c_start)(void* ctx, uint32_t instance, bool repeated) = nullptr;           // the device is asked to produce a (repeated) START ...
     bool (*i2c_connect)(void* ctx, uint32_t instance, uint32_t address, uint32_t mode) = nullptr;  // ... to address a target (mode 0 = write, 1 = read) ...
     bool (*i2c_write)(void* ctx, uint32_t instance, uint32_t value) = nullptr;          // ... to take a byte ...
     bool (*i2c_read)(void* ctx, uint32_t instance, bool ack) = nullptr;                 // ... to give a byte ...
     bool (*i2c_stop)(void* ctx, uint32_t instance) = nullptr;                           // ... to produce a STOP; each answers with the block's `complete_*()`
+    double (*xosc_hz)(void* ctx) = nullptr;                                             // only while the host has put its own crystal block over the chip's
+    double (*rosc_hz)(void* ctx) = nullptr;                                             // ... or its own ring oscillator
     bool (*adc_read)(void* ctx, uint32_t channel) = nullptr;                            // a conversion was requested; the device answers by pushing a sample
     bool (*adc_channel_value)(void* ctx, uint32_t channel, int64_t* value) = nullptr;   // the analog value of a channel
 };
 
 constexpr uint32_t kRtcBase = 0x4005C000;    // RTC_BASE
+constexpr uint32_t kClocksBase = 0x40008000, kPllSysBase = 0x40028000, kPllUsbBase = 0x4002C000, kXoscBase = 0x40024000, kRoscBase = 0x40060000;
 constexpr uint32_t kTimerBase = 0x40054000;  // TIMER_BASE (the lines are 0..3)
 constexpr uint32_t kAdcBase = 0x4004C000;    // ADC_BASE
 constexpr uint32_t kIrqAdc = 22;             // ADC_IRQ_FIFO
@@ -110,6 +116,8 @@ public:
     Mcu& operator=(const Mcu&) = delete;
     ~Mcu() {  // (unlinks every alarm from the clock, which may be gone already: safe)
         rtc_.detach();
+        clocks_.detach();
+        rosc_.detach();
         timer_.detach();
         adc_.detach();
         for (int i = 0; i < 2; ++i) {
@@ -122,6 +130,45 @@ public:
     // after `use_clock()` (the RTC's second is an alarm of that clock) and with the host that answers for what the chip cannot. The blocks come over one at a time (record 0096, 3a): the RTC first.
     void build(const McuHost& host) noexcept {
         host_world_ = host;
+        // The clock tree (CLOCKS, both PLLs, the crystal and the ring oscillator): built before the blocks that run from it. The PLLs take the crystal from the tree, the oscillators and the PLL
+        // registers tell the tree when they change, and the tree reads both oscillators off their blocks. The crystal's frequency is the board's: `set_crystal_hz()`.
+        PllHost ps;
+        ps.warn = block_warn<kMcuBlockPllSys>;
+        ps.changed = tree_changed;
+        ps.ctx = this;
+        ps.failed = host.failed;
+        pll_[0].init(ps);
+        PllHost pu = ps;
+        pu.warn = block_warn<kMcuBlockPllUsb>;
+        pll_[1].init(pu);
+        XoscHost xo;
+        xo.warn = block_warn<kMcuBlockXosc>;
+        xo.stable_changed = tree_changed;
+        xo.ctx = this;
+        xo.failed = host.failed;
+        xosc_.init(xo);
+        RoscHost ro;
+        ro.warn = block_warn<kMcuBlockRosc>;
+        ro.frequency_changed = rosc_changed;  // (no random source: the block has its own)
+        ro.ctx = this;
+        ro.failed = host.failed;
+        rosc_.init(clock_, ro);
+        ClocksHost ch;
+        ch.warn = block_warn<kMcuBlockClocks>;
+        ch.xosc_hz = tree_xosc_hz;  // (read only while a host's own oscillator block stands in for the chip's)
+        ch.rosc_hz = tree_rosc_hz;
+        ch.ctx = this;
+        ch.failed = host.failed;
+        clocks_.init(clock_, ch, &pll_[0], &pll_[1]);
+        for (int i = 0; i < 2; ++i) pll_[i].bind_reference(clocks_xosc_hz, &clocks_);
+        clocks_.bind_xosc(&xosc_);
+        clocks_.bind_rosc(&rosc_);
+        bus.windows.attach(kClocksBase, clocks_.window_handler());
+        bus.windows.attach(kPllSysBase, pll_[0].window_handler());
+        bus.windows.attach(kPllUsbBase, pll_[1].window_handler());
+        bus.windows.attach(kXoscBase, xosc_.window_handler());
+        bus.windows.attach(kRoscBase, rosc_.window_handler());
+
         RtcHost h;
         h.warn = block_warn<kMcuBlockRtc>;
         h.irq = rtc_irq;
@@ -230,6 +277,10 @@ public:
     VregBlock& vreg() noexcept { return vreg_; }
     SysInfoBlock& sysinfo() noexcept { return sysinfo_; }
     SyscfgBlock& syscfg() noexcept { return syscfg_; }
+    ClocksBlock& clocks() noexcept { return clocks_; }
+    PllBlock& pll(uint32_t i) noexcept { return pll_[i & 1]; }
+    XoscBlock& xosc() noexcept { return xosc_; }
+    RoscBlock& rosc() noexcept { return rosc_; }
     TimerBlock& timer() noexcept { return timer_; }
     AdcBlock& adc() noexcept { return adc_; }
     UartBlock& uart(uint32_t i) noexcept { return uart_[i & 1]; }
@@ -268,6 +319,14 @@ public:
         if (asserted) return dma_->set_dreq(number);
         dma_->clear_dreq(number);
         return true;
+    }
+    // The clock tree. The crystal is the board's (12 MHz on a Pico): a parameter of the world. A change of an oscillator or of a PLL re-derives the tree, unless the host has put its own tree over
+    // this one (a reference swapped in by an oracle): `set_tree_hook()` then gets the notice instead.
+    using TreeHook = bool (*)(void* ctx);
+    void set_crystal_hz(double hz) noexcept { clocks_.set_crystal_hz(hz); }
+    void set_tree_hook(TreeHook hook, void* ctx) noexcept {
+        tree_hook_ = hook;
+        tree_hook_ctx_ = ctx;
     }
     void attach_dma(DmaBlock* dma) noexcept { dma_ = dma; }
     void set_dreq_hook(DreqHook hook, void* ctx) noexcept {
@@ -313,6 +372,19 @@ private:
         const McuInstance* i = static_cast<const McuInstance*>(ctx);
         if (i->mcu->host_world_.warn != nullptr) i->mcu->host_world_.warn(i->mcu->host_world_.ctx, Block, kind, offset, value);
     }
+    static bool tree_changed(void* chip) noexcept {
+        Mcu* m = static_cast<Mcu*>(chip);
+        return m->tree_hook_ != nullptr ? m->tree_hook_(m->tree_hook_ctx_) : m->clocks_.retune();
+    }
+    static double tree_xosc_hz(void* chip) noexcept {
+        Mcu* m = static_cast<Mcu*>(chip);
+        return m->host_world_.xosc_hz != nullptr ? m->host_world_.xosc_hz(m->host_world_.ctx) : 0.0;
+    }
+    static double tree_rosc_hz(void* chip) noexcept {
+        Mcu* m = static_cast<Mcu*>(chip);
+        return m->host_world_.rosc_hz != nullptr ? m->host_world_.rosc_hz(m->host_world_.ctx) : 0.0;
+    }
+    static bool rosc_changed(void* chip, double) noexcept { return tree_changed(chip); }
     static bool sysinfo_rom_version(void* chip, uint32_t* version) noexcept {
         *version = static_cast<Mcu*>(chip)->bus.read8(kRomVersionAddress);
         return true;
@@ -351,11 +423,13 @@ private:
         const McuHost& w = i->mcu->host_world_;
         return w.uart_baud == nullptr || w.uart_baud(w.ctx, i->index);
     }
-    static bool uart_bit_ns(void* ctx, double* nanos) noexcept {
+    static bool uart_bit_ns(void* ctx, double* nanos) noexcept {  // 16 x divisor bit-clocks of clk_peri per bit; 0 while the divisor or the clock is zero
         const McuInstance* i = static_cast<const McuInstance*>(ctx);
-        const McuHost& w = i->mcu->host_world_;
-        *nanos = 0.0;
-        return w.uart_bit_ns == nullptr || w.uart_bit_ns(w.ctx, i->index, nanos);
+        const UartBlock& u = i->mcu->uart_[i->index];
+        const double divider = u.int_divisor + u.frac_divisor / 64.0;
+        const double clk_peri = i->mcu->clocks_.clk_peri();
+        *nanos = (divider <= 0 || clk_peri <= 0) ? 0.0 : 16 * divider * 1e9 / clk_peri;
+        return true;
     }
     static bool spi_irq(void* ctx, bool level) noexcept {
         const McuInstance* i = static_cast<const McuInstance*>(ctx);
@@ -371,11 +445,13 @@ private:
         if (w.spi_transmit != nullptr) return w.spi_transmit(w.ctx, i->index, value);
         return i->mcu->spi_[i->index].complete_transmit(0);  // no device: the byte comes straight back as 0
     }
-    static bool spi_bit_ns(void* ctx, double* nanos) noexcept {
+    static bool spi_bit_ns(void* ctx, double* nanos) noexcept {  // one SSPCLKOUT period: clk_peri / (CPSR x (1 + SCR)); 0 while the prescale divisor is 0
         const McuInstance* i = static_cast<const McuInstance*>(ctx);
-        const McuHost& w = i->mcu->host_world_;
-        *nanos = 0.0;
-        return w.spi_bit_ns == nullptr || w.spi_bit_ns(w.ctx, i->index, nanos);
+        const SpiBlock& sp = i->mcu->spi_[i->index];
+        const uint32_t scr = (sp.control0 >> spi_regs::CR0_SCR_SHIFT) & spi_regs::CR0_SCR_MASK;
+        const double frequency = sp.clock_divisor == 0 ? 0.0 : i->mcu->clocks_.clk_peri() / (static_cast<double>(sp.clock_divisor) * (1 + scr));
+        *nanos = frequency != 0.0 ? 1e9 / frequency : 0.0;
+        return true;
     }
     static bool i2c_irq(void* ctx, bool level) noexcept {
         const McuInstance* i = static_cast<const McuInstance*>(ctx);
@@ -409,6 +485,12 @@ private:
     static bool rtc_irq(void* chip, bool level) noexcept { return static_cast<Mcu*>(chip)->set_interrupt(kIrqRtc, level); }
 
     PioBlock pio_[kPioBlocks];
+    ClocksBlock clocks_;
+    PllBlock pll_[2];
+    XoscBlock xosc_;
+    RoscBlock rosc_;
+    TreeHook tree_hook_ = nullptr;
+    void* tree_hook_ctx_ = nullptr;
     RtcBlock rtc_;
     TbmanBlock tbman_;
     BusctrlBlock busctrl_;

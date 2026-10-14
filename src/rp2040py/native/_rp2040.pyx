@@ -36,7 +36,7 @@ from rp2040py.native._memory_map cimport (
     kWordIndexed,
 )
 from rp2040py.native._dma cimport RPDMA
-from rp2040py.native._mcu cimport kMcuBlockBusctrl, kMcuBlockRtc, kMcuBlockSyscfg, kMcuBlockSysinfo, kMcuBlockTbman, kMcuBlockVreg, Mcu, McuHost, kMcuBlockAdc, kMcuBlockI2c0, kMcuBlockI2c1, kMcuBlockSpi0, kMcuBlockSpi1, kMcuBlockTimer, kMcuBlockUart0, kMcuBlockUart1
+from rp2040py.native._mcu cimport kMcuBlockBusctrl, kMcuBlockRtc, kMcuBlockSyscfg, kMcuBlockSysinfo, kMcuBlockTbman, kMcuBlockVreg, Mcu, McuHost, kMcuBlockAdc, kMcuBlockClocks, kMcuBlockI2c0, kMcuBlockI2c1, kMcuBlockPllSys, kMcuBlockPllUsb, kMcuBlockRosc, kMcuBlockSpi0, kMcuBlockSpi1, kMcuBlockTimer, kMcuBlockUart0, kMcuBlockUart1, kMcuBlockXosc
 from rp2040py.native._pending cimport park_error, pending_flag, raise_if_pending
 from rp2040py.native._pio cimport PioBlock
 from rp2040py.native._bus cimport BusHost, kBusWarnInvalidRead, kBusWarnUnalignedRead
@@ -307,6 +307,11 @@ cdef dict _BLOCK_WINDOW = {
     kMcuBlockSpi1: 0x40040,
     kMcuBlockI2c0: 0x40044,
     kMcuBlockI2c1: 0x40048,
+    kMcuBlockClocks: 0x40008,
+    kMcuBlockPllSys: 0x40028,
+    kMcuBlockPllUsb: 0x4002C,
+    kMcuBlockXosc: 0x40024,
+    kMcuBlockRosc: 0x40060,
 }  # the block the `Mcu` built -> its key in the peripherals table
 
 
@@ -342,16 +347,6 @@ cdef bool _w_uart_baud(void* ctx, uint32_t instance) noexcept:
     return True
 
 
-cdef bool _w_uart_bit_ns(void* ctx, uint32_t instance, double* nanos) noexcept:
-    cdef RP2040 chip = <RP2040> ctx
-    try:
-        nanos[0] = <double> chip.uart[instance]._world_bit_ns()
-    except BaseException as error:
-        park_error(error)
-        return False
-    return True
-
-
 cdef bool _w_spi_transmit(void* ctx, uint32_t instance, uint32_t value) noexcept:
     cdef RP2040 chip = <RP2040> ctx
     try:
@@ -361,14 +356,27 @@ cdef bool _w_spi_transmit(void* ctx, uint32_t instance, uint32_t value) noexcept
         return False
 
 
-cdef bool _w_spi_bit_ns(void* ctx, uint32_t instance, double* nanos) noexcept:
+XOSC_STATUS = 0x04
+XOSC_STATUS_STABLE = 1 << 31
+
+
+cdef double _w_xosc_hz(void* ctx) noexcept:
+    # The crystal's output while a host's own XOSC block (not the chip's) is in place: the board's crystal while that block says it is stable.
     cdef RP2040 chip = <RP2040> ctx
     try:
-        nanos[0] = <double> chip.spi[instance]._world_bit_ns()
+        return <double> chip.xosc_freq if chip.xosc.read_uint32(XOSC_STATUS) & XOSC_STATUS_STABLE else 0.0
     except BaseException as error:
         park_error(error)
-        return False
-    return True
+        return 0.0
+
+
+cdef double _w_rosc_hz(void* ctx) noexcept:
+    cdef RP2040 chip = <RP2040> ctx
+    try:
+        return <double> chip.rosc_freq
+    except BaseException as error:
+        park_error(error)
+        return 0.0
 
 
 cdef bool _w_i2c_start(void* ctx, uint32_t instance, bool repeated) noexcept:
@@ -430,6 +438,17 @@ cdef bool _w_adc_channel_value(void* ctx, uint32_t channel, int64_t* value) noex
     cdef RP2040 chip = <RP2040> ctx
     try:
         value[0] = <int64_t> chip.adc._world_channel_value(<object> channel)
+    except BaseException as error:
+        park_error(error)
+        return False
+    return True
+
+
+cdef bool _tree_hook(void* ctx) noexcept:
+    # A tree the host put over the chip's own (an oracle's reference): the oscillators and the PLLs tell the chip, which re-derives through whichever tree it has now.
+    cdef RP2040 chip = <RP2040> ctx
+    try:
+        chip.update_clocks()
     except BaseException as error:
         park_error(error)
         return False
@@ -536,9 +555,9 @@ cdef class RP2040:
         world.failed = pending_flag()
         world.uart_byte = _w_uart_byte
         world.uart_baud = _w_uart_baud
-        world.uart_bit_ns = _w_uart_bit_ns
+        world.xosc_hz = _w_xosc_hz
+        world.rosc_hz = _w_rosc_hz
         world.spi_transmit = _w_spi_transmit
-        world.spi_bit_ns = _w_spi_bit_ns
         world.i2c_start = _w_i2c_start
         world.i2c_connect = _w_i2c_connect
         world.i2c_write = _w_i2c_write
@@ -614,24 +633,24 @@ cdef class RP2040:
 
         # Named, not just entries in `peripherals` below - see _rp2040.py's identical block for
         # why reset() needs each of them by name (0089 Phase 5).
-        self.pll_sys = RPPLL(self, "PLL_SYS_BASE")
-        self.pll_usb = RPPLL(self, "PLL_USB_BASE")
+        self.pll_sys = RPPLL(self, "PLL_SYS_BASE", 0)
+        self.pll_usb = RPPLL(self, "PLL_USB_BASE", 1)
         self.resets = RPReset(self, "RESETS_BASE")
         self.psm = RPPSM(self, "PSM_BASE")
         self.pads_bank0 = RPPADS(self, "PADS_BANK0_BASE", "bank0")
         self.pads_qspi = RPPADS(self, "PADS_QSPI_BASE", "qspi")
         self.timer = RPTimer(self, "TIMER_BASE", 0)
         self.rtc = RP2040RTC(self, "RTC_BASE")
-        self.clocks = RPClocks(self, "CLOCKS_BASE")  # after the PLLs and the blocks it drives (PPB, PWM, watchdog, RTC): the native tree points at their C++ blocks
+        self.clocks = RPClocks(self, "CLOCKS_BASE", 0)  # after the PLLs and the blocks it drives (PPB, PWM, watchdog, RTC): the native tree points at their C++ blocks
         self.busctrl = RPBUSCTRL(self, "BUSCTRL_BASE")
         self.syscfg = RP2040SysCfg(self, "SYSCFG")
         self.xip_ctrl = RPXIPCtrl(self, "XIP_CTRL_BASE")
         self._attach_xip_hooks(self.xip_ctrl)
         self.ssi = RPSSI(self, "SSI")
-        self.xosc = RPXOSC(self, "XOSC_BASE")
+        self.xosc = RPXOSC(self, "XOSC_BASE", 0)
         self.io_bank0 = RPIO(self, "IO_BANK0_BASE")
         self.io_qspi = RPIO(self, "IO_QSPI_BASE", pins=self.qspi)
-        self.rosc = RPROSC(self, "ROSC_BASE")
+        self.rosc = RPROSC(self, "ROSC_BASE", 0)
 
         self.peripherals = {
             0x14000: self.xip_ctrl,
@@ -1307,6 +1326,35 @@ cdef class RP2040:
 
     def _native_i2c_address(self, index):
         return <size_t> &self._mcu.i2c(<uint32_t> index)
+
+    @property
+    def clk_peri(self):
+        """The peripheral clock, in Hz: the C++ clock tree's value (the UARTs' and SPIs' bit times follow it). Assigning sets that value, as a host or a test that fixes the rate does."""
+        return self._mcu.clocks().clk_peri()
+
+    @clk_peri.setter
+    def clk_peri(self, value) -> None:
+        self._mcu.clocks().force_clk_peri(<double> value)
+
+    def _native_clocks_address(self):
+        """The address of the CLOCKS block the `Mcu` built (the tree), for the shell that is its Python view."""
+        return <size_t> &self._mcu.clocks()
+
+    def _native_pll_address(self, index):
+        return <size_t> &self._mcu.pll(<uint32_t> index)
+
+    def _native_xosc_address(self):
+        return <size_t> &self._mcu.xosc()
+
+    def _native_rosc_address(self):
+        return <size_t> &self._mcu.rosc()
+
+    def _native_tree(self, native):
+        """Which tree the oscillators and the PLLs tell: the `Mcu`'s own (`native`), or the chip's Python `update_clocks()` (a tree that replaced it)."""
+        if native:
+            self._mcu.set_tree_hook(NULL, NULL)
+        else:
+            self._mcu.set_tree_hook(_tree_hook, <void*> self)
 
     def _native_tbman_address(self):
         """The address of the TBMAN block the `Mcu` built, for the shell that is its Python view."""

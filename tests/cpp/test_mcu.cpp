@@ -237,6 +237,8 @@ int main() {
             int warns = 0;
             uint32_t block = 99, kind = 99, offset = 0;
             int transmits = 0;
+            int uart_bytes = 0;
+            uint32_t uart_instance = 99, uart_value = 0;
             uint32_t transmit_instance = 99, transmit_value = 0;
         } world;
         Mcu m;
@@ -250,15 +252,18 @@ int main() {
             w->kind = kind;
             w->offset = offset;
         };
+        host.uart_byte = [](void* ctx, uint32_t instance, uint32_t byte) {
+            World* w = static_cast<World*>(ctx);
+            ++w->uart_bytes;
+            w->uart_instance = instance;
+            w->uart_value = byte;
+            return true;
+        };
         host.spi_transmit = [](void* ctx, uint32_t instance, uint32_t value) {
             World* w = static_cast<World*>(ctx);
             ++w->transmits;
             w->transmit_instance = instance;
             w->transmit_value = value;
-            return true;
-        };
-        host.spi_bit_ns = [](void*, uint32_t, double* nanos) {
-            *nanos = 1000.0;  // the host answers for the bit clock: 1 us per SSPCLKOUT period
             return true;
         };
         m.build(host);
@@ -352,6 +357,30 @@ int main() {
         m.bus.write32(bases[1] + 0x1C, 1);  // ADC.INTF: forces ADC_IRQ_FIFO
         CHECK((m.cpu.pending_interrupts & (1u << 22)) != 0);
         m.attach_dma(nullptr);
+
+        // The clock tree and the oscillators (group 3): built by the same call, and the tree is the chip's own - the UART's bit time comes from its clk_peri, not from the host.
+        const uint32_t tree[5] = {0x40008000, 0x40028000, 0x4002C000, 0x40024000, 0x40060000};
+        const uint32_t tree_ids[5] = {kMcuBlockClocks, kMcuBlockPllSys, kMcuBlockPllUsb, kMcuBlockXosc, kMcuBlockRosc};
+        for (int k = 0; k < 5; ++k) {
+            const int w = world.warns;
+            (void)m.bus.read32(tree[k] + 0x200);
+            CHECK(world.warns == w + 1 && world.block == tree_ids[k] && world.offset == 0x200);
+        }
+        CHECK(m.clocks().clk_sys() == 125e6 && m.clocks().clk_peri() == 125e6);  // the tree's power-on rate
+        int ones = 0;
+        for (int k = 0; k < 64; ++k) ones += static_cast<int>(m.bus.read32(0x40060000 + 0x1C) & 1);  // ROSC.RANDOMBIT: the block's own generator, with no host source
+        CHECK(ones > 0 && ones < 64);
+        // 115200 baud on a 125 MHz clk_peri: IBRD 67, FBRD 52, 8N1 -> a frame is 10 bits of 8.68 us; the byte reaches the host after the frame, not before.
+        const int bytes_before = world.uart_bytes;
+        m.bus.write32(0x40038000 + 0x24, 67);    // UART1 UARTIBRD
+        m.bus.write32(0x40038000 + 0x28, 52);    // UARTFBRD
+        m.bus.write32(0x40038000 + 0x2C, 0x60);  // UARTLCR_H: 8 data bits
+        m.bus.write32(0x40038000 + 0x30, 0x301); // UARTCR
+        m.bus.write32(0x40038000 + 0x00, 0x42);
+        CHECK(m.clock().tick(50e3));
+        CHECK(world.uart_bytes == bytes_before);
+        CHECK(m.clock().tick(50e3));
+        CHECK(world.uart_bytes == bytes_before + 1 && world.uart_instance == 1 && world.uart_value == 0x42);
     }
 
     if (failures == 0) std::printf("test_mcu: ok\n");

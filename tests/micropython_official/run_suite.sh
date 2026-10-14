@@ -42,6 +42,13 @@ start_emulator() {
   done
 }
 
+# The emulator's idle time is not paced: while the board waits for the host, simulated time runs far ahead of the wall clock (years per few seconds), and the RTC with it. A persistent
+# board therefore reaches a date past 2136 after enough files, where MicroPython's 32-bit seconds-since-2000 wrap and time.time() / os.stat() times disagree with time_ns() by 2**32 s
+# (extmod/time_time_ns.py, extmod/vfs_lfs_mtime.py). A real board's RTC is set by whoever runs the tests; so is this one, before each file.
+set_clock() {
+  timeout 60 "$VIRTUAL_ENV/bin/mpremote" connect "$DEV" exec "import machine; machine.RTC().datetime((2024, 1, 1, 0, 0, 0, 0, 0))" >/dev/null 2>&1 || true
+}
+
 stop_emulator() {
   [ -n "$EMU_PID" ] || return 0
   kill -TERM -- "-$EMU_PID" 2>/dev/null  # the whole group (setsid made the wrapper its leader)
@@ -77,13 +84,14 @@ for t in $(for g in "${GLOBS[@]}"; do ls $g 2>/dev/null; done | sort); do
     echo "| $t | :fast_forward: SKIP (needs core 1) |" >>"$BAD"
     echo "$t: SKIP (needs core 1)"; skip=$((skip + 1)); continue
   fi
+  set_clock
   timeout "$PER_TEST_TIMEOUT" "$VIRTUAL_ENV/bin/python" run-tests.py -t "$DEV" -r "$WORK/res" "$t" >"$log" 2>&1
   rc=$?
   if [ $rc = 124 ] && [ "${RETRY_HANG:-1}" = 1 ]; then
     # A hang on a shared CI runner is not always the test's: one (misc/non_compliant_lexer.py, 6 s on a workstation, passed on the re-run of the same commit) stopped a gating group. The emulator is
     # restarted and the file run once more; a file that hangs twice is a HANG, one that passes the second time is reported as retried so the flake stays visible.
     echo "$t: HANG, retrying once on a fresh emulator"
-    stop_emulator; start_emulator
+    stop_emulator; start_emulator; set_clock
     timeout "$PER_TEST_TIMEOUT" "$VIRTUAL_ENV/bin/python" run-tests.py -t "$DEV" -r "$WORK/res" "$t" >"$log" 2>&1
     rc=$?
     [ $rc != 124 ] && echo "| $t | hung once, then ran |" >>"$RETRIED"

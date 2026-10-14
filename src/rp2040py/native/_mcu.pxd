@@ -11,6 +11,7 @@ from rp2040py.native._cpu cimport Cpu
 from rp2040py.native._dma cimport DmaBlock
 from rp2040py.native._pio cimport PioBlock
 from rp2040py.native._rtc cimport RtcBlock
+from rp2040py.native._tbman cimport TbmanBlock
 
 cdef extern from "mcu.hpp" namespace "rp2040core":
     ctypedef BatchParams McuLimits
@@ -21,6 +22,7 @@ cdef extern from "mcu.hpp" namespace "rp2040core":
     ctypedef bool (*McuDreqHook)(void* ctx, uint32_t number, bool asserted) noexcept
 
     cdef const uint32_t kMcuBlockRtc
+    cdef const uint32_t kMcuBlockTbman
 
     cdef cppclass McuHost:
         McuHost() noexcept
@@ -49,6 +51,7 @@ cdef extern from "mcu.hpp" namespace "rp2040core":
         PioBlock* pio_block(int index) noexcept
         void build(const McuHost& host) noexcept
         RtcBlock& rtc() noexcept
+        TbmanBlock& tbman() noexcept
         void set_clk_changed_flag(const uint8_t* flag) noexcept
         void set_monotonic(McuMonotonicFn monotonic) noexcept
         int run(const McuLimits& limits, McuResult* result) noexcept

@@ -36,7 +36,7 @@ from rp2040py.native._memory_map cimport (
     kWordIndexed,
 )
 from rp2040py.native._dma cimport RPDMA
-from rp2040py.native._mcu cimport kMcuBlockRtc, Mcu, McuHost
+from rp2040py.native._mcu cimport kMcuBlockRtc, kMcuBlockTbman, Mcu, McuHost
 from rp2040py.native._pending cimport park_error, pending_flag, raise_if_pending
 from rp2040py.native._pio cimport PioBlock
 from rp2040py.native._bus cimport BusHost, kBusWarnInvalidRead, kBusWarnUnalignedRead
@@ -292,12 +292,17 @@ cdef bool _irq_hook(void* ctx, uint32_t irq, bool level) noexcept:
     return True
 
 
+cdef dict _BLOCK_WINDOW = {kMcuBlockRtc: 0x4005C, kMcuBlockTbman: 0x4006C}  # the block the `Mcu` built -> its key in the peripherals table
+
+
 cdef void _mcu_warn(void* ctx, uint32_t block, uint32_t kind, uint32_t offset, int64_t value) noexcept:
-    # What a block that the `Mcu` built says about a register access it does not implement: the shell of that block words it for the logger.
+    # What a block that the `Mcu` built says about a register access it does not implement: the Python view of that block (the one in the peripherals table) words it for the logger.
     cdef RP2040 chip = <RP2040> ctx
     try:
-        if block == kMcuBlockRtc:
-            chip._rtc._warn_kind(kind, offset, value)
+        view = chip._peripherals.get(_BLOCK_WINDOW[block])
+        warn = getattr(view, "_warn_kind", None)
+        if warn is not None:
+            warn(kind, offset, value)
     except BaseException as error:
         park_error(error)
 
@@ -1129,6 +1134,10 @@ cdef class RP2040:
     @property
     def gpio_values(self) -> int:
         return self._gpio_bank.input_values()
+
+    def _native_tbman_address(self):
+        """The address of the TBMAN block the `Mcu` built, for the shell that is its Python view."""
+        return <size_t> &self._mcu.tbman()
 
     def _native_rtc_address(self):
         """The address of the RTC block the `Mcu` built, for the shell that is its Python view."""

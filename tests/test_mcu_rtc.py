@@ -66,3 +66,14 @@ def test_a_replaced_rtc_takes_the_window_over(chip):
 
     chip.peripherals[0x4005C] = Stand()
     assert chip.read_uint32(RTC + CLKDIV_M1) == 0xABCD
+
+
+TBMAN = 0x4006C000
+
+
+def test_tbman_built_by_the_chip_says_asic_and_warns_for_a_register_that_does_not_exist(chip):
+    assert chip.read_uint32(TBMAN) == 1
+    chip.write_uint32(TBMAN, 0xFFFFFFFF)  # read-only: no effect, no warning
+    assert chip.logger.messages == []
+    chip.read_uint32(TBMAN + 0x10)
+    assert chip.logger.messages == [("warning", "TBMAN_BASE", "Unimplemented peripheral read from 0x10")]

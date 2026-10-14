@@ -269,6 +269,15 @@ int main() {
         CHECK(m.clock().tick(2e9));
         CHECK(m.bus.read32(rtc + 0x1C) == ((5u << 24) | 0u));  // RTC_0: Friday, 00:00:00 (dotw 4 -> 5)
         CHECK(m.bus.read32(rtc + 0x18) == ((2024u << 12) | (3u << 8) | 1u));  // RTC_1: 2024-03-01
+
+        // TBMAN, built by the same call: PLATFORM reads ASIC and ignores a write, a register that does not exist warns with the TBMAN's block id.
+        const uint32_t tbman = 0x4006C000;
+        const int warns = world.warns;
+        CHECK(m.bus.read32(tbman) == 1);
+        m.bus.write32(tbman, 0xFFFFFFFFu);
+        CHECK(m.bus.read32(tbman) == 1 && world.warns == warns);
+        (void)m.bus.read32(tbman + 0x10);
+        CHECK(world.warns == warns + 1 && world.block == kMcuBlockTbman && world.kind == kTbmanWarnRead && world.offset == 0x10);
     }
 
     if (failures == 0) std::printf("test_mcu: ok\n");

@@ -36,6 +36,7 @@
 #include "pin.hpp"
 #include "pio.hpp"
 #include "ssi.hpp"
+#include "usb.hpp"
 #include "xip_ctrl.hpp"
 #include "busctrl.hpp"
 #include "clock_sinks.hpp"
@@ -62,7 +63,7 @@ using McuResult = BatchResult;
 // What the world supplies to a chip that builds itself (step 3a of the revised plan, record 0096): the one interface the blocks go through for what the core cannot answer alone.
 // For now it is the warning (a register access the block does not implement: the logger of the host); the pins, the console and the rest come with the blocks that need them.
 // `warn(ctx, block, kind, offset, value)`: `block` is a `McuBlock`, `kind` the `kRegWarn*` code of core_host.hpp. `failed` is the host's parked-failure flag, shared by every block.
-enum McuBlock : uint32_t { kMcuBlockRtc = 0, kMcuBlockTbman = 1, kMcuBlockBusctrl = 2, kMcuBlockVreg = 3, kMcuBlockSysinfo = 4, kMcuBlockSyscfg = 5, kMcuBlockTimer = 6, kMcuBlockAdc = 7, kMcuBlockUart0 = 8, kMcuBlockUart1 = 9, kMcuBlockSpi0 = 10, kMcuBlockSpi1 = 11, kMcuBlockI2c0 = 12, kMcuBlockI2c1 = 13, kMcuBlockClocks = 14, kMcuBlockPllSys = 15, kMcuBlockPllUsb = 16, kMcuBlockXosc = 17, kMcuBlockRosc = 18, kMcuBlockPpb = 19, kMcuBlockWatchdog = 20, kMcuBlockDma = 21, kMcuBlockIoBank0 = 22, kMcuBlockIoQspi = 23, kMcuBlockPadsBank0 = 24, kMcuBlockPadsQspi = 25, kMcuBlockSio = 26, kMcuBlockPwm = 27, kMcuBlockPio0 = 28, kMcuBlockPio1 = 29, kMcuBlockSsi = 30, kMcuBlockXip = 31 };
+enum McuBlock : uint32_t { kMcuBlockRtc = 0, kMcuBlockTbman = 1, kMcuBlockBusctrl = 2, kMcuBlockVreg = 3, kMcuBlockSysinfo = 4, kMcuBlockSyscfg = 5, kMcuBlockTimer = 6, kMcuBlockAdc = 7, kMcuBlockUart0 = 8, kMcuBlockUart1 = 9, kMcuBlockSpi0 = 10, kMcuBlockSpi1 = 11, kMcuBlockI2c0 = 12, kMcuBlockI2c1 = 13, kMcuBlockClocks = 14, kMcuBlockPllSys = 15, kMcuBlockPllUsb = 16, kMcuBlockXosc = 17, kMcuBlockRosc = 18, kMcuBlockPpb = 19, kMcuBlockWatchdog = 20, kMcuBlockDma = 21, kMcuBlockIoBank0 = 22, kMcuBlockIoQspi = 23, kMcuBlockPadsBank0 = 24, kMcuBlockPadsQspi = 25, kMcuBlockSio = 26, kMcuBlockPwm = 27, kMcuBlockPio0 = 28, kMcuBlockPio1 = 29, kMcuBlockSsi = 30, kMcuBlockXip = 31, kMcuBlockUsb = 32 };
 struct McuHost {
     void (*warn)(void* ctx, uint32_t block, uint32_t kind, uint32_t offset, int64_t value) = nullptr;
     void* ctx = nullptr;
@@ -103,6 +104,7 @@ struct McuHost {
 
 constexpr uint32_t kRtcBase = 0x4005C000;    // RTC_BASE
 constexpr uint32_t kPwmBase = 0x40050000, kIrqPwm = 4, kDreqPwm0 = 24;  // PWM_BASE, PWM_IRQ_WRAP, DREQ_PWM_WRAP0
+constexpr uint32_t kUsbBase = 0x50110000, kIrqUsb = 5;  // USBCTRL_REGS_BASE, USBCTRL_IRQ
 constexpr uint32_t kXipCtrlBase = 0x14000000, kSsiBase = 0x18000000, kXipAuxBase = 0x50400000, kIrqXip = 6, kDreqXipStream = 37, kDreqXipSsiTx = 38, kDreqXipSsiRx = 39;  // XIP_CTRL_BASE, XIP_SSI_BASE, XIP_AUX_BASE, XIP_IRQ, DREQ_XIP_STREAM / _SSITX / _SSIRX
 constexpr uint32_t kPio0Base = 0x50200000, kPio1Base = 0x50300000, kIrqPio0 = 7, kIrqPio1 = 9;  // PIO0_BASE, PIO1_BASE, PIO0_IRQ_0, PIO1_IRQ_0
 constexpr uint32_t kIoBank0Base = 0x40014000, kIoQspiBase = 0x40018000, kPadsBank0Base = 0x4001C000, kPadsQspiBase = 0x40020000;
@@ -158,6 +160,7 @@ public:
         pwm_.detach();
         ssi_.detach();
         xip_.detach();
+        usb_.detach();
         adc_.detach();
         for (int i = 0; i < 2; ++i) {
             uart_[i].detach();
@@ -355,6 +358,19 @@ public:
             (void)xip_.reset();
         }
 
+        // The USB controller: its line is the chip's own; the other end of the wire (the host's device, endpoints and callbacks) is the host's, given to the block by `usb().set_wire()`. The DPRAM is the
+        // bus's memory region, handed over by `set_usb_dpram`.
+        if (usb_dpram_ != nullptr) {
+            UsbHost uh;
+            uh.irq = usb_irq;
+            uh.irq_ctx = this;
+            uh.warn = block_warn<kMcuBlockUsb>;
+            uh.warn_ctx = this;
+            uh.failed = host.failed;
+            usb_.init(clock_, usb_dpram_, uh);
+            bus.windows.attach(kUsbBase, usb_.window_handler());
+        }
+
         RtcHost h;
         h.warn = block_warn<kMcuBlockRtc>;
         h.irq = rtc_irq;
@@ -539,6 +555,9 @@ public:
         flash_ = data;
         flash_size_ = size;
     }
+    // The USB DPRAM: the host's buffer (4 KiB), which outlives the chip. Set before `build()`.
+    void set_usb_dpram(uint8_t* data) noexcept { usb_dpram_ = data; }
+    UsbBlock& usb() noexcept { return usb_; }
     SsiBlock& ssi() noexcept { return ssi_; }
     XipBlock& xip() noexcept { return xip_; }
     void set_pio_world(uint32_t index, bool world) noexcept { pio_world_[index & 1] = world; }
@@ -616,6 +635,7 @@ private:
             for (uint32_t pin = 0; pin < 30; ++pin) pio_[p].bind_pin(pin, pins_world_[0] ? nullptr : &gpio_bank_, pin);
         }
     }
+    static bool usb_irq(void* chip, bool level) noexcept { return static_cast<Mcu*>(chip)->set_interrupt(kIrqUsb, level); }
     // The SSI's and XIP_CTRL's hosts.
     static bool ssi_irq(void* chip, bool level) noexcept { return static_cast<Mcu*>(chip)->set_interrupt(kIrqXip, level); }
     static bool ssi_dreq(void* chip, bool tx, bool asserted) noexcept { return static_cast<Mcu*>(chip)->set_dreq(tx ? kDreqXipSsiTx : kDreqXipSsiRx, asserted); }
@@ -862,6 +882,8 @@ private:
     PwmBlock pwm_;
     McuInstance pio_ctx_[2];
     SsiBlock ssi_;
+    UsbBlock usb_;
+    uint8_t* usb_dpram_ = nullptr;
     XipBlock xip_;
     uint8_t* flash_ = nullptr;
     uint32_t flash_size_ = 0;

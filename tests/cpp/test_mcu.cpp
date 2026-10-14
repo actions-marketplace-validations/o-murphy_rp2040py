@@ -24,6 +24,7 @@ static double monotonic(void*) noexcept { return fake_now += fake_step; }
 static bool alarm_fail(void*) noexcept { return false; }
 
 static uint8_t flash_image[65536];
+static uint8_t usb_dpram[4096];
 static DmaBlock dma_probe;  // (never initialised: only its DREQ bits are read)
 
 int main() {
@@ -294,6 +295,7 @@ int main() {
         };
         for (uint32_t i = 0; i < sizeof flash_image; ++i) flash_image[i] = static_cast<uint8_t>(i * 7 + 3);
         m.set_flash(flash_image, sizeof flash_image);
+        m.set_usb_dpram(usb_dpram);
         m.build(host);
         const uint32_t rtc = 0x4005C000;  // (literal: the constant under test must not vouch for itself)
         CHECK((m.cpu.pending_interrupts & (1u << 25)) == 0);
@@ -546,6 +548,31 @@ int main() {
         CHECK(m.clock().tick(1e6));
         CHECK(m.dma().dreq(37));
         CHECK(m.bus.read32(0x50400000) == (flash_image[0x100] | flash_image[0x101] << 8 | flash_image[0x102] << 16 | static_cast<uint32_t>(flash_image[0x103]) << 24));
+
+        // USB (group 7): the Mcu builds the controller on the chip's DPRAM - its window, its warning under its own id, and its line (USBCTRL_IRQ, 5); the host's end of the wire is given to the block afterwards
+        // and must not take the line or the warning with it.
+        {
+            const int w = world.warns;
+            (void)m.bus.read32(0x50110000 + 0x300);
+            CHECK(world.warns == w + 1 && world.block == kMcuBlockUsb);
+        }
+        {
+            UsbHost wire;
+            int marker = 0;
+            wire.ctx = &marker;  // (a host's context: neither the line nor the warning goes through it)
+            m.usb().set_wire(wire);
+        }
+        CHECK((m.cpu.pending_interrupts & (1u << 5)) == 0);
+        m.bus.write32(0x50110000 + 0x90, 1);  // INTE
+        m.bus.write32(0x50110000 + 0x94, 1);  // INTF: forced
+        CHECK((m.cpu.pending_interrupts & (1u << 5)) != 0);
+        m.bus.write32(0x50110000 + 0x94, 0);
+        CHECK((m.cpu.pending_interrupts & (1u << 5)) == 0);
+        {
+            const int w = world.warns;
+            (void)m.bus.read32(0x50110000 + 0x300);
+            CHECK(world.warns == w + 1 && world.block == kMcuBlockUsb);  // still the chip's warning after the wire
+        }
     }
 
     if (failures == 0) std::printf("test_mcu: ok\n");

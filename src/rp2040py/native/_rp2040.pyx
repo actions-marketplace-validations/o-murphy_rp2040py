@@ -36,7 +36,7 @@ from rp2040py.native._memory_map cimport (
     kWordIndexed,
 )
 from rp2040py.native._dma cimport RPDMA
-from rp2040py.native._mcu cimport kMcuBlockBusctrl, kMcuBlockRtc, kMcuBlockSyscfg, kMcuBlockSysinfo, kMcuBlockTbman, kMcuBlockVreg, Mcu, McuHost, kMcuBlockAdc, kMcuBlockClocks, kMcuBlockDma, kMcuBlockI2c0, kMcuBlockI2c1, kMcuBlockIoBank0, kMcuBlockIoQspi, kMcuBlockPadsBank0, kMcuBlockPadsQspi, kMcuBlockPllSys, kMcuBlockPllUsb, kMcuBlockPpb, kMcuBlockPio0, kMcuBlockPio1, kMcuBlockPwm, kMcuBlockRosc, kMcuBlockSsi, kMcuBlockXip, kMcuBlockSio, kMcuBlockSpi0, kMcuBlockSpi1, kMcuBlockTimer, kMcuBlockUart0, kMcuBlockUart1, kMcuBlockWatchdog, kMcuBlockXosc
+from rp2040py.native._mcu cimport kMcuBlockBusctrl, kMcuBlockRtc, kMcuBlockSyscfg, kMcuBlockSysinfo, kMcuBlockTbman, kMcuBlockVreg, Mcu, McuHost, kMcuBlockAdc, kMcuBlockClocks, kMcuBlockDma, kMcuBlockI2c0, kMcuBlockI2c1, kMcuBlockIoBank0, kMcuBlockIoQspi, kMcuBlockPadsBank0, kMcuBlockPadsQspi, kMcuBlockPllSys, kMcuBlockPllUsb, kMcuBlockPpb, kMcuBlockPio0, kMcuBlockPio1, kMcuBlockPwm, kMcuBlockRosc, kMcuBlockSsi, kMcuBlockUsb, kMcuBlockXip, kMcuBlockSio, kMcuBlockSpi0, kMcuBlockSpi1, kMcuBlockTimer, kMcuBlockUart0, kMcuBlockUart1, kMcuBlockWatchdog, kMcuBlockXosc
 from rp2040py.native._pending cimport park_error, pending_flag, raise_if_pending
 from rp2040py.native._pio cimport PioBlock
 from rp2040py.native._bus cimport BusHost, kBusWarnInvalidRead, kBusWarnUnalignedRead
@@ -323,6 +323,7 @@ cdef dict _BLOCK_WINDOW = {
     kMcuBlockPio1: 0x50300,
     kMcuBlockSsi: 0x18000,
     kMcuBlockXip: 0x14000,
+    kMcuBlockUsb: 0x50110,
 }  # the block the `Mcu` built -> its key in the peripherals table
 
 
@@ -704,6 +705,7 @@ cdef class RP2040:
         world.clk_sys = _w_clk_sys
         world.adc_channel_value = _w_adc_channel_value
         self._mcu.set_flash(<uint8_t*> &self._flash[0], <uint32_t> self.flash_byte_size)
+        self._mcu.set_usb_dpram(<uint8_t*> &self._usb_dpram[0])
         self._mcu.build(world)
 
         # Clocks
@@ -1513,6 +1515,9 @@ cdef class RP2040:
 
     def _native_ssi_address(self):
         return <size_t> &self._mcu.ssi()
+
+    def _native_usb_address(self):
+        return <size_t> &self._mcu.usb()
 
     def _native_xip_address(self):
         return <size_t> &self._mcu.xip()

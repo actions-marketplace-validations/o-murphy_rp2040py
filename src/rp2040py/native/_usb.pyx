@@ -17,28 +17,15 @@ from libcpp cimport bool as cppbool
 
 from cpython.bytes cimport PyBytes_AsString, PyBytes_FromStringAndSize
 
-from rp2040py.native._mcu_irq cimport Mcu, McuIrqLine, mcu_irq_line, native_mcu
 from rp2040py.native._pending cimport park_error, pending_flag, raise_if_pending
 from rp2040py.native._window_map cimport WindowHandler
-from rp2040py.native._simulation_clock cimport SimulationClock
 
-from rp2040py.irq import IRQ
 from rp2040py.usb.usb_device import StandardRequest, parse_setup_packet
 
 __all__ = ("RPUSBController",)
 
 cdef enum:
     ENDPOINTS = 16
-
-
-cdef cppbool _irq_trampoline(void* ctx, cppbool level) noexcept:
-    cdef RPUSBController usb = <RPUSBController> ctx
-    try:
-        usb.rp2040.set_interrupt(IRQ.USBCTRL, level)
-    except BaseException as error:
-        park_error(error)
-        return False
-    return True
 
 
 cdef cppbool _enabled_trampoline(void* ctx) noexcept:
@@ -233,19 +220,6 @@ cdef cppbool _device_out_trampoline(void* ctx, uint32_t endpoint, const uint8_t*
     return True
 
 
-cdef void _warn_trampoline(void* ctx, uint32_t kind, uint32_t offset, int64_t value) noexcept:
-    cdef RPUSBController usb = <RPUSBController> ctx
-    try:
-        if kind == kUsbWarnRead:
-            usb.warn(f"Unimplemented peripheral read from 0x{offset:x}")
-        elif kind == kUsbWarnReadAtomicArea:
-            usb.warn("Unimplemented read from peripheral in the atomic operation region")
-        else:
-            usb.warn(f"Unimplemented peripheral write to 0x{offset:x}: 0x{value:x}")
-    except BaseException as error:
-        park_error(error)
-
-
 cdef class _HalfList:
     """One of the reference's Python lists of buffer halves (a `_buff_done[slot]` or a `_pending_reads[endpoint]`), as a live view of the block's bounded array."""
 
@@ -344,15 +318,13 @@ cdef class _Words:
 cdef class RPUSBController:
     def __init__(self, rp2040, name):
         cdef UsbHost host
-        cdef uint8_t[::1] memory
-        clock = rp2040.clock
-        if not isinstance(clock, SimulationClock):
+        native_usb = getattr(rp2040, "_native_usb_address", None)
+        if native_usb is None:
             raise TypeError(
-                "the native USB controller schedules its transfer alarms on the native SimulationClock; "
-                f"{type(rp2040).__name__} with {type(clock).__name__} is not that "
+                f"the native USB controller is a view of a block of the native chip's C++ core; {type(rp2040).__name__} is not that "
                 "(use the pure-Python peripherals/_usb.RPUSBController with it)"
             )
-        self.clock = clock
+        self.clock = rp2040.clock
         self.rp2040 = rp2040
         self.name = name
         self._device = None
@@ -368,17 +340,9 @@ cdef class RPUSBController:
         self.on_endpoint_read = None
         # The DPRAM is the chip's own 4 kB bytearray (a real memory region of the bus); this view keeps it from being resized under the block's pointer.
         self._dpram_view = rp2040.usb_dpram
-        memory = self._dpram_view
-        mcu = native_mcu(rp2040)
-        if mcu != NULL:
-            # the line goes from the C++ block straight to the chip's CPU, with no Python in between
-            self._irq_line.mcu = mcu
-            self._irq_line.line = <uint32_t> int(IRQ.USBCTRL)
-            host.irq = mcu_irq_line
-            host.irq_ctx = &self._irq_line
-        else:
-            host.irq = _irq_trampoline
-            host.irq_ctx = NULL
+        # The chip's `Mcu` builds the block (its window, its line, its DPRAM pointer and its alarms on the chip's clock); this object is the other end of the wire: the callbacks below are the host's.
+        self._from_mcu = True
+        self._block = <UsbBlock*> <size_t> native_usb()
         host.usb_enabled = _enabled_trampoline
         host.reset_received = _reset_received_trampoline
         host.endpoint_read = _endpoint_read_trampoline
@@ -392,14 +356,18 @@ cdef class RPUSBController:
         host.pending_response = _pending_trampoline
         host.device_in = _device_in_trampoline
         host.device_out = _device_out_trampoline
-        host.warn = _warn_trampoline
         host.ctx = <void*> self
-        host.failed = pending_flag()
-        self._block.init(&(<SimulationClock> clock)._clock, &memory[0], host)
+        self._block.set_wire(host)
+        rp2040._usb_wire_view = self  # (the block keeps a raw pointer to this object: the chip keeps the object alive)
 
-    def __dealloc__(self):
-        # Safe whichever of this block and its clock the collector frees first: the C++ clock unlinks its alarms when it dies.
-        self._block.detach()
+    def _warn_kind(self, kind, offset, value):
+        """A register access the block does not implement, as the logger's message (the chip's host calls this for the block it built)."""
+        if kind == kUsbWarnRead:
+            self.warn(f"Unimplemented peripheral read from 0x{offset:x}")
+        elif kind == kUsbWarnReadAtomicArea:
+            self.warn("Unimplemented read from peripheral in the atomic operation region")
+        else:
+            self.warn(f"Unimplemented peripheral write to 0x{offset:x}: 0x{value:x}")
 
     # --- the reference's attributes --------------------------------------------------------------
 

@@ -59,6 +59,7 @@ struct UsbHost {
     bool (*device_in)(void* ctx, uint32_t endpoint_address, uint32_t* status, const uint8_t** data, uint32_t* length) = nullptr;
     bool (*device_out)(void* ctx, uint32_t endpoint, const uint8_t* data, uint32_t length, uint32_t* status) = nullptr;
     RegWarnFn warn = nullptr;
+    void* warn_ctx = nullptr;  // the context of `warn` alone, when it is not `ctx` (the chip's warning, core/mcu.hpp)
     void* ctx = nullptr;
     const int* failed = nullptr;  // the shared parked-failure flag (see _pending.pyx)
 };
@@ -140,12 +141,24 @@ public:
         }
     }
 
+    // The other end of the wire: the host's callbacks and their context (`wire.ctx`). The line, the warning and the failure flag stay the ones the block was initialised with (the chip's).
+    void set_wire(const UsbHost& wire) noexcept {
+        const UsbHost keep = host_;
+        host_ = wire;
+        host_.irq = keep.irq;
+        host_.irq_ctx = keep.irq_ctx;
+        host_.warn = keep.warn;
+        host_.warn_ctx = keep.warn_ctx;
+        host_.failed = keep.failed;
+    }
+
     // Unlinks every alarm from the clock; the owner calls it before the block goes away.
     void detach() noexcept {
         for (uint32_t i = 0; i < kAlarms; ++i) cancel_alarm(&slots_[i].alarm);
     }
 
     bool failed() const noexcept { return host_failed(host_.failed); }
+    void* warn_ctx() const noexcept { return host_.warn_ctx != nullptr ? host_.warn_ctx : host_.ctx; }
     int64_t raw_write_value() const noexcept { return raw_write_value_; }
     bool has_scheduled_alarms() const noexcept {
         for (uint32_t i = 0; i < kAlarms; ++i) {
@@ -297,8 +310,8 @@ public:
             default: break;
         }
         if (host_.warn) {
-            host_.warn(host_.ctx, kUsbWarnRead, offset, 0);
-            if (offset > 0x1000) host_.warn(host_.ctx, kUsbWarnReadAtomicArea, offset, 0);
+            host_.warn(warn_ctx(), kUsbWarnRead, offset, 0);
+            if (offset > 0x1000) host_.warn(warn_ctx(), kUsbWarnReadAtomicArea, offset, 0);
         }
         return 0xFFFFFFFFu;
     }
@@ -391,7 +404,7 @@ public:
                 return check_interrupts();
             default: break;
         }
-        if (host_.warn) host_.warn(host_.ctx, kUsbWarnWrite, offset, value64);
+        if (host_.warn) host_.warn(warn_ctx(), kUsbWarnWrite, offset, value64);
         return true;
     }
 

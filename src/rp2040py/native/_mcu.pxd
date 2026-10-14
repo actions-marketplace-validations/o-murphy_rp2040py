@@ -24,6 +24,7 @@ from rp2040py.native._rosc cimport RoscBlock
 from rp2040py.native._rtc cimport RtcBlock
 from rp2040py.native._sio cimport SioBlock
 from rp2040py.native._ssi cimport SsiBlock
+from rp2040py.native._usb cimport UsbBlock
 from rp2040py.native._xip_ctrl cimport XipBlock
 from rp2040py.native._spi cimport SpiBlock
 from rp2040py.native._syscfg cimport SyscfgBlock
@@ -76,6 +77,7 @@ cdef extern from "mcu.hpp" namespace "rp2040core":
     cdef const uint32_t kMcuBlockPio1
     cdef const uint32_t kMcuBlockSsi
     cdef const uint32_t kMcuBlockXip
+    cdef const uint32_t kMcuBlockUsb
 
     cdef cppclass McuHost:
         McuHost() noexcept
@@ -138,6 +140,8 @@ cdef extern from "mcu.hpp" namespace "rp2040core":
         SioBlock& sio() noexcept
         SsiBlock& ssi() noexcept
         XipBlock& xip() noexcept
+        UsbBlock& usb() noexcept
+        void set_usb_dpram(uint8_t* data) noexcept
         void set_flash(uint8_t* data, uint32_t size) noexcept
         void set_ssi_world(bool world) noexcept
         PwmBlock& pwm() noexcept

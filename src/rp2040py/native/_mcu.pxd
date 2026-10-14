@@ -1,6 +1,6 @@
 # Cython view of core/mcu.hpp (docs/records/0096-cpp-mcu-core.md, step 2a): the chip as one object. Header-only C++17, compiled into every extension that cimports it.
 
-from libc.stdint cimport int64_t, uint8_t
+from libc.stdint cimport int64_t, uint8_t, uint32_t
 
 from libcpp cimport bool
 
@@ -14,6 +14,7 @@ cdef extern from "mcu.hpp" namespace "rp2040core":
     ctypedef BatchParams McuLimits
     ctypedef BatchResult McuResult
     ctypedef double (*McuMonotonicFn)(void* chip) noexcept
+    ctypedef bool (*McuIrqHook)(void* ctx, uint32_t irq, bool level) noexcept
 
     cdef cppclass Mcu:
         Mcu() noexcept
@@ -21,6 +22,8 @@ cdef extern from "mcu.hpp" namespace "rp2040core":
         Bus bus
         Clock& clock() noexcept
         void use_clock(Clock* clock) noexcept
+        bool set_interrupt(uint32_t irq, bool level) noexcept
+        void set_irq_hook(McuIrqHook hook, void* ctx) noexcept
         bool owns_clock() noexcept
         void request_stop(bool stop) noexcept
         bool stop_requested() noexcept

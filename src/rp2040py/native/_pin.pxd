@@ -26,6 +26,7 @@ cdef extern from "pin.hpp" namespace "rp2040core":
         PinSourceFn source
         PinChangeFn on_change
         PinIoIrqFn io_interrupt
+        void* io_interrupt_ctx
         PinInputFn input_changed
         void* ctx
 

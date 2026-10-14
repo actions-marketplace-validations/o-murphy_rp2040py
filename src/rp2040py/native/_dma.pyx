@@ -22,6 +22,7 @@ from libc.stdint cimport int64_t, uint32_t
 from libcpp cimport bool as cppbool
 
 from rp2040py.native._bus cimport Bus
+from rp2040py.native._mcu_irq cimport Mcu, McuIrqLines, mcu_irq_lines, native_mcu
 from rp2040py.native._pending cimport park_error, pending_flag, raise_if_pending
 from rp2040py.native._simulation_clock cimport SimulationClock
 from rp2040py.native._window_map cimport WindowHandler
@@ -210,7 +211,16 @@ cdef class RPDMA:
         self.name = name
         self.clock = clock
         bus = <Bus*> <size_t> bus_address()
-        host.irq = _irq_trampoline
+        mcu = native_mcu(rp2040)
+        if mcu != NULL:
+            # the lines go from the C++ block straight to the chip's CPU, with no Python in between (the block passes the absolute NVIC line)
+            self._irq_line.mcu = mcu
+            self._irq_line.base = 0
+            host.irq = mcu_irq_lines
+            host.irq_ctx = &self._irq_line
+        else:
+            host.irq = _irq_trampoline
+            host.irq_ctx = NULL
         host.clk_sys = _clk_sys_trampoline
         host.warn = _warn_trampoline
         host.ctx = <void*> self

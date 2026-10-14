@@ -51,6 +51,7 @@ using UartWarnFn = RegWarnFn;
 
 struct UartHost {
     UartIrqFn irq = nullptr;
+    void* irq_ctx = nullptr;  // the context of `irq` alone, when it is not `ctx` (a line bound straight to the chip, core/mcu.hpp's `mcu_irq_line`)
     UartDreqFn dreq = nullptr;
     UartByteFn on_byte = nullptr;
     UartBaudFn baud_changed = nullptr;
@@ -106,6 +107,7 @@ public:
     Alarm tx_alarm;
 
     bool failed() const noexcept { return host_failed(host_.failed); }
+    bool raise_irq(bool level) noexcept { return host_.irq(host_.irq_ctx != nullptr ? host_.irq_ctx : host_.ctx, level); }
     int64_t raw_write_value() const noexcept { return raw_write_value_; }
 
     // ---- the RX FIFO (the reference's `utils.fifo.FIFO(32)`) ---------------------------------------------------
@@ -177,7 +179,7 @@ public:
 
     // False: a failure is pending.
     bool check_interrupts() noexcept {
-        if (!host_.irq(host_.ctx, (interrupt_status & interrupt_mask) != 0)) return false;
+        if (!raise_irq((interrupt_status & interrupt_mask) != 0)) return false;
         return true;
     }
 
@@ -257,7 +259,7 @@ public:
         frac_divisor = 0;
         ifls = uart_regs::IFLS_RESET;
         ilpr = dmacr = rsr = 0;
-        if (!host_.irq(host_.ctx, false)) return false;
+        if (!raise_irq(false)) return false;
         return update_dreq();
     }
 

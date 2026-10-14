@@ -49,6 +49,7 @@ using SpiWarnFn = RegWarnFn;
 
 struct SpiHost {
     SpiIrqFn irq = nullptr;
+    void* irq_ctx = nullptr;  // the context of `irq` alone, when it is not `ctx` (a line bound straight to the chip, core/mcu.hpp)
     SpiDreqFn dreq = nullptr;
     SpiTransmitFn transmit = nullptr;
     SpiBitFn bit_ns = nullptr;
@@ -128,10 +129,10 @@ public:
         int_enable = 0;
         if (!update_dma_tx()) return false;
         if (!update_dma_rx()) return false;
-        return host_.irq(host_.ctx, false);
+        return raise_irq(false);
     }
 
-    bool check_interrupts() noexcept { return host_.irq(host_.ctx, int_status() != 0); }
+    bool check_interrupts() noexcept { return raise_irq(int_status() != 0); }
 
     // The device finishes the transfer in flight (or, with none in flight, hands over a value anyway: the reference accepts it).
     bool complete_transmit(uint32_t rx_value) noexcept {
@@ -302,6 +303,8 @@ private:
         if (!update_dma_tx()) return false;
         return update_dma_rx();
     }
+
+    bool raise_irq(bool level) noexcept { return host_.irq(host_.irq_ctx != nullptr ? host_.irq_ctx : host_.ctx, level); }
 
     SpiHost host_;
     Clock* clock_ = nullptr;

@@ -49,6 +49,7 @@ using DmaWarnFn = RegWarnFn;
 
 struct DmaHost {
     DmaIrqFn irq = nullptr;
+    void* irq_ctx = nullptr;  // the context of `irq` alone, when it is not `ctx` (a line bound straight to the chip, core/mcu.hpp)
     DmaClockFn clk_sys = nullptr;
     void* clk_ctx = nullptr;           // the context `clk_sys` is called with; null: `ctx` (a host that answers it itself), non-null: the clock tree in C++ (`bind_clock`)
     DmaWarnFn warn = nullptr;
@@ -215,8 +216,8 @@ public:
 
     // Re-announces both lines, in order, whatever changed - the reference's call pattern.
     bool check_interrupts() noexcept {
-        if (!host_.irq(host_.ctx, host_.lines[0], int_status0() != 0)) return false;
-        return host_.irq(host_.ctx, host_.lines[1], int_status1() != 0);
+        if (!raise_irq(host_.lines[0], int_status0() != 0)) return false;
+        return raise_irq(host_.lines[1], int_status1() != 0);
     }
 
     // Channels back to power-on and the registers cleared; the asserted DREQs are deliberately untouched (see the
@@ -311,6 +312,7 @@ private:
 
     Bus* bus_ = nullptr;
     Clock* clock_ = nullptr;
+    bool raise_irq(uint32_t line, bool level) noexcept { return host_.irq(host_.irq_ctx != nullptr ? host_.irq_ctx : host_.ctx, line, level); }
     DmaHost host_;
     uint32_t int_enable_[2] = {0, 0}, int_force_[2] = {0, 0};
     uint32_t timers_[4] = {0, 0, 0, 0};

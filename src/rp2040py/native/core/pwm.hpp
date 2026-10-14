@@ -39,6 +39,7 @@ using PwmWarnFn = RegWarnFn;
 
 struct PwmHost {
     PwmIrqFn irq = nullptr;
+    void* irq_ctx = nullptr;  // the context of `irq` alone, when it is not `ctx` (a line bound straight to the chip, core/mcu.hpp)
     PwmDreqFn dreq = nullptr;
     PwmPinChangedFn pin_changed = nullptr;
     PwmPinReadFn pin_read = nullptr;
@@ -231,7 +232,7 @@ public:
 
     uint32_t int_status() const noexcept { return (int_raw & int_enable) | int_force; }
 
-    bool check_interrupts() noexcept { return host_.irq(host_.ctx, int_status() != 0); }
+    bool check_interrupts() noexcept { return raise_irq(int_status() != 0); }
 
     bool channel_interrupt(uint32_t index) noexcept {
         int_raw |= 1u << index;
@@ -342,6 +343,7 @@ public:
     WindowHandler window_handler() noexcept { return BlockWindow<PwmBlock>::handler(this); }
 
 private:
+    bool raise_irq(bool level) noexcept { return host_.irq(host_.irq_ctx != nullptr ? host_.irq_ctx : host_.ctx, level); }
     PwmHost host_;
     Clock* clock_ = nullptr;
     double clock_freq_ = 0.0;

@@ -4,6 +4,8 @@
 from libc.stdint cimport int64_t, uint32_t
 from libcpp cimport bool as cppbool
 
+from rp2040py.native._mcu_irq cimport McuIrqLine
+
 from rp2040py.native._window_map cimport WindowHandler
 
 cdef extern from "fifo.hpp" namespace "rp2040core":
@@ -34,6 +36,7 @@ cdef extern from "i2c.hpp" namespace "rp2040core":
     cdef cppclass I2cHost:
         I2cHost() noexcept
         I2cIrqFn irq
+        void* irq_ctx
         I2cStartFn start
         I2cConnectFn connect
         I2cWriteFn write_byte
@@ -92,6 +95,7 @@ cdef extern from "i2c.hpp" namespace "rp2040core":
         WindowHandler window_handler() noexcept
 
 cdef class RPI2C:
+    cdef McuIrqLine _irq_line  # the line straight to the chip, when it has one (core/mcu.hpp)
     cdef I2cBlock _block
     cdef public object rp2040
     cdef public object name

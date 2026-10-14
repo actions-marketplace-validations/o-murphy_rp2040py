@@ -17,6 +17,7 @@ from libcpp cimport bool as cppbool
 
 from cpython.bytes cimport PyBytes_AsString, PyBytes_FromStringAndSize
 
+from rp2040py.native._mcu_irq cimport Mcu, McuIrqLine, mcu_irq_line, native_mcu
 from rp2040py.native._pending cimport park_error, pending_flag, raise_if_pending
 from rp2040py.native._window_map cimport WindowHandler
 from rp2040py.native._simulation_clock cimport SimulationClock
@@ -368,7 +369,16 @@ cdef class RPUSBController:
         # The DPRAM is the chip's own 4 kB bytearray (a real memory region of the bus); this view keeps it from being resized under the block's pointer.
         self._dpram_view = rp2040.usb_dpram
         memory = self._dpram_view
-        host.irq = _irq_trampoline
+        mcu = native_mcu(rp2040)
+        if mcu != NULL:
+            # the line goes from the C++ block straight to the chip's CPU, with no Python in between
+            self._irq_line.mcu = mcu
+            self._irq_line.line = <uint32_t> int(IRQ.USBCTRL)
+            host.irq = mcu_irq_line
+            host.irq_ctx = &self._irq_line
+        else:
+            host.irq = _irq_trampoline
+            host.irq_ctx = NULL
         host.usb_enabled = _enabled_trampoline
         host.reset_received = _reset_received_trampoline
         host.endpoint_read = _endpoint_read_trampoline

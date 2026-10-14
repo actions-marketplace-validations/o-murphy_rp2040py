@@ -19,6 +19,7 @@ for its own `clock` field, so a native chip always has one.
 from libc.stdint cimport int64_t, uint32_t
 from libcpp cimport bool
 
+from rp2040py.native._mcu_irq cimport Mcu, McuIrqLines, mcu_irq_lines, native_mcu
 from rp2040py.native._pending cimport park_error, raise_if_pending
 from rp2040py.native._simulation_clock cimport SimulationClock
 from rp2040py.native._window_map cimport WindowHandler
@@ -65,7 +66,16 @@ cdef class RPTimer:
         self.rp2040 = rp2040
         self.name = name
         self.clock = clock
-        host.irq = _irq_trampoline
+        mcu = native_mcu(rp2040)
+        if mcu != NULL:
+            # the lines go from the C++ block straight to the chip's CPU, with no Python in between (the block passes the absolute NVIC line)
+            self._irq_line.mcu = mcu
+            self._irq_line.base = 0
+            host.irq = mcu_irq_lines
+            host.irq_ctx = &self._irq_line
+        else:
+            host.irq = _irq_trampoline
+            host.irq_ctx = NULL
         host.warn = _warn_trampoline
         host.ctx = <void*> self
         for i in range(4):

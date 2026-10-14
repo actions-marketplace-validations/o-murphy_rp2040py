@@ -4,6 +4,8 @@
 from libc.stdint cimport int64_t, uint8_t, uint32_t
 from libcpp cimport bool as cppbool
 
+from rp2040py.native._mcu_irq cimport McuIrqLine
+
 from rp2040py.native._pin cimport PinBank
 from rp2040py.native._window_map cimport WindowHandler
 
@@ -22,6 +24,7 @@ cdef extern from "ssi.hpp" namespace "rp2040core":
         SsiWarnFn warn
         SsiCsLowFn cs_low
         SsiIrqFn irq
+        void* irq_ctx
         SsiDreqFn dreq
         void* ctx
 
@@ -60,6 +63,7 @@ cdef extern from "ssi.hpp" namespace "rp2040core":
 
 
 cdef class RPSSI:
+    cdef McuIrqLine _irq_line  # the line straight to the chip, when it has one (core/mcu.hpp)
     cdef SsiBlock _block
     cdef object _cs_pin
     cdef bint _cs_native

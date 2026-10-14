@@ -118,6 +118,58 @@ int main() {
         CHECK(m.run(limits, &r) == kBatchFault && r.reason == kStopFault);
     }
 
+    // The interrupt lines: `set_interrupt` reaches the CPU, a hook takes the line instead of the CPU, and taking the hook away gives it back.
+    {
+        struct Seen {
+            int n = 0;
+            uint32_t irq = 0;
+            bool level = false;
+            bool result = true;
+        } seen;
+        Mcu m;
+        m.cpu.init(&m.bus, {}, 25);
+        CHECK(m.set_interrupt(5, true) && (m.cpu.pending_interrupts & (1u << 5)) != 0);
+        CHECK(m.set_interrupt(5, false) && (m.cpu.pending_interrupts & (1u << 5)) == 0);
+        m.set_irq_hook(
+            [](void* ctx, uint32_t irq, bool level) noexcept {
+                Seen* s = static_cast<Seen*>(ctx);
+                ++s->n;
+                s->irq = irq;
+                s->level = level;
+                return s->result;
+            },
+            &seen);
+        CHECK(m.set_interrupt(7, true) && seen.n == 1 && seen.irq == 7 && seen.level);
+        CHECK((m.cpu.pending_interrupts & (1u << 7)) == 0);  // the hook got the line instead of the CPU
+        seen.result = false;
+        CHECK(!m.set_interrupt(8, true));  // its failure is the caller's
+        m.set_irq_hook(nullptr, nullptr);
+        CHECK(m.set_interrupt(7, true) && seen.n == 2 && (m.cpu.pending_interrupts & (1u << 7)) != 0);
+
+        // The adapters a shell hands a block: a fixed line, a line offset from a base, and IO_BANK0's, which is the pin bank's "any IRQ value".
+        McuIrqLine fixed;
+        fixed.mcu = &m;
+        fixed.line = 20;
+        CHECK(mcu_irq_line(&fixed, true) && (m.cpu.pending_interrupts & (1u << 20)) != 0);
+        CHECK(mcu_irq_line(&fixed, false) && (m.cpu.pending_interrupts & (1u << 20)) == 0);
+        McuIrqLines based;
+        based.mcu = &m;
+        based.base = 4;
+        CHECK(mcu_irq_lines(&based, 3, true) && (m.cpu.pending_interrupts & (1u << 7)) != 0);
+        PinBank bank;
+        PinHost no_host;
+        CHECK(bank.init(30, no_host));
+        McuIoIrq io;
+        io.mcu = &m;
+        io.bank = &bank;
+        io.line = 13;
+        CHECK(mcu_io_interrupt(&io) && (m.cpu.pending_interrupts & (1u << 13)) == 0);  // nothing raises it
+        bank.pin(3).irq_force_mask = 1;
+        CHECK(mcu_io_interrupt(&io) && (m.cpu.pending_interrupts & (1u << 13)) != 0);  // one pin does
+        bank.pin(3).irq_force_mask = 0;
+        CHECK(mcu_io_interrupt(&io) && (m.cpu.pending_interrupts & (1u << 13)) == 0);  // and the line follows it down
+    }
+
     if (failures == 0) std::printf("test_mcu: ok\n");
     return failures == 0 ? 0 : 1;
 }

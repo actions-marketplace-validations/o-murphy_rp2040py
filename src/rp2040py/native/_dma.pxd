@@ -4,6 +4,8 @@
 from libc.stdint cimport int64_t, uint32_t, uint64_t
 from libcpp cimport bool as cppbool
 
+from rp2040py.native._mcu_irq cimport McuIrqLines
+
 from rp2040py.native._bus cimport Bus
 from rp2040py.native._clock cimport Clock
 from rp2040py.native._window_map cimport WindowHandler
@@ -20,6 +22,7 @@ cdef extern from "dma.hpp" namespace "rp2040core":
     cdef cppclass DmaHost:
         DmaHost() noexcept
         DmaIrqFn irq
+        void* irq_ctx
         DmaClockFn clk_sys
         void* clk_ctx
         DmaWarnFn warn
@@ -74,6 +77,7 @@ cdef extern from "dma.hpp" namespace "rp2040core":
 
 
 cdef class RPDMA:
+    cdef McuIrqLines _irq_line  # the line straight to the chip, when it has one (core/mcu.hpp)
     cdef DmaBlock _block
     cdef public object rp2040
     cdef public object name

@@ -4,6 +4,8 @@
 from libc.stdint cimport int64_t, uint32_t
 from libcpp cimport bool as cppbool
 
+from rp2040py.native._mcu_irq cimport McuIrqLine
+
 from rp2040py.native._clock cimport Alarm, Clock
 from rp2040py.native._window_map cimport WindowHandler
 
@@ -33,6 +35,7 @@ cdef extern from "spi.hpp" namespace "rp2040core":
     cdef cppclass SpiHost:
         SpiHost() noexcept
         SpiIrqFn irq
+        void* irq_ctx
         SpiDreqFn dreq
         SpiTransmitFn transmit
         SpiBitFn bit_ns
@@ -71,6 +74,7 @@ cdef extern from "spi.hpp" namespace "rp2040core":
         WindowHandler window_handler() noexcept
 
 cdef class RPSPI:
+    cdef McuIrqLine _irq_line  # the line straight to the chip, when it has one (core/mcu.hpp)
     cdef SpiBlock _block
     cdef public object rp2040
     cdef public object name

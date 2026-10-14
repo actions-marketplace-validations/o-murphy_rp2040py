@@ -20,6 +20,7 @@ The API is the reference's: the registers' attributes (readable and writable), `
 from libc.stdint cimport int64_t, uint32_t
 from libcpp cimport bool as cppbool
 
+from rp2040py.native._mcu_irq cimport Mcu, McuIrqLine, mcu_irq_line, native_mcu
 from rp2040py.native._pending cimport park_error, pending_flag, raise_if_pending
 from rp2040py.native._window_map cimport WindowHandler
 
@@ -174,7 +175,16 @@ cdef class RPI2C:
         self._on_write_byte = None
         self._on_read_byte = None
         self._on_stop = None
-        host.irq = _irq_trampoline
+        mcu = native_mcu(rp2040)
+        if mcu != NULL:
+            # the line goes from the C++ block straight to the chip's CPU, with no Python in between
+            self._irq_line.mcu = mcu
+            self._irq_line.line = <uint32_t> int(irq)
+            host.irq = mcu_irq_line
+            host.irq_ctx = &self._irq_line
+        else:
+            host.irq = _irq_trampoline
+            host.irq_ctx = NULL
         host.start = _start_trampoline
         host.connect = _connect_trampoline
         host.write_byte = _write_trampoline

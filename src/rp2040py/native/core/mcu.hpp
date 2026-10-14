@@ -24,6 +24,7 @@
 #include "bus.hpp"
 #include "clock.hpp"
 #include "cpu.hpp"
+#include "pin.hpp"
 #include "pio.hpp"
 
 namespace rp2040core {
@@ -57,6 +58,18 @@ public:
     void use_clock(Clock* clock) noexcept { clock_ = clock != nullptr ? clock : &own_clock_; }
     bool owns_clock() const noexcept { return clock_ == &own_clock_; }
 
+    // The interrupt lines. Every block that raises one calls this (directly, through `mcu_irq_line` below, once its shell has bound it), and it reaches the CPU - unless the host has
+    // put a hook over it (a test that spies on the lines, a host that wants to see them): the hook then gets the line *instead of* the CPU, as a replaced `set_interrupt` always did.
+    // False: waking the core took an exception and its bus access failed (the host has parked its error).
+    using IrqHook = bool (*)(void* ctx, uint32_t irq, bool level);
+    bool set_interrupt(uint32_t irq, bool level) noexcept {
+        return irq_hook_ != nullptr ? irq_hook_(irq_hook_ctx_, irq, level) : cpu.set_interrupt(irq, level);
+    }
+    void set_irq_hook(IrqHook hook, void* ctx) noexcept {
+        irq_hook_ = hook;
+        irq_hook_ctx_ = ctx;
+    }
+
     // The run flags. `request_stop()` may be called from any thread; the loop leaves at its next iteration and `run()` then reports `kStopRequested`. `real_io` is nonzero while
     // some device waits on the *real* world (a relayed DNS reply, a TCP connect in flight): an idle jump is then capped and ends the batch, so simulated time cannot outrun the
     // wall clock while the reply is on its way. The addresses are for a host whose own object is a view of the byte (the Cython shell hands them to Python as buffers).
@@ -85,12 +98,44 @@ private:
     static double no_time(void*) noexcept { return 0.0; }
 
     PioBlock pio_[kPioBlocks];
+    IrqHook irq_hook_ = nullptr;
+    void* irq_hook_ctx_ = nullptr;
     volatile uint8_t stop_ = 0;
     volatile uint8_t real_io_ = 0;
     BatchHost host_;
     Clock own_clock_;
     Clock* clock_ = &own_clock_;
 };
+
+// A block's interrupt line, bound to the chip: the context a shell hands the block as its `irq_ctx`, and the function that goes with it. The block's `irq(ctx, level)` signature is
+// the common one (UART, SPI, I2C, ADC, PWM, RTC, USB, SSI: a line the shell knows); blocks with several lines use `McuIrqLines` (`irq(ctx, line, level)`, the line offset from `base`).
+struct McuIrqLine {
+    Mcu* mcu = nullptr;
+    uint32_t line = 0;
+};
+inline bool mcu_irq_line(void* ctx, bool level) noexcept {
+    const McuIrqLine* l = static_cast<const McuIrqLine*>(ctx);
+    return l->mcu->set_interrupt(l->line, level);
+}
+struct McuIrqLines {
+    Mcu* mcu = nullptr;
+    uint32_t base = 0;
+};
+inline bool mcu_irq_lines(void* ctx, uint32_t line, bool level) noexcept {
+    const McuIrqLines* l = static_cast<const McuIrqLines*>(ctx);
+    return l->mcu->set_interrupt(l->base + line, level);
+}
+
+// The IO_BANK0 interrupt line: the level of it is "any pin's IRQ value is set", re-evaluated on the pin bank whenever a pin says its own value may have changed.
+struct McuIoIrq {
+    Mcu* mcu = nullptr;
+    const PinBank* bank = nullptr;
+    uint32_t line = 0;
+};
+inline bool mcu_io_interrupt(void* ctx) noexcept {
+    const McuIoIrq* l = static_cast<const McuIoIrq*>(ctx);
+    return l->mcu->set_interrupt(l->line, l->bank->any_irq_value());
+}
 
 }  // namespace rp2040core
 

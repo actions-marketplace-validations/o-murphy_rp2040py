@@ -46,6 +46,7 @@ using AdcWarnFn = RegWarnFn;
 
 struct AdcHost {
     AdcIrqFn irq = nullptr;
+    void* irq_ctx = nullptr;  // the context of `irq` alone, when it is not `ctx` (a line bound straight to the chip, core/mcu.hpp)
     AdcDreqFn dreq = nullptr;
     AdcReadFn read = nullptr;
     AdcChannelValueFn channel_value = nullptr;
@@ -135,10 +136,10 @@ public:
         clock_->cancel(&sample_alarm);
         clock_->cancel(&multi_shot_alarm);
         if (!update_dma()) return false;
-        return host_.irq(host_.ctx, false);
+        return raise_irq(false);
     }
 
-    bool check_interrupts() noexcept { return host_.irq(host_.ctx, int_status() != 0); }
+    bool check_interrupts() noexcept { return raise_irq(int_status() != 0); }
 
     bool start_adc_read() noexcept {
         busy = true;
@@ -296,6 +297,8 @@ private:
         if ((block->cs & adc_regs::CS_START_MANY) && (block->cs & adc_regs::CS_EN)) return block->start_adc_read();  // clearing EN halts free-running
         return true;
     }
+
+    bool raise_irq(bool level) noexcept { return host_.irq(host_.irq_ctx != nullptr ? host_.irq_ctx : host_.ctx, level); }
 
     AdcHost host_;
     Clock* clock_ = nullptr;

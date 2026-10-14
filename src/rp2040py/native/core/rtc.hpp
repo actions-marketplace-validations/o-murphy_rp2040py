@@ -31,6 +31,7 @@ using RtcIrqFn = bool (*)(void* ctx, bool level);  // the NVIC line (interrupt 2
 struct RtcHost {
     RegWarnFn warn = nullptr;
     RtcIrqFn irq = nullptr;
+    void* irq_ctx = nullptr;  // the context of `irq` alone, when it is not `ctx` (a line bound straight to the chip, core/mcu.hpp)
     void* ctx = nullptr;
     const int* failed = nullptr;  // the shared parked-failure flag (see _pending.pyx)
 };
@@ -125,7 +126,7 @@ public:
     // The raw level, masked and forced, to the NVIC line.
     bool check_interrupts() noexcept {
         const uint32_t raw = raw_interrupt() ? 1u : 0u;
-        return host_.irq == nullptr || host_.irq(host_.ctx, ((((raw & inte) | intf)) & rtc_regs::INT_RTC) != 0);
+        return host_.irq == nullptr || raise_irq(((((raw & inte) | intf)) & rtc_regs::INT_RTC) != 0);
     }
 
     // RESETS.RESET_RTC: every register 0, the counter 0, the latch 0, the divider stopped; clk_rtc is the CLOCKS block's and is kept.
@@ -266,6 +267,7 @@ private:
     }
 
     Clock* clock_ = nullptr;
+    bool raise_irq(bool level) noexcept { return host_.irq(host_.irq_ctx != nullptr ? host_.irq_ctx : host_.ctx, level); }
     RtcHost host_;
     Alarm alarm_;
     double clk_rtc_ = 0.0;  // clk_rtc in Hz, pushed by the chip: 0 = stopped

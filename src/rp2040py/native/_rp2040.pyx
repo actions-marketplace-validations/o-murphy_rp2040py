@@ -21,6 +21,7 @@ dispatch - see native/_simulation_clock.pyx's own module docstring for the full 
 
 from libc.stdint cimport int64_t, uint8_t, uint32_t
 from libc.string cimport memset
+from libcpp cimport bool
 
 from rp2040py.native._cortex_m0_core cimport CortexM0Core
 from rp2040py.native._memory_map cimport (
@@ -34,6 +35,7 @@ from rp2040py.native._memory_map cimport (
     kSubWord,
     kWordIndexed,
 )
+from rp2040py.native._mcu cimport Mcu
 from rp2040py.native._pending cimport park_error, raise_if_pending
 from rp2040py.native._pio cimport PioBlock
 from rp2040py.native._bus cimport BusHost, kBusWarnInvalidRead, kBusWarnUnalignedRead
@@ -278,6 +280,16 @@ class _PinSourceList(list):
     def __setitem__(self, index, value):
         super().__setitem__(index, value)
         self._owner._bind_pin_sources()
+
+
+cdef bool _irq_hook(void* ctx, uint32_t irq, bool level) noexcept:
+    cdef RP2040 chip = <RP2040> ctx
+    try:
+        chip._irq_override(irq, level)
+    except BaseException as error:
+        park_error(error)
+        return False
+    return True
 
 
 cdef class RP2040:
@@ -1075,8 +1087,30 @@ cdef class RP2040:
     def gpio_values(self) -> int:
         return self._gpio_bank.input_values()
 
-    def set_interrupt(self, irq: int, value: bool) -> None:
+    def _native_mcu_address(self):
+        """The address of this chip's C++ `Mcu`, for a native block that raises its interrupt line straight on it. Looked up as an attribute of the chip, so a chip without one
+        (the pure-Python chip, a stand-in) simply does not answer."""
+        return <size_t> &self._mcu
+
+    def _native_set_interrupt(self, irq: int, value: bool) -> None:
         self.core.set_interrupt(irq, value)
+
+    @property
+    def set_interrupt(self):
+        """The interrupt line entry point: `Mcu::set_interrupt` is the one the blocks call, and this is the Python method with the same effect. Assigning to it (a test that spies on
+        the lines, a host that wants to see them) puts the assigned function *over* the CPU for every block: the line goes to it instead, as it always did on a chip whose
+        `set_interrupt` was replaced; `del` takes it away again."""
+        return self._irq_override if self._irq_override is not None else self._native_set_interrupt
+
+    @set_interrupt.setter
+    def set_interrupt(self, function) -> None:
+        self._irq_override = function
+        self._mcu.set_irq_hook(_irq_hook, <void*> self)
+
+    @set_interrupt.deleter
+    def set_interrupt(self) -> None:
+        self._irq_override = None
+        self._mcu.set_irq_hook(NULL, NULL)
 
     def update_io_interrupt(self) -> None:
         self.set_interrupt(IRQ.IO_BANK0, self._gpio_bank.any_irq_value())

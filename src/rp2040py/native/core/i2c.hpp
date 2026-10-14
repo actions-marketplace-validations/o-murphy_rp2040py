@@ -51,6 +51,7 @@ using I2cWarnFn = RegWarnFn;
 
 struct I2cHost {
     I2cIrqFn irq = nullptr;
+    void* irq_ctx = nullptr;  // the context of `irq` alone, when it is not `ctx` (a line bound straight to the chip, core/mcu.hpp)
     I2cStartFn start = nullptr;
     I2cConnectFn connect = nullptr;
     I2cWriteFn write_byte = nullptr;
@@ -147,10 +148,10 @@ public:
         sda_setup = 0x64;
         ack_general_call = 0x1;
         slv_data_nack_only = dma_control = dma_tdlr = dma_rdlr = 0;
-        return host_.irq(host_.ctx, false);
+        return raise_irq(false);
     }
 
-    bool check_interrupts() noexcept { return host_.irq(host_.ctx, int_status() != 0); }
+    bool check_interrupts() noexcept { return raise_irq(int_status() != 0); }
 
     // ---- the answers of the device on the bus -------------------------------------------------------------------
 
@@ -505,6 +506,8 @@ private:
         if (tx.count() <= tx_threshold) return set_interrupts(R_TX_EMPTY);
         return true;
     }
+
+    bool raise_irq(bool level) noexcept { return host_.irq(host_.irq_ctx != nullptr ? host_.irq_ctx : host_.ctx, level); }
 
     I2cHost host_;
     int64_t raw_write_value_ = 0;

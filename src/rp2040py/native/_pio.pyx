@@ -21,6 +21,7 @@ from libcpp cimport bool as cppbool
 
 from rp2040py.native._dma cimport RPDMA
 from rp2040py.native._gpio_pin cimport GPIOPin
+from rp2040py.native._mcu_irq cimport Mcu, McuIrqLines, mcu_irq_lines, native_mcu
 from rp2040py.native._pending cimport park_error, raise_if_pending
 from rp2040py.native._pin cimport PinBank
 from rp2040py.native._window_map cimport WindowHandler
@@ -590,7 +591,16 @@ cdef class RPPIO:
         self._run_task = None
         self._pin_refs = []
 
-        host.set_irq = _irq_trampoline
+        mcu = native_mcu(rp2040)
+        if mcu != NULL:
+            # the lines go from the C++ block straight to the chip's CPU, with no Python in between (the block passes the absolute NVIC line)
+            self._irq_line.mcu = mcu
+            self._irq_line.base = 0
+            host.set_irq = mcu_irq_lines
+            host.set_irq_ctx = &self._irq_line
+        else:
+            host.set_irq = _irq_trampoline
+            host.set_irq_ctx = NULL
         host.dreq = _dreq_trampoline
         host.log = _log_trampoline
         host.pin_update = _pin_update_trampoline

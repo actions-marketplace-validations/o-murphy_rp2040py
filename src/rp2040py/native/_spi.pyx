@@ -21,6 +21,7 @@ names), `int_status`, `enabled`, `data_bits`, `master_mode`, `spi_mode`, `clock_
 from libc.stdint cimport int64_t, uint32_t
 from libcpp cimport bool as cppbool
 
+from rp2040py.native._mcu_irq cimport Mcu, McuIrqLine, mcu_irq_line, native_mcu
 from rp2040py.native._pending cimport park_error, pending_flag, raise_if_pending
 from rp2040py.native._simulation_clock cimport SimulationClock
 from rp2040py.native._window_map cimport WindowHandler
@@ -156,7 +157,16 @@ cdef class RPSPI:
         self.irq = irq
         self.dreq = dreq
         self._on_transmit = None
-        host.irq = _irq_trampoline
+        mcu = native_mcu(rp2040)
+        if mcu != NULL:
+            # the line goes from the C++ block straight to the chip's CPU, with no Python in between
+            self._irq_line.mcu = mcu
+            self._irq_line.line = <uint32_t> int(irq)
+            host.irq = mcu_irq_line
+            host.irq_ctx = &self._irq_line
+        else:
+            host.irq = _irq_trampoline
+            host.irq_ctx = NULL
         host.dreq = _dreq_trampoline
         host.transmit = _transmit_trampoline
         host.bit_ns = _bit_trampoline

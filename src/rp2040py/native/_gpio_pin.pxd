@@ -8,10 +8,12 @@
 # The pins' state lives in a C++ `PinBank` (core/pin.hpp), shared by a chip's pins (`GPIOPinBank`); a pin on its own gets a bank of one. Each
 # `GPIOPin` is a view onto one slot of it (the bank, its slot and a pointer to the C++ pin).
 
+from rp2040py.native._mcu_irq cimport McuIoIrq
 from rp2040py.native._pin cimport Pin, PinBank, PinChangeFn
 
 cdef class GPIOPinBank:
     cdef PinBank _bank
+    cdef McuIoIrq _io_irq  # IO_BANK0's line straight to the chip, for the chip's 30 GPIO pins (core/mcu.hpp)
     cdef public object rp2040
     cdef public list shells
     cdef public list _direct_refs

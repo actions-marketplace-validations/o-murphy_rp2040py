@@ -26,6 +26,7 @@ from typing import Any
 
 from rp2040py import _gpio_pin as G
 from rp2040py import _pin_bank as G_bank
+from rp2040py.irq import IRQ
 from rp2040py.rp2040 import RP2040
 from utils.is32bit import IS32BIT
 
@@ -148,13 +149,16 @@ class Rig:
             setattr(
                 chip.logger, method, lambda name, message, _m=method: log.append(("log", _m, str(name), str(message)))
             )
-        original = chip.update_io_interrupt
+        # The IO_BANK0 line is seen where it leaves the pins: at `set_interrupt` (on the native chip it goes from the C++ pins straight to `Mcu::set_interrupt`, which a replaced
+        # `set_interrupt` still receives), one entry per time the pins re-evaluate it.
+        original = chip.set_interrupt
 
-        def update_io_interrupt() -> None:
-            log.append(("io_irq",))
-            original()
+        def set_interrupt(irq: int, value: bool) -> None:
+            if irq == IRQ.IO_BANK0:
+                log.append(("io_irq",))
+            original(irq, value)
 
-        chip.update_io_interrupt = update_io_interrupt  # type: ignore[method-assign]
+        chip.set_interrupt = set_interrupt  # type: ignore[method-assign]
         for bank, pins in (("gpio", chip.gpio), ("qspi", chip.qspi)):
             for pin in pins:
                 pin.add_listener(

@@ -67,6 +67,7 @@ struct PinHost {
     PinSourceFn source = nullptr;
     PinChangeFn on_change = nullptr;
     PinIoIrqFn io_interrupt = nullptr;
+    void* io_interrupt_ctx = nullptr;  // the context of `io_interrupt` alone, when it is not `ctx` (the line bound straight to the chip, core/mcu.hpp's `mcu_io_interrupt`)
     PinInputFn input_changed = nullptr;
     void* ctx = nullptr;
 };
@@ -404,7 +405,7 @@ public:
         return true;
     }
 
-    bool io_interrupt() const noexcept { return host_.io_interrupt == nullptr || host_.io_interrupt(host_.ctx); }
+    bool io_interrupt() const noexcept { return host_.io_interrupt == nullptr || host_.io_interrupt(host_.io_interrupt_ctx != nullptr ? host_.io_interrupt_ctx : host_.ctx); }
 
 private:
     static bool source_for(uint32_t fsel, bool value, uint32_t* out) noexcept {

@@ -56,6 +56,7 @@ cdef class RP2040:
     cdef object _xosc_freq
     cdef object _rosc_freq
     cdef object _rtc
+    cdef object _irq_override  # a replaced `set_interrupt` (a test's spy): the lines go there instead of the CPU
     cdef object _sio_owner  # the trampoline context of a Python SIO/PPB (a native block is its own context)
     cdef object _ppb_owner
     cdef object _xip_owner  # the native XIP block whose hooks the memory map holds

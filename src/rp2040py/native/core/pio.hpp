@@ -62,6 +62,7 @@ using PioStartedFn = bool (*)(void* ctx);                                // CTRL
 
 struct PioHost {
     PioIrqFn set_irq = nullptr;
+    void* set_irq_ctx = nullptr;  // the context of `set_irq` alone, when it is not `ctx` (a line bound straight to the chip, core/mcu.hpp)
     PioDreqFn dreq = nullptr;
     PioLogFn log = nullptr;
     PioPinUpdateFn pin_update = nullptr;
@@ -269,8 +270,8 @@ public:
     uint32_t irq1_int_status() const noexcept { return (int_raw() & irq1_int_enable) | irq1_int_force; }
 
     bool check_interrupts() noexcept {
-        RP2040PY_PIO_TRY(host_.set_irq == nullptr || host_.set_irq(host_.ctx, first_irq_, irq0_int_status() != 0));
-        return host_.set_irq == nullptr || host_.set_irq(host_.ctx, first_irq_ + 1, irq1_int_status() != 0);
+        RP2040PY_PIO_TRY(host_.set_irq == nullptr || raise_irq(first_irq_, irq0_int_status() != 0));
+        return host_.set_irq == nullptr || raise_irq(first_irq_ + 1, irq1_int_status() != 0);
     }
 
     bool irq_updated() noexcept {
@@ -624,6 +625,8 @@ private:
         }
         return true;
     }
+
+    bool raise_irq(uint32_t line, bool level) noexcept { return host_.set_irq(host_.set_irq_ctx != nullptr ? host_.set_irq_ctx : host_.ctx, line, level); }
 
     PioHost host_;
     uint32_t first_irq_ = 0;

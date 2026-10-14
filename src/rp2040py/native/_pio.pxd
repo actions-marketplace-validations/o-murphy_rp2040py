@@ -4,6 +4,8 @@
 from libc.stdint cimport int32_t, int64_t, uint32_t
 from libcpp cimport bool as cppbool
 
+from rp2040py.native._mcu_irq cimport McuIrqLines
+
 from rp2040py.native._pin cimport PinBank
 from rp2040py.native._window_map cimport WindowHandler
 
@@ -24,6 +26,7 @@ cdef extern from "pio.hpp" namespace "rp2040core":
     cdef cppclass PioHost:
         PioHost() noexcept
         PioIrqFn set_irq
+        void* set_irq_ctx
         PioDreqFn dreq
         PioLogFn log
         PioPinUpdateFn pin_update
@@ -127,6 +130,7 @@ cdef extern from "pio.hpp" namespace "rp2040core":
 
 
 cdef class RPPIO:
+    cdef McuIrqLines _irq_line  # the line straight to the chip, when it has one (core/mcu.hpp)
     cdef PioBlock* _block  # the chip's own (core/mcu.hpp): this object is its Python view
     cdef public object rp2040
     cdef public str name

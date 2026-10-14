@@ -26,6 +26,7 @@ import logging
 from libc.stdint cimport uint32_t
 from libcpp cimport bool as cppbool
 
+from rp2040py.native._mcu_irq cimport mcu_io_interrupt, native_mcu
 from rp2040py.native._pending cimport park_error, raise_if_pending
 from rp2040py.native._pin cimport (
     PinBank,
@@ -170,7 +171,17 @@ cdef class GPIOPinBank:
             always[i] = bool(always_output_enabled)
         host.source = _source_trampoline
         host.on_change = _change_trampoline
-        host.io_interrupt = _io_interrupt_trampoline
+        mcu = native_mcu(rp2040)
+        if mcu != NULL and first == 0 and count == 30:
+            # the chip's GPIO bank: its IO_BANK0 line goes from the C++ pins straight to the chip's CPU. (The QSPI bank, and a pin on its own, ask `update_io_interrupt()`.)
+            self._io_irq.mcu = mcu
+            self._io_irq.bank = &self._bank
+            self._io_irq.line = 13  # IRQ.IO_BANK0
+            host.io_interrupt = mcu_io_interrupt
+            host.io_interrupt_ctx = &self._io_irq
+        else:
+            host.io_interrupt = _io_interrupt_trampoline
+            host.io_interrupt_ctx = NULL
         host.input_changed = _input_trampoline
         host.ctx = <void*> self
         # Mirrors the Python constructor's field-initializer ordering: each pin's `_last_state` is captured with ctrl = 0 and

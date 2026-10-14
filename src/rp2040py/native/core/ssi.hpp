@@ -50,6 +50,7 @@ struct SsiHost {
     SsiWarnFn warn = nullptr;
     SsiCsLowFn cs_low = nullptr;
     SsiIrqFn irq = nullptr;
+    void* irq_ctx = nullptr;  // the context of `irq` alone, when it is not `ctx` (a line bound straight to the chip, core/mcu.hpp)
     SsiDreqFn dreq = nullptr;
     void* ctx = nullptr;
 };
@@ -321,7 +322,7 @@ private:
         const bool level = isr() != 0;
         if (level != irq_level_) {
             irq_level_ = level;
-            if (host_.irq != nullptr && !host_.irq(host_.ctx, level)) return false;
+            if (host_.irq != nullptr && !raise_irq(level)) return false;
         }
         const bool tx = (stored_[DMACR_INDEX] & DMACR_TDMAE) != 0 && txflr_ <= stored_[DMATDLR_INDEX];
         if (tx != dreq_tx_) {
@@ -398,6 +399,7 @@ private:
 
     uint8_t* flash_ = nullptr;
     uint32_t flash_size_ = 0;
+    bool raise_irq(bool level) noexcept { return host_.irq(host_.irq_ctx != nullptr ? host_.irq_ctx : host_.ctx, level); }
     SsiHost host_;
     PinBank* bank_ = nullptr;
     uint32_t slot_ = 0;  // the chip-select pin's position in its bank

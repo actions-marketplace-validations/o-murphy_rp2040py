@@ -4,6 +4,8 @@
 from libc.stdint cimport int64_t, uint32_t
 from libcpp cimport bool
 
+from rp2040py.native._mcu_irq cimport McuIrqLines
+
 from rp2040py.native._clock cimport Clock
 from rp2040py.native._window_map cimport WindowHandler
 
@@ -17,6 +19,7 @@ cdef extern from "timer.hpp" namespace "rp2040core":
 
     cdef cppclass TimerHost:
         TimerIrqFn irq
+        void* irq_ctx
         TimerWarnFn warn
         void* ctx
         uint32_t lines[4]
@@ -40,6 +43,7 @@ cdef extern from "timer.hpp" namespace "rp2040core":
 
 
 cdef class RPTimer:
+    cdef McuIrqLines _irq_line  # the line straight to the chip, when it has one (core/mcu.hpp)
     cdef TimerBlock _block
     cdef public object rp2040
     cdef public object name

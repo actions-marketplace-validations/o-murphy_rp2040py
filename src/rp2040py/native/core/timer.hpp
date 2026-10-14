@@ -40,6 +40,7 @@ using TimerWarnFn = RegWarnFn;
 
 struct TimerHost {
     TimerIrqFn irq = nullptr;
+    void* irq_ctx = nullptr;  // the context of `irq` alone, when it is not `ctx` (a line bound straight to the chip, core/mcu.hpp)
     TimerWarnFn warn = nullptr;
     void* ctx = nullptr;
     uint32_t lines[4] = {0, 1, 2, 3};  // IRQ numbers of TIMER_0..3
@@ -183,7 +184,7 @@ public:
             target_[i] = 0;
         }
         for (int i = 0; i < kAlarms; ++i) {
-            if (!host_.irq(host_.ctx, host_.lines[i], false)) return false;
+            if (!raise_irq(host_.lines[i], false)) return false;
         }
         return true;
     }
@@ -312,7 +313,7 @@ private:
     bool check_interrupts() noexcept {
         const uint32_t status = int_status();
         for (int i = 0; i < kAlarms; ++i) {
-            if (!host_.irq(host_.ctx, host_.lines[i], (status & (1u << i)) != 0)) return false;
+            if (!raise_irq(host_.lines[i], (status & (1u << i)) != 0)) return false;
         }
         return true;
     }
@@ -326,6 +327,7 @@ private:
     }
 
     Clock* clock_ = nullptr;
+    bool raise_irq(uint32_t line, bool level) noexcept { return host_.irq(host_.irq_ctx != nullptr ? host_.irq_ctx : host_.ctx, line, level); }
     TimerHost host_;
     static void on_rebase(void* ctx, int64_t delta) noexcept {
         auto* self = static_cast<TimerBlock*>(ctx);

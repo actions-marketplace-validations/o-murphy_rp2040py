@@ -44,6 +44,7 @@ constexpr uint32_t kUsbWarnRead = kRegWarnRead, kUsbWarnReadAtomicArea = kRegWar
 
 struct UsbHost {
     bool (*irq)(void* ctx, bool level) = nullptr;
+    void* irq_ctx = nullptr;  // the context of `irq` alone, when it is not `ctx` (a line bound straight to the chip, core/mcu.hpp)
     bool (*usb_enabled)(void* ctx) = nullptr;                           // on_usb_enabled (the shell checks it is set)
     bool (*reset_received)(void* ctx) = nullptr;                        // on_reset_received
     bool (*endpoint_read)(void* ctx, uint32_t endpoint, uint32_t length) = nullptr;  // on_endpoint_read: the host is asked for `length` bytes
@@ -180,7 +181,7 @@ public:
     uint32_t int_status() const noexcept { return (int_raw & int_enable) | int_force; }
 
     // ---- interrupts ---------------------------------------------------------------------------------------------------------------------------
-    bool check_interrupts() noexcept { return host_.irq(host_.ctx, int_status() != 0); }
+    bool check_interrupts() noexcept { return raise_irq(int_status() != 0); }
 
     bool buff_status_updated() noexcept {
         if (buff_status()) {
@@ -845,6 +846,8 @@ private:
         sie_status |= usb_regs::SIE_TRANS_COMPLETE;
         return sie_status_updated();
     }
+
+    bool raise_irq(bool level) noexcept { return host_.irq(host_.irq_ctx != nullptr ? host_.irq_ctx : host_.ctx, level); }
 
     UsbHost host_;
     Clock* clock_ = nullptr;

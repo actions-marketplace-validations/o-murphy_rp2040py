@@ -78,7 +78,7 @@ from rp2040py.peripherals._uart import (  # the pure chip's own UART: the native
     IUARTDMAChannels,
 )
 from rp2040py.peripherals._usb import RPUSBController
-from rp2040py.peripherals._vreg_and_chip_reset import RPVREGAndChipReset
+from rp2040py.peripherals._vreg_and_chip_reset import HAD_POR, HAD_RUN, RPVREGAndChipReset
 from rp2040py.peripherals._watchdog import RPWatchdog
 from rp2040py.peripherals._xip_ctrl import (  # the pure chip's own XIP: the native one works on the native chip's flash buffer and memory map
     RPXIPAux,
@@ -89,6 +89,7 @@ from rp2040py.peripherals.peripheral import Peripheral
 from rp2040py.peripherals.pio import RPPIO
 from rp2040py.peripherals.timer import RPTimer
 from rp2040py.qspi_pads import QSPI_PAD_RESET_VALUES
+from rp2040py.reset_cause import ResetCause
 from rp2040py.sio import RPSIO
 from rp2040py.utils.bit import (
     read_uint16_le,
@@ -300,26 +301,45 @@ class RP2040:
 
         self.reset()
 
-    def enter_reset(self, *, from_watchdog: bool = False) -> None:
-        """Put the chip *into* reset: every block this reset covers goes to its reset values, and
-        the USB controller's `on_reset` fires so whatever is attached to the bus clears itself.
+    def enter_reset(self, *, from_watchdog: bool | None = None, cause: ResetCause | None = None) -> None:
+        """Put the chip *into* reset: every block this reset covers goes to its reset values, the cause is
+        recorded, and the USB controller's `on_reset` fires so whatever is attached to the bus clears itself.
 
         The chip-level half of a reset, owned by the chip (0057's option B). `BaseDevice` used to
         run this sequence itself, which meant anything holding a bare `RP2040` - the `run`
         subcommand, a board file, an `ExternalDevice` that only ever gets `attach(rp2040)` - could
         reset the chip and leave the host side of the USB link stale. What the device layer still
-        owns is the *cause* bookkeeping and the awaitable form, both of which need things this
-        object does not have.
+        owns is the awaitable form, which needs things this object does not have.
 
-        `from_watchdog` picks the WDSEL-gated domain set; see `reset()`. The `on_reset`
-        notification is **not** gated by it: the USB block is only register-reset when WDSEL
-        selects it, but a chip reset drops the device off the host's bus either way, and
-        `hard_reset()`'s guarantee (0089) must not become conditional on what a guest wrote there.
+        `cause` is why (`ResetCause`; default `RUN_PIN`, what a host-side "reset the board" is physically,
+        0089's D4). It picks the WDSEL-gated domain set (`WATCHDOG` is the only one that does; see `reset()`)
+        and what firmware reads back afterwards (0089 section 1.3): a `RUN_PIN` / `POWER_ON` reset clears the
+        watchdog's REASON / SCRATCH and sets CHIP_RESET to `HAD_RUN` / `HAD_POR`; a `WATCHDOG` reset leaves both
+        alone. The chip records it itself, *after* the reset (so the wider reset cannot wipe it), so a chip with
+        no device layer reports the same cause a device does (docs/records/0096-cpp-mcu-core.md, step 1, F1).
+        `from_watchdog=True` is the older spelling of `cause=ResetCause.WATCHDOG`; giving both and
+        contradicting them is an error. The `on_reset` notification is **not** gated by the cause: the USB
+        block is only register-reset when WDSEL selects it, but a chip reset drops the device off the host's bus
+        either way, and `hard_reset()`'s guarantee (0089) must not become conditional on what a guest wrote there.
         Does not start execution again - `leave_reset()` is that, and the RUN pin needs the two
         separable because a held button stays in the first."""
-        self.reset(preserve_flash=True, from_watchdog=from_watchdog)
+        if cause is None:
+            cause = ResetCause.WATCHDOG if from_watchdog else ResetCause.RUN_PIN
+        elif from_watchdog is not None and from_watchdog != (cause is ResetCause.WATCHDOG):
+            raise ValueError(f"enter_reset(from_watchdog={from_watchdog}, cause={cause}): they disagree")
+        self.reset(preserve_flash=True, from_watchdog=cause is ResetCause.WATCHDOG)
         if self.usb_ctrl.on_reset:
             self.usb_ctrl.on_reset()
+        self._record_reset_cause(cause)
+
+    def _record_reset_cause(self, cause: ResetCause) -> None:
+        """0089 section 1.3's table. A watchdog reset is the *absence* of bookkeeping: the watchdog block survives its own reset with REASON (and
+        `watchdog_enable()`'s SCRATCH[4] magic) intact, and CHIP_RESET is untouched, so firmware sees WDT/SOFTWARE/WATCHDOG exactly as it does on
+        silicon. Anything else resets the watchdog and records a chip-level cause (CHIP_RESET reports the *last* reset, one flag at a time)."""
+        if cause is ResetCause.WATCHDOG:
+            return
+        self.watchdog.reset()
+        self.vreg_and_chip_reset.record_reset_cause(HAD_RUN if cause is ResetCause.RUN_PIN else HAD_POR)
 
     def leave_reset(self) -> None:
         """Release the chip: point the core at flash's entry point, where the bootrom would have

@@ -14,7 +14,6 @@ same as `Simulator.execute()`'s own contract - one extra line, no silent deadloc
 import asyncio
 from concurrent.futures import Future
 from concurrent.futures import TimeoutError as FutureTimeoutError
-from enum import Enum, auto
 from os import PathLike
 from pathlib import Path
 from typing import TypeVar
@@ -22,7 +21,7 @@ from typing import TypeVar
 from rp2040py.boards import BoardSpec, build_rp2040_from_spec
 from rp2040py.device.load_flash import load_uf2
 from rp2040py.memory_map import FLASH_START_ADDRESS
-from rp2040py.peripherals.vreg_and_chip_reset import HAD_POR, HAD_RUN
+from rp2040py.reset_cause import ResetCause
 from rp2040py.rp2040 import RP2040
 from rp2040py.simulator import Simulator
 from rp2040py.usb.cdc import USBCDC
@@ -33,31 +32,6 @@ __all__ = ("DEFAULT_TIMEOUT", "BaseDevice", "ResetCause")
 DEFAULT_TIMEOUT = 30.0
 
 _T = TypeVar("_T")
-
-
-class ResetCause(Enum):
-    """Why a chip-level reset happened - what `hard_reset()` records so the firmware coming back up
-    can report it (`machine.reset_cause()` on MicroPython, `microcontroller.cpu.reset_reason` on
-    CircuitPython).
-
-    The three are genuinely different signatures in hardware, not labels on one event
-    (docs/records/0089-one-reset-for-every-trigger.md §1.3):
-
-    - `WATCHDOG` - the guest reset itself, via the watchdog's TRIGGER bit (`machine.reset()`,
-      `microcontroller.reset()`, `mpremote reset`) or a watchdog timeout. The watchdog block keeps
-      its own REASON/SCRATCH bookkeeping across it, and CHIP_RESET is left alone; both firmwares
-      read that as WDT/SOFTWARE/WATCHDOG.
-    - `RUN_PIN` - the RESET button pulling RUN low, and the default for a host-side reset (0089's
-      D4: what "reset the board" corresponds to physically). Clears the watchdog's REASON/scratch
-      and sets CHIP_RESET.HAD_RUN; firmware reads PWRON/RESET_PIN.
-    - `POWER_ON` - a power cycle/brown-out. Same clearing, but CHIP_RESET.HAD_POR - which is also
-      the state a freshly constructed device already starts in, so nothing needs to ask for it
-      today.
-    """
-
-    POWER_ON = auto()
-    RUN_PIN = auto()
-    WATCHDOG = auto()
 
 
 async def _await(future: "Future[_T]", timeout: "float | None") -> _T:
@@ -168,28 +142,13 @@ class BaseDevice:
         the same day): pressing RESET does all of this and *stays* there, and the release is what
         runs `_leave_reset()`. Every other trigger - the watchdog, the host API - has no held
         phase, so `hard_reset()` above simply runs both halves back to back."""
-        self.mcu.enter_reset(from_watchdog=cause is ResetCause.WATCHDOG)
-        # After the chip reset, not before: 0089's Phase 5 widened it to the blocks a real reset
-        # covers, so a cause recorded first would be wiped by the very reset it describes. The
-        # host side of the USB link resets itself through `usb_ctrl.on_reset` (0057's option B) -
-        # this method no longer has to remember `cdc.reset()`, and nor does anything else.
-        self._record_reset_cause(cause)
+        self.mcu.enter_reset(cause=cause)
 
     def _leave_reset(self) -> None:
         """Release the chip: point the core at flash's entry point and let it run. The other half
         of `_enter_reset()`; see there for why the two are separable. The sequence itself lives on
         `RP2040` now - this is the device layer's name for it."""
         self.mcu.leave_reset()
-
-    def _record_reset_cause(self, cause: ResetCause) -> None:
-        """0089 §1.3's table, in three lines. A watchdog reboot is the *absence* of bookkeeping:
-        the watchdog block survives its own reset with REASON (and `watchdog_enable()`'s SCRATCH[4]
-        magic) intact, and CHIP_RESET is untouched, so firmware sees WDT/SOFTWARE/WATCHDOG exactly
-        as it does on silicon."""
-        if cause is ResetCause.WATCHDOG:
-            return
-        self.mcu.watchdog.reset()
-        self.mcu.vreg_and_chip_reset.record_reset_cause(HAD_RUN if cause is ResetCause.RUN_PIN else HAD_POR)
 
     def _post_boot_handshake(self) -> None:
         """Nudge the firmware that has just enumerated into a usable prompt. A no-op here - not

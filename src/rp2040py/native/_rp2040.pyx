@@ -36,7 +36,7 @@ from rp2040py.native._memory_map cimport (
     kWordIndexed,
 )
 from rp2040py.native._dma cimport RPDMA
-from rp2040py.native._mcu cimport kMcuBlockBusctrl, kMcuBlockRtc, kMcuBlockSyscfg, kMcuBlockSysinfo, kMcuBlockTbman, kMcuBlockVreg, Mcu, McuHost, kMcuBlockAdc, kMcuBlockClocks, kMcuBlockDma, kMcuBlockI2c0, kMcuBlockI2c1, kMcuBlockIoBank0, kMcuBlockIoQspi, kMcuBlockPadsBank0, kMcuBlockPadsQspi, kMcuBlockPllSys, kMcuBlockPllUsb, kMcuBlockPpb, kMcuBlockPwm, kMcuBlockRosc, kMcuBlockSio, kMcuBlockSpi0, kMcuBlockSpi1, kMcuBlockTimer, kMcuBlockUart0, kMcuBlockUart1, kMcuBlockWatchdog, kMcuBlockXosc
+from rp2040py.native._mcu cimport kMcuBlockBusctrl, kMcuBlockRtc, kMcuBlockSyscfg, kMcuBlockSysinfo, kMcuBlockTbman, kMcuBlockVreg, Mcu, McuHost, kMcuBlockAdc, kMcuBlockClocks, kMcuBlockDma, kMcuBlockI2c0, kMcuBlockI2c1, kMcuBlockIoBank0, kMcuBlockIoQspi, kMcuBlockPadsBank0, kMcuBlockPadsQspi, kMcuBlockPllSys, kMcuBlockPllUsb, kMcuBlockPpb, kMcuBlockPio0, kMcuBlockPio1, kMcuBlockPwm, kMcuBlockRosc, kMcuBlockSio, kMcuBlockSpi0, kMcuBlockSpi1, kMcuBlockTimer, kMcuBlockUart0, kMcuBlockUart1, kMcuBlockWatchdog, kMcuBlockXosc
 from rp2040py.native._pending cimport park_error, pending_flag, raise_if_pending
 from rp2040py.native._pio cimport PioBlock
 from rp2040py.native._bus cimport BusHost, kBusWarnInvalidRead, kBusWarnUnalignedRead
@@ -319,6 +319,8 @@ cdef dict _BLOCK_WINDOW = {
     kMcuBlockPadsBank0: 0x4001C,
     kMcuBlockPadsQspi: 0x40020,
     kMcuBlockPwm: 0x40050,
+    kMcuBlockPio0: 0x50200,
+    kMcuBlockPio1: 0x50300,
 }  # the block the `Mcu` built -> its key in the peripherals table
 
 
@@ -517,6 +519,16 @@ cdef bool _w_i2c_stop(void* ctx, uint32_t instance) noexcept:
         return False
 
 
+cdef bool _w_pio_started(void* ctx, uint32_t index) noexcept:
+    cdef RP2040 chip = <RP2040> ctx
+    try:
+        chip.pio[index]._world_started()
+    except BaseException as error:
+        park_error(error)
+        return False
+    return True
+
+
 cdef bool _w_adc_read(void* ctx, uint32_t channel) noexcept:
     cdef RP2040 chip = <RP2040> ctx
     try:
@@ -665,6 +677,7 @@ cdef class RP2040:
         world.i2c_read = _w_i2c_read
         world.i2c_stop = _w_i2c_stop
         world.adc_read = _w_adc_read
+        world.pio_started = _w_pio_started
         world.adc_channel_value = _w_adc_channel_value
         self._mcu.build(world)
 

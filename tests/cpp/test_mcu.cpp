@@ -490,6 +490,32 @@ int main() {
         CHECK(m.clock().tick(1e3));
         CHECK(world.pin_changes > pwm_changes);
         CHECK((m.bus.read32(0x40014000 + 8 * 6) & (1u << 8)) != 0);  // GPIO6_STATUS.OUTFROMPERI: the PWM's level, read through the bound source
+
+        // The PIOs (group 5d): both built by the Mcu - the warning under each block's id, an invalid state machine register reported as such, the interrupt lines (PIO0_IRQ_0 = 7, PIO1_IRQ_0 = 9),
+        // the TX request to the DMA, and the pins: a state machine's `set pindirs` / `set pins` reaches a pin whose function is PIO.
+        {
+            const int w = world.warns;
+            (void)m.bus.read32(0x50200000 + 0x300);
+            CHECK(world.warns == w + 1 && world.block == kMcuBlockPio0);
+            (void)m.bus.read32(0x50300000 + 0x300);
+            CHECK(world.warns == w + 2 && world.block == kMcuBlockPio1);
+        }
+        CHECK((m.cpu.pending_interrupts & (1u << 7)) == 0 && (m.cpu.pending_interrupts & (1u << 9)) == 0);
+        m.bus.write32(0x50200000 + 0x12C, 1);  // PIO0 IRQ0_INTE: bit 0
+        m.bus.write32(0x50200000 + 0x130, 1);  // IRQ0_INTF: forced
+        CHECK((m.cpu.pending_interrupts & (1u << 7)) != 0 && (m.cpu.pending_interrupts & (1u << 9)) == 0);
+        m.bus.write32(0x50300000 + 0x138, 1);  // PIO1 IRQ1_INTE
+        m.bus.write32(0x50300000 + 0x13C, 1);  // IRQ1_INTF: PIO1's second line is 10
+        CHECK((m.cpu.pending_interrupts & (1u << 10)) != 0);
+        CHECK(m.dma().dreq(0) && !m.dma().dreq(8 + 4));  // PIO0 TX0 asks for data (its FIFO is empty); PIO1 RX0 does not (nothing was received)
+        m.bus.write32(0x40014000 + 0x04 + 8 * 9, 6);  // GPIO9_CTRL: FUNCSEL = PIO0
+        m.bus.write32(0x50200000 + 0x0DC, (1u << 26) | (9u << 5));    // SM0_PINCTRL: SET_COUNT 1, SET_BASE 9
+        const int pio_changes = world.pin_changes;
+        m.bus.write32(0x50200000 + 0x0D8, 0xE081);  // SM0_INSTR: set pindirs, 1
+        m.bus.write32(0x50200000 + 0x0D8, 0xE001);  // SM0_INSTR: set pins, 1
+        CHECK(m.pio_block(0)->check_changed_pins());  // (a forced instruction outside a cycle: the changed pins are checked on request)
+        CHECK(world.pin_changes > pio_changes && world.pin_number == 9 && world.pin_new == 1);
+        CHECK((m.bus.read32(0x40014000 + 8 * 9) & (1u << 8)) != 0);  // GPIO9_STATUS.OUTFROMPERI
     }
 
     if (failures == 0) std::printf("test_mcu: ok\n");

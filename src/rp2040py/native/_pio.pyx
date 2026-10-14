@@ -7,9 +7,8 @@ Everything a firmware does to a PIO - the registers, the FIFOs the DMA feeds, th
 When the chip adopts this object (`RP2040.peripherals[0x50200] = pio`) it registers the block's own C++ read/write functions in the bus's window table
 (see `_native_window`), so a register access never touches Python, and the batch loop steps the block through `advance()` as one C++ call.
 
-What stays Python is the edge of the block, reached through trampolines whose failures are parked in the shared slot of `_pending.pyx` and re-raised by
-whoever called in: the interrupt lines (`rp2040.set_interrupt`), the DMA's DREQs (`rp2040.dma`), the logger, the "no `Simulator` owns the chip" fallback of
-CTRL (the asyncio task of `run()`), and any pin that is not a native `GPIOPin`. The 30 native pins are read and updated directly through their C++ banks.
+The chip's C++ `Mcu` builds the block (record 0096, step 3a): its lines, its DREQs, its window and its pins are wired there, so this object is only the Python view of it. What the
+`Mcu` hands to Python is the logger (`_warn_kind`) and the "no `Simulator` owns the chip" fallback of CTRL (`_world_started`, the asyncio task of `run()`).
 
 `StateMachine`, the FIFOs and the instruction memory are *views* of the C++ state with the attribute names the Python classes always had (`machines[i].x`,
 `tx_fifo.push()`, `instructions[i]`, ...), so tests, devices and the pin layer see no difference. A `StateMachine` only exists as a part of an `RPPIO`.
@@ -19,106 +18,12 @@ import asyncio
 from libc.stdint cimport int32_t, int64_t, uint32_t
 from libcpp cimport bool as cppbool
 
-from rp2040py.native._dma cimport RPDMA
-from rp2040py.native._gpio_pin cimport GPIOPin
-from rp2040py.native._mcu_irq cimport Mcu, McuIrqLines, mcu_irq_lines, native_mcu, mcu_dreq_number
-from rp2040py.native._pending cimport park_error, raise_if_pending
-from rp2040py.native._pin cimport PinBank
+from rp2040py.native._pending cimport raise_if_pending
 from rp2040py.native._window_map cimport WindowHandler
 
 from rp2040py.peripherals.pio_registers import DREQ_RX0, DREQ_RX1, DREQ_TX0, DREQ_TX1
 
 __all__ = ("RPPIO", "StateMachine")
-
-cdef dict _DREQ_BY_NUMBER = {int(channel): channel for channel in (*DREQ_TX0, *DREQ_RX0, *DREQ_TX1, *DREQ_RX1)}
-
-
-# --- the C++ block's host: what only Python can answer ----------------------------------------------------------------------
-
-cdef cppbool _irq_trampoline(void* ctx, uint32_t line, cppbool level) noexcept:
-    cdef RPPIO pio = <RPPIO> ctx
-    try:
-        pio.rp2040.set_interrupt(line, level)
-    except BaseException as error:
-        park_error(error)
-        return False
-    return True
-
-
-cdef cppbool _dreq_trampoline(void* ctx, uint32_t channel, cppbool set) noexcept:
-    cdef RPPIO pio = <RPPIO> ctx
-    cdef RPDMA native
-    try:
-        dma = pio.rp2040.dma  # looked up on every call: a chip may be given another DMA (a recorder, a test double)
-        if type(dma) is RPDMA:
-            # The chip's own native DMA: the DREQ goes straight into its C++ block - no Python call, no enum - and a
-            # failure it hits (an interrupt line, clk_sys) is already parked, which is what `False` says.
-            native = <RPDMA> dma
-            if set:
-                return native._block.set_dreq(channel)
-            native._block.clear_dreq(channel)
-            return True
-        if set:
-            dma.set_dreq(_DREQ_BY_NUMBER[channel])
-        else:
-            dma.clear_dreq(_DREQ_BY_NUMBER[channel])
-    except BaseException as error:
-        park_error(error)
-        return False
-    return True
-
-
-cdef void _log_trampoline(void* ctx, uint32_t kind, uint32_t a, uint32_t b) noexcept:
-    cdef RPPIO pio = <RPPIO> ctx
-    try:
-        if kind == kPioWarnRead:
-            pio._warn(f"Unimplemented peripheral read from 0x{a:x}")
-        elif kind == kPioWarnReadAtomicArea:
-            pio._warn("Unimplemented read from peripheral in the atomic operation region")
-        elif kind == kPioWarnWrite:
-            pio._warn(f"Unimplemented peripheral write to 0x{a:x}: 0x{b:x}")
-        elif kind == kPioErrorSmRead:
-            pio.error(f"Read from invalid state machine register: {a}")
-        else:  # kPioErrorSmWrite
-            pio.error(f"Write to invalid state machine register: {a}")
-    except BaseException as error:
-        park_error(error)
-
-
-cdef cppbool _pin_update_trampoline(void* ctx, uint32_t pin) noexcept:
-    cdef RPPIO pio = <RPPIO> ctx
-    try:
-        pio.rp2040.gpio[pin].check_for_updates()
-    except BaseException as error:
-        park_error(error)
-        return False
-    return True
-
-
-cdef cppbool _pin_input_trampoline(void* ctx, uint32_t pin, cppbool* level) noexcept:
-    cdef RPPIO pio = <RPPIO> ctx
-    try:
-        level[0] = bool(pio.rp2040.gpio[pin].input_value)
-    except BaseException as error:
-        park_error(error)
-        return False
-    return True
-
-
-cdef cppbool _started_trampoline(void* ctx) noexcept:
-    # A CTRL write started a stopped block. Only run the first batch synchronously inline when no Simulator owns this RP2040
-    # (docs/records/0043-pio-dma-first-batch-race.md / 0037) - a real Simulator's own _execute_batch() steps every non-stopped RPPIO once per CPU
-    # instruction instead, so clock.tick() runs between every PIO step and a DMA-fed FIFO can't be outrun.
-    cdef RPPIO pio = <RPPIO> ctx
-    try:
-        if pio.rp2040.simulator is None:
-            pio._step_batch()
-        if not pio._block.stopped and pio.rp2040.simulator is None:
-            pio._run_task = asyncio.get_running_loop().create_task(pio.run())
-    except BaseException as error:
-        park_error(error)
-        return False
-    return True
 
 
 # --- views of the C++ state -------------------------------------------------------------------------------------------------
@@ -570,8 +475,6 @@ cdef class StateMachine:
 
 cdef class RPPIO:
     def __cinit__(self, rp2040, str name, unsigned int first_irq, unsigned int index):
-        cdef PioHost host
-        cdef GPIOPin pin
         block_address = getattr(rp2040, "_native_pio_address", None)
         if block_address is None:
             raise TypeError(
@@ -579,7 +482,7 @@ cdef class RPPIO:
                 f"{type(rp2040).__name__} is not that (the pure-Python chip has the pure-Python peripherals/_pio.RPPIO)"
             )
         self._from_mcu = True
-        address = block_address(index)  # (a block of the chip: re-initialised here, so a shell that replaces another one starts from reset)
+        address = block_address(index)  # (the chip's `Mcu` builds the block: its lines, requests, pins and window are wired inside)
         if address is None:
             raise ValueError(f"the chip has no PIO block {index}")
         self._block = <PioBlock*> <size_t> address
@@ -590,40 +493,6 @@ cdef class RPPIO:
         self.dreq_rx = DREQ_RX1 if index else DREQ_RX0
         self.dreq_tx = DREQ_TX1 if index else DREQ_TX0
         self._run_task = None
-        self._pin_refs = []
-
-        mcu = native_mcu(rp2040)
-        if mcu != NULL:
-            # the lines go from the C++ block straight to the chip's CPU, with no Python in between (the block passes the absolute NVIC line)
-            self._irq_line.mcu = mcu
-            self._irq_line.base = 0
-            host.set_irq = mcu_irq_lines
-            host.set_irq_ctx = &self._irq_line
-        else:
-            host.set_irq = _irq_trampoline
-            host.set_irq_ctx = NULL
-        if mcu != NULL:
-            # the request goes from the C++ block straight to the chip (and its DMA), with no Python in between
-            host.dreq = mcu_dreq_number
-            host.dreq_ctx = mcu
-        else:
-            host.dreq = _dreq_trampoline
-            host.dreq_ctx = NULL
-        host.log = _log_trampoline
-        host.pin_update = _pin_update_trampoline
-        host.pin_input = _pin_input_trampoline
-        host.started = _started_trampoline
-        host.ctx = <void*> self
-        # The native pins are read and updated through their C++ banks; the objects are kept alive for as long as this block can reach them.
-        gpio = rp2040.gpio
-        if len(gpio) >= 30:
-            for i in range(30):
-                if isinstance(gpio[i], GPIOPin):
-                    pin = <GPIOPin> gpio[i]
-                    self._block.bind_pin(i, pin.bank_ptr(), pin._slot)
-                    self._pin_refs.append(pin)
-        if not self._block.init(host, first_irq, index):
-            raise_if_pending()
         self.machines = [StateMachine(rp2040, self, i) for i in range(4)]
         cdef _InstructionsView view = _InstructionsView.__new__(_InstructionsView)
         view._owner = self
@@ -633,6 +502,28 @@ cdef class RPPIO:
 
     cdef _warn(self, msg):
         self.rp2040.logger.warning(self.name, msg)
+
+    def _warn_kind(self, kind, a, b):
+        """A register access the block does not implement (or an invalid state machine register), as the logger's message (the chip's host calls this for the block it built)."""
+        if kind == kPioWarnRead:
+            self._warn(f"Unimplemented peripheral read from 0x{a:x}")
+        elif kind == kPioWarnReadAtomicArea:
+            self._warn("Unimplemented read from peripheral in the atomic operation region")
+        elif kind == kPioWarnWrite:
+            self._warn(f"Unimplemented peripheral write to 0x{a:x}: 0x{b:x}")
+        elif kind == kPioErrorSmRead:
+            self.error(f"Read from invalid state machine register: {a}")
+        else:  # kPioErrorSmWrite
+            self.error(f"Write to invalid state machine register: {a}")
+
+    def _world_started(self):
+        """A CTRL write started a stopped block. Only run the first batch synchronously inline when no Simulator owns this RP2040
+        (docs/records/0043-pio-dma-first-batch-race.md / 0037) - a real Simulator's own _execute_batch() steps every non-stopped RPPIO once per CPU
+        instruction instead, so clock.tick() runs between every PIO step and a DMA-fed FIFO can't be outrun."""
+        if self.rp2040.simulator is None:
+            self._step_batch()
+        if not self._block.stopped and self.rp2040.simulator is None:
+            self._run_task = asyncio.get_running_loop().create_task(self.run())
 
     def debug(self, msg):
         self.rp2040.logger.debug(self.name, msg)

@@ -60,7 +60,7 @@ using McuResult = BatchResult;
 // What the world supplies to a chip that builds itself (step 3a of the revised plan, record 0096): the one interface the blocks go through for what the core cannot answer alone.
 // For now it is the warning (a register access the block does not implement: the logger of the host); the pins, the console and the rest come with the blocks that need them.
 // `warn(ctx, block, kind, offset, value)`: `block` is a `McuBlock`, `kind` the `kRegWarn*` code of core_host.hpp. `failed` is the host's parked-failure flag, shared by every block.
-enum McuBlock : uint32_t { kMcuBlockRtc = 0, kMcuBlockTbman = 1, kMcuBlockBusctrl = 2, kMcuBlockVreg = 3, kMcuBlockSysinfo = 4, kMcuBlockSyscfg = 5, kMcuBlockTimer = 6, kMcuBlockAdc = 7, kMcuBlockUart0 = 8, kMcuBlockUart1 = 9, kMcuBlockSpi0 = 10, kMcuBlockSpi1 = 11, kMcuBlockI2c0 = 12, kMcuBlockI2c1 = 13, kMcuBlockClocks = 14, kMcuBlockPllSys = 15, kMcuBlockPllUsb = 16, kMcuBlockXosc = 17, kMcuBlockRosc = 18, kMcuBlockPpb = 19, kMcuBlockWatchdog = 20, kMcuBlockDma = 21, kMcuBlockIoBank0 = 22, kMcuBlockIoQspi = 23, kMcuBlockPadsBank0 = 24, kMcuBlockPadsQspi = 25, kMcuBlockSio = 26, kMcuBlockPwm = 27 };
+enum McuBlock : uint32_t { kMcuBlockRtc = 0, kMcuBlockTbman = 1, kMcuBlockBusctrl = 2, kMcuBlockVreg = 3, kMcuBlockSysinfo = 4, kMcuBlockSyscfg = 5, kMcuBlockTimer = 6, kMcuBlockAdc = 7, kMcuBlockUart0 = 8, kMcuBlockUart1 = 9, kMcuBlockSpi0 = 10, kMcuBlockSpi1 = 11, kMcuBlockI2c0 = 12, kMcuBlockI2c1 = 13, kMcuBlockClocks = 14, kMcuBlockPllSys = 15, kMcuBlockPllUsb = 16, kMcuBlockXosc = 17, kMcuBlockRosc = 18, kMcuBlockPpb = 19, kMcuBlockWatchdog = 20, kMcuBlockDma = 21, kMcuBlockIoBank0 = 22, kMcuBlockIoQspi = 23, kMcuBlockPadsBank0 = 24, kMcuBlockPadsQspi = 25, kMcuBlockSio = 26, kMcuBlockPwm = 27, kMcuBlockPio0 = 28, kMcuBlockPio1 = 29 };
 struct McuHost {
     void (*warn)(void* ctx, uint32_t block, uint32_t kind, uint32_t offset, int64_t value) = nullptr;
     void* ctx = nullptr;
@@ -89,6 +89,7 @@ struct McuHost {
     void (*system_reset_request)(void* ctx) = nullptr;                                  // AIRCR.SYSRESETREQ; without it the core alone is reset
     bool (*watchdog_trigger)(void* ctx) = nullptr;                                      // the watchdog fired (or was triggered): the chip's reset; without it nothing happens
     bool (*watchdog_tick)(void* ctx, double tick_hz) = nullptr;                         // the tick changed (0: stopped), after the TIMER and SysTick have followed it
+    bool (*pio_started)(void* ctx, uint32_t index) = nullptr;                           // CTRL started a stopped PIO: the host runs its "no owning Simulator" fallback (the asyncio task of `run()`)
     double (*xosc_hz)(void* ctx) = nullptr;                                             // only while the host has put its own crystal block over the chip's
     double (*rosc_hz)(void* ctx) = nullptr;                                             // ... or its own ring oscillator
     bool (*adc_read)(void* ctx, uint32_t channel) = nullptr;                            // a conversion was requested; the device answers by pushing a sample
@@ -97,6 +98,7 @@ struct McuHost {
 
 constexpr uint32_t kRtcBase = 0x4005C000;    // RTC_BASE
 constexpr uint32_t kPwmBase = 0x40050000, kIrqPwm = 4, kDreqPwm0 = 24;  // PWM_BASE, PWM_IRQ_WRAP, DREQ_PWM_WRAP0
+constexpr uint32_t kPio0Base = 0x50200000, kPio1Base = 0x50300000, kIrqPio0 = 7, kIrqPio1 = 9;  // PIO0_BASE, PIO1_BASE, PIO0_IRQ_0, PIO1_IRQ_0
 constexpr uint32_t kIoBank0Base = 0x40014000, kIoQspiBase = 0x40018000, kPadsBank0Base = 0x4001C000, kPadsQspiBase = 0x40020000;
 constexpr uint32_t kIrqIoBank0 = 13;  // IO_IRQ_BANK0
 constexpr uint32_t kWatchdogBase = 0x40058000, kDmaBase = 0x50000000;
@@ -297,6 +299,26 @@ public:
         bus.windows.attach(kDmaBase, own_dma_.window_handler());
         attach_dma(&own_dma_);
 
+        // The two PIOs: their lines (IRQ0 and the next one), their requests and their pins are the chip's own; the pins are the GPIO bank's (or the host's, for a bank the host holds), and a warning
+        // goes to the host under the block's id. The batch loop steps them (`host_.pio_advance`). Built after the DMA: a block publishes its FIFOs' requests when it starts.
+        for (uint32_t i = 0; i < kPioBlocks; ++i) {
+            pio_ctx_[i].mcu = this;
+            pio_ctx_[i].index = i;
+            PioHost ph;
+            ph.set_irq = pio_irq;
+            ph.set_irq_ctx = this;
+            ph.dreq = pio_dreq;
+            ph.dreq_ctx = this;
+            ph.log = pio_log;
+            ph.pin_update = pio_pin_update;
+            ph.pin_input = pio_pin_input;
+            ph.started = pio_started;
+            ph.ctx = &pio_ctx_[i];
+            (void)pio_[i].init(ph, i == 0 ? kIrqPio0 : kIrqPio1, i);
+            bus.windows.attach(i == 0 ? kPio0Base : kPio1Base, pio_[i].window_handler());
+        }
+        bind_pio_pins();
+
         RtcHost h;
         h.warn = block_warn<kMcuBlockRtc>;
         h.irq = rtc_irq;
@@ -465,7 +487,10 @@ public:
         tree_hook_ctx_ = ctx;
     }
     // `world` true: this bank is the host's (not the `Mcu`'s own), so SIO asks the host for its inputs and tells it of its updates.
-    void set_pin_bank_world(uint32_t bank, bool world) noexcept { pins_world_[bank & 1] = world; }
+    void set_pin_bank_world(uint32_t bank, bool world) noexcept {
+        pins_world_[bank & 1] = world;
+        if (bank == 0) bind_pio_pins();
+    }
     // `world` true: the PWM / this PIO is the host's own (a reference an oracle swapped in), so a pin input that moved is told to the host for it, not to the `Mcu`'s block.
     void set_pwm_world(bool world) noexcept { pwm_world_ = world; }
     void set_pio_world(uint32_t index, bool world) noexcept { pio_world_[index & 1] = world; }
@@ -518,6 +543,31 @@ private:
         return m->tree_hook_ != nullptr ? m->tree_hook_(m->tree_hook_ctx_) : m->clocks_.retune();
     }
     // SIO's host: the pins' effective inputs, the pins whose SIO-driven state moved, and the cycles SIO charges the CPU.
+    // The PIOs' host: `chip` is the `Mcu` for the line and the requests (the PIO passes absolute numbers), a `McuInstance` for the rest.
+    static bool pio_irq(void* chip, uint32_t line, bool level) noexcept { return static_cast<Mcu*>(chip)->set_interrupt(line, level); }
+    static bool pio_dreq(void* chip, uint32_t number, bool set) noexcept { return static_cast<Mcu*>(chip)->set_dreq(number, set); }
+    static void pio_log(void* ctx, uint32_t kind, uint32_t a, uint32_t b) noexcept {
+        const McuInstance* i = static_cast<const McuInstance*>(ctx);
+        const McuHost& w = i->mcu->host_world_;
+        if (w.warn != nullptr) w.warn(w.ctx, i->index == 0 ? kMcuBlockPio0 : kMcuBlockPio1, kind, a, b);
+    }
+    // (reached only for a pin of a bank the host holds: the others the block reads and updates directly)
+    static bool pio_pin_update(void* ctx, uint32_t pin) noexcept { return sio_update_pins(static_cast<const McuInstance*>(ctx)->mcu, 1u << pin, false); }
+    static bool pio_pin_input(void* ctx, uint32_t pin, bool* level) noexcept {
+        *level = (sio_inputs(static_cast<const McuInstance*>(ctx)->mcu, 0) >> pin & 1u) != 0;
+        return true;
+    }
+    static bool pio_started(void* ctx) noexcept {
+        const McuInstance* i = static_cast<const McuInstance*>(ctx);
+        const McuHost& w = i->mcu->host_world_;
+        return w.pio_started == nullptr || w.pio_started(w.ctx, i->index);
+    }
+    // The PIOs read and update the GPIO bank's pins directly; over a bank the host holds they go through the host instead.
+    void bind_pio_pins() noexcept {
+        for (int p = 0; p < kPioBlocks; ++p) {
+            for (uint32_t pin = 0; pin < 30; ++pin) pio_[p].bind_pin(pin, pins_world_[0] ? nullptr : &gpio_bank_, pin);
+        }
+    }
     // The PWM's host: its line and requests, and the pins it drives and reads (the GPIO bank).
     static bool pwm_irq(void* chip, bool level) noexcept { return static_cast<Mcu*>(chip)->set_interrupt(kIrqPwm, level); }
     static bool pwm_dreq(void* chip, uint32_t channel) noexcept { return static_cast<Mcu*>(chip)->set_dreq(kDreqPwm0 + channel, true); }
@@ -739,6 +789,7 @@ private:
     bool pwm_world_ = false;
     bool pio_world_[2] = {false, false};
     PwmBlock pwm_;
+    McuInstance pio_ctx_[2];
     SioBlock sio_;
     PpbBlock ppb_;
     WatchdogBlock watchdog_;

@@ -70,6 +70,8 @@ cdef extern from "mcu.hpp" namespace "rp2040core":
     cdef const uint32_t kMcuBlockPadsQspi
     cdef const uint32_t kMcuBlockSio
     cdef const uint32_t kMcuBlockPwm
+    cdef const uint32_t kMcuBlockPio0
+    cdef const uint32_t kMcuBlockPio1
 
     cdef cppclass McuHost:
         McuHost() noexcept
@@ -95,6 +97,7 @@ cdef extern from "mcu.hpp" namespace "rp2040core":
         double (*xosc_hz)(void* ctx) noexcept
         double (*rosc_hz)(void* ctx) noexcept
         bool (*adc_read)(void* ctx, uint32_t channel) noexcept
+        bool (*pio_started)(void* ctx, uint32_t index) noexcept
         bool (*adc_channel_value)(void* ctx, uint32_t channel, int64_t* value) noexcept
 
     cdef cppclass Mcu:

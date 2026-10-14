@@ -20,14 +20,13 @@
 
 #include <cstdint>
 
-#include "core_host.hpp"
 #include "interpolator.hpp"
 #include "window_map.hpp"
 
 namespace rp2040core {
 
 enum SioWarn : uint32_t {
-    // (0 was the warning for the inter-core FIFO; any access to it now stops the program, see `kFifoUnsupported`)
+    kSioWarnFifo = 0,          // "Inter-core FIFO (0x50-0x58) is not implemented. core1/_thread is unsupported (see docs/records/0053-...)"
     kSioWarnReadInvalid = 1,   // "Read from invalid SIO address: {offset:x}"
     kSioWarnWriteInvalid = 2,  // "Write to invalid SIO address: {offset:x}, value={value:x}"
     // Not a warning: the one way the Python block can raise. A divisor that is non-zero as written but zero once taken as a
@@ -52,8 +51,6 @@ constexpr uint32_t GPIO_OE = 0x020, GPIO_OE_SET = 0x024, GPIO_OE_CLR = 0x028, GP
 constexpr uint32_t GPIO_HI_OUT = 0x030, GPIO_HI_OUT_SET = 0x034, GPIO_HI_OUT_CLR = 0x038, GPIO_HI_OUT_XOR = 0x03C;
 constexpr uint32_t GPIO_HI_OE = 0x040, GPIO_HI_OE_SET = 0x044, GPIO_HI_OE_CLR = 0x048, GPIO_HI_OE_XOR = 0x04C;
 constexpr uint32_t FIFO_ST = 0x050, FIFO_WR = 0x054, FIFO_RD = 0x058, SPINLOCK_ST = 0x05C;
-// Any access to the inter-core FIFO is `multicore_launch_core1()` / `_thread` reaching for core 1, which does not exist yet (docs/records/0053-core1-and-inter-core-fifo.md).
-constexpr const char* kFifoUnsupported = "SIO: the inter-core FIFO (0x50-0x58) was accessed; core 1 is not supported, so multicore_launch_core1() and _thread cannot work (docs/records/0053-core1-and-inter-core-fifo.md)";
 constexpr uint32_t DIV_UDIVIDEND = 0x060, DIV_UDIVISOR = 0x064, DIV_SDIVIDEND = 0x068, DIV_SDIVISOR = 0x06C;
 constexpr uint32_t DIV_QUOTIENT = 0x070, DIV_REMAINDER = 0x074, DIV_CSR = 0x078;
 constexpr uint32_t INTERP0 = 0x080, INTERP1 = 0x0C0;  // each: 16 registers, see the lane offsets below
@@ -155,7 +152,8 @@ public:
             case DIV_REMAINDER: return static_cast<double>(div_remainder);
             case DIV_CSR: return div_csr;
             case FIFO_ST: case FIFO_WR: case FIFO_RD:
-                fatal(kFifoUnsupported);
+                if (host_.warn) host_.warn(host_.ctx, kSioWarnFifo, offset, 0);
+                return 4294967295.0;
             default: break;
         }
         for (int i = 0; i < 2; ++i) {
@@ -226,7 +224,6 @@ public:
             case DIV_SDIVIDEND: div_dividend = value; if (!update_hardware_divider(true)) return false; break;
             case DIV_UDIVISOR: div_divisor = value; if (!update_hardware_divider(false)) return false; break;
             case DIV_SDIVISOR: div_divisor = value; if (!update_hardware_divider(true)) return false; break;
-            case FIFO_ST: case FIFO_WR: case FIFO_RD: fatal(kFifoUnsupported);
             case DIV_QUOTIENT: div_quotient = static_cast<double>(value); div_csr = 0b11; break;
             case DIV_REMAINDER: div_remainder = value; div_csr = 0b11; break;
             default:

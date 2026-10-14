@@ -75,7 +75,13 @@ cdef void _cycles_trampoline(void* ctx, uint32_t cycles) noexcept:
 cdef void _warn_trampoline(void* ctx, uint32_t kind, uint32_t offset, int64_t value) noexcept:
     cdef RPSIO sio = <RPSIO> ctx
     try:
-        if kind == kSioWarnReadInvalid:
+        if kind == kSioWarnFifo:
+            sio.rp2040.logger.warning(
+                "SIO",
+                "Inter-core FIFO (0x50-0x58) is not implemented. core1/_thread is unsupported "
+                "(see docs/records/0053-core1-and-inter-core-fifo.md)",
+            )
+        elif kind == kSioWarnReadInvalid:
             sio.rp2040.logger.warning("SIO", f"Read from invalid SIO address: {offset:x}")
         elif kind == kSioWarnWriteInvalid:
             sio.rp2040.logger.warning("SIO", f"Write to invalid SIO address: {offset:x}, value={value:x}")

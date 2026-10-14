@@ -132,14 +132,14 @@ int main() {
     CHECK(env.cycles == cycles_before && sio.read32(DIV_QUOTIENT) == quotient_before);
     env.warns = 0;
 
-    // Registers the block does not know warn with the unmasked value, .
+    // Registers the block does not know warn with the unmasked value, and the FIFO warns as "not implemented".
     CHECK(sio.read32(0x200) == 0xFFFFFFFFu && env.warns == 1 && env.warn_kind[0] == kSioWarnReadInvalid);
     sio.write32(0x200, -7);
     CHECK(env.warns == 2 && env.warn_kind[1] == kSioWarnWriteInvalid && env.warn_value[1] == -7);
-    // (an access to the inter-core FIFO stops the program with a message - `fatal()`, see tests/test_sio_fifo_unsupported.py, which runs it in a child process)
-    CHECK(sio.read32(INTERP0 + I_BASE_1AND0) == 0xFFFFFFFFu && env.warns == 3);  // write-only: invalid to read
+    CHECK(sio.read32(FIFO_RD) == 0xFFFFFFFFu && env.warns == 3 && env.warn_kind[2] == kSioWarnFifo);
+    CHECK(sio.read32(INTERP0 + I_BASE_1AND0) == 0xFFFFFFFFu && env.warns == 4);  // write-only: invalid to read
     sio.write32(INTERP0 + I_POP_FULL, 1);                                           // read-only: invalid to write
-    CHECK(env.warns == 4);
+    CHECK(env.warns == 5);
     env.warns = 0;
 
     // Interpolator 0, plain mode: result = (accum0 >> shift) & mask; POP writes the lane results back to the accumulators.

@@ -48,11 +48,6 @@ INTERP_ADD_MASK = (
 FIFO_ST = 0x050
 FIFO_WR = 0x054
 FIFO_RD = 0x058
-# Any access to the inter-core FIFO is `multicore_launch_core1()` / `_thread` reaching for core 1, which does not exist yet: the C++ block stops the program with this message (`fatal()`), this reference raises it.
-FIFO_UNSUPPORTED = (
-    "SIO: the inter-core FIFO (0x50-0x58) was accessed; core 1 is not supported, so multicore_launch_core1() and _thread cannot work "
-    "(docs/records/0053-core1-and-inter-core-fifo.md)"
-)
 
 # HARDWARE DIVIDER
 DIV_UDIVIDEND = 0x060  # Divider unsigned dividend
@@ -300,14 +295,17 @@ class RPSIO:
         if offset == INTERP1_ACCUM1_ADD:
             return self.interp1.smresult1
         if offset in (FIFO_ST, FIFO_WR, FIFO_RD):
-            raise NotImplementedError(FIFO_UNSUPPORTED)
+            self.rp2040.logger.warning(
+                LOG_NAME,
+                "Inter-core FIFO (0x50-0x58) is not implemented. core1/_thread is unsupported "
+                "(see docs/records/0053-core1-and-inter-core-fifo.md)",
+            )
+            return 0xFFFFFFFF
 
         self.rp2040.logger.warning(LOG_NAME, f"Read from invalid SIO address: {offset:x}")
         return 0xFFFFFFFF
 
     def write_uint32(self, offset: int, value: int) -> None:
-        if offset in (FIFO_ST, FIFO_WR, FIFO_RD):
-            raise NotImplementedError(FIFO_UNSUPPORTED)
         if SPINLOCK0 <= offset <= SPINLOCK31:
             bit_index_mask = ~(1 << ((offset - SPINLOCK0) // 4))
             self.spin_lock &= bit_index_mask

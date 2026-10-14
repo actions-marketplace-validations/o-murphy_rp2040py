@@ -53,7 +53,7 @@ Follows the datasheet's own table of contents (chapter.section), so a row is som
 | 2.1.4 | Narrow IO register writes | Unchecked | | - |
 | 2.2 | Address map | Done | memory_map, the window table | - |
 | 2.3.1 | SIO: divider, interpolators, spinlocks, GPIO ops | Done | 0098 | - |
-| 2.3.1 | SIO: inter-core FIFO | Missing | needs core 1 (record 0053); **any access stops the program** with a message (native: `fatal()`; pure Python: `NotImplementedError`) instead of hanging in the SDK's launch handshake | Needs core 1 |
+| 2.3.1 | SIO: inter-core FIFO | Missing | needs core 1 (record 0053) | Needs core 1 |
 | 2.3.2 | Interrupts: every IRQ line | Partial | to core 0 only | Needs core 1 |
 | 2.3.3 | Event signals (SEV / WFE) | Done | | - |
 | 2.3.4 | Debug | Partial | a GDB stub, not an SWD/DAP model | - |
@@ -199,7 +199,7 @@ Introduction (1), electrical and mechanical (5): n/a.
 |---|---|---|---|
 | WASM host and the drop-in for rp2040js | Missing | record 0099, step zero not started | Go-ahead |
 | Consolidating the Cython shells | Missing | less wrapper code once the ports are done | After the 0096 gate |
-| Step 0 closures before the plan: ~~the DMA reading `clk_sys` from the tree~~ (done 2026-10-14); `update_io_interrupt()` / `gpio_values()` over the pin banks in C++; the crystal's frequency and the ROSC reaching the tree directly; ~~`multicore_launch_core1` failing loudly~~ (done 2026-10-14) | Missing | 0096, entry of 2026-10-14 (the order and the gate G1-G8); each small, with an oracle | Each its own go-ahead; first |
+| Step 0 closures before the plan: ~~the DMA reading `clk_sys` from the tree~~ (done 2026-10-14); `update_io_interrupt()` / `gpio_values()` over the pin banks in C++; the crystal's frequency and the ROSC reaching the tree directly; `multicore_launch_core1` failing loudly | Missing | 0096, entry of 2026-10-14 (the order and the gate G1-G8); each small, with an oracle | Each its own go-ahead; first |
 | The core's step interface and top-level host interface (one flat struct of callbacks, `Mcu::run`; pacing stays the wrapper's) | Missing | 0096, entry of 2026-10-14 | After the plan; own go-ahead |
 | The reset cascade, the wiring and the chip-level interrupt lines (`set_interrupt`, `update_io_interrupt`) in C++; the DMA reading `clk_sys` from the tree | Missing | still in `native/_rp2040.pyx` and `_rp2040.py`; the pure-Python chip stays as the reference and fallback (0096, 2026-10-14) | After the plan; own go-ahead |
 | A chip-level oracle over every reset trigger (power-on, RUN pin, watchdog with each `WDSEL`) | Missing | holds the native cascade equal to the pure one | With the cascade |

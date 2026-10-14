@@ -19,6 +19,7 @@ from rp2040py.native._clocks cimport ClocksBlock
 from rp2040py.native._i2c cimport I2cBlock
 from rp2040py.native._pll cimport PllBlock
 from rp2040py.native._ppb cimport PpbBlock
+from rp2040py.native._pwm cimport PwmBlock
 from rp2040py.native._rosc cimport RoscBlock
 from rp2040py.native._rtc cimport RtcBlock
 from rp2040py.native._sio cimport SioBlock
@@ -68,6 +69,7 @@ cdef extern from "mcu.hpp" namespace "rp2040core":
     cdef const uint32_t kMcuBlockPadsBank0
     cdef const uint32_t kMcuBlockPadsQspi
     cdef const uint32_t kMcuBlockSio
+    cdef const uint32_t kMcuBlockPwm
 
     cdef cppclass McuHost:
         McuHost() noexcept
@@ -84,7 +86,7 @@ cdef extern from "mcu.hpp" namespace "rp2040core":
         bool (*i2c_stop)(void* ctx, uint32_t instance) noexcept
         bool (*pin_source)(void* ctx, uint32_t bank, uint32_t source, uint32_t* value) noexcept
         bool (*pin_changed)(void* ctx, uint32_t bank, uint32_t pin, int new_state, int old_state) noexcept
-        bool (*pin_input_changed)(void* ctx, uint32_t bank, uint32_t pin, bool function_is_pwm) noexcept
+        bool (*pin_input_changed)(void* ctx, uint32_t bank, uint32_t pin, bool pwm, uint32_t pio_mask) noexcept
         bool (*pin_inputs)(void* ctx, uint32_t bank, uint32_t* value) noexcept
         bool (*pin_update)(void* ctx, uint32_t bank, uint32_t pin_mask) noexcept
         void (*system_reset_request)(void* ctx) noexcept
@@ -125,6 +127,7 @@ cdef extern from "mcu.hpp" namespace "rp2040core":
         IoBlock& io(uint32_t bank) noexcept
         PadsBlock& pads(uint32_t bank) noexcept
         SioBlock& sio() noexcept
+        PwmBlock& pwm() noexcept
         PpbBlock& ppb() noexcept
         WatchdogBlock& watchdog() noexcept
         DmaBlock& dma() noexcept
@@ -134,6 +137,8 @@ cdef extern from "mcu.hpp" namespace "rp2040core":
         RoscBlock& rosc() noexcept
         void set_crystal_hz(double hz) noexcept
         void set_pin_bank_world(uint32_t bank, bool world) noexcept
+        void set_pwm_world(bool world) noexcept
+        void set_pio_world(uint32_t index, bool world) noexcept
         void set_tree_hook(McuTreeHook hook, void* ctx) noexcept
         TimerBlock& timer() noexcept
         AdcBlock& adc() noexcept

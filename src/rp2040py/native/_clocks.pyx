@@ -213,7 +213,7 @@ cdef class RPClocks:
             else self._block.add_sys_sink(_ppb_python_sink, <void*> self)
         )
         ok = ok and (
-            self._block.add_sys_sink(pwm_sys_sink, <void*> &(<RPPWM> pwm)._block)
+            self._block.add_sys_sink(pwm_sys_sink, <void*> (<RPPWM> pwm)._block)
             if isinstance(pwm, RPPWM)
             else self._block.add_sys_sink(_pwm_python_sink, <void*> self)
         )

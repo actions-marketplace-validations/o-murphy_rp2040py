@@ -468,6 +468,28 @@ int main() {
         CHECK(world.pin_changes > sio_changes && world.pin_bank == 0 && world.pin_number == 7 && world.pin_new == 1);  // HIGH, told to the host's listeners
         m.bus.write32(0xD0000000 + 0x18, 1u << 7);            // GPIO_OUT_CLR
         CHECK(world.pin_new == 0);                            // LOW
+
+        // PWM (group 5c): the Mcu builds it, binds its direction / value words to the pin banks' sources and takes its line (PWM_IRQ_WRAP, 4) and its DREQs.
+        {
+            const int w = world.warns;
+            (void)m.bus.read32(0x40050000 + 0x300);
+            CHECK(world.warns == w + 1 && world.block == kMcuBlockPwm);
+        }
+        CHECK((m.cpu.pending_interrupts & (1u << 4)) == 0);
+        m.bus.write32(0x40050000 + 0xA8, 1);  // INTE: slice 0
+        m.bus.write32(0x40050000 + 0xAC, 1);  // INTF: forces slice 0's wrap
+        CHECK((m.cpu.pending_interrupts & (1u << 4)) != 0);
+        m.bus.write32(0x40050000 + 0xAC, 0);
+        CHECK((m.cpu.pending_interrupts & (1u << 4)) == 0);
+        // Slice 3 on pin 6 (GPIO6 is PWM3 A): TOP 3, CC A 3 -> the level is high once enabled; the change reaches the host's listeners and the pin's status reads it.
+        m.bus.write32(0x40014000 + 0x04 + 8 * 6, 4);  // GPIO6_CTRL: FUNCSEL = PWM
+        m.bus.write32(0x40050000 + 3 * 0x14 + 0x10, 3);    // CH3_TOP
+        m.bus.write32(0x40050000 + 3 * 0x14 + 0x0C, 3);    // CH3_CC: A = 3 (>= TOP: always high)
+        const int pwm_changes = world.pin_changes;
+        m.bus.write32(0x40050000 + 3 * 0x14 + 0x00, 1);    // CH3_CSR.EN
+        CHECK(m.clock().tick(1e3));
+        CHECK(world.pin_changes > pwm_changes);
+        CHECK((m.bus.read32(0x40014000 + 8 * 6) & (1u << 8)) != 0);  // GPIO6_STATUS.OUTFROMPERI: the PWM's level, read through the bound source
     }
 
     if (failures == 0) std::printf("test_mcu: ok\n");

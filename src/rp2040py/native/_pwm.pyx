@@ -77,12 +77,7 @@ cdef cppbool _pin_read_trampoline(void* ctx, uint32_t pin, cppbool* level) noexc
 cdef void _warn_trampoline(void* ctx, uint32_t kind, uint32_t offset, int64_t value) noexcept:
     cdef RPPWM pwm = <RPPWM> ctx
     try:
-        if kind == kPwmWarnRead:
-            pwm.warn(f"Unimplemented peripheral read from 0x{offset:x}")
-        elif kind == kPwmWarnReadAtomicArea:
-            pwm.warn("Unimplemented read from peripheral in the atomic operation region")
-        else:
-            pwm.warn(f"Unimplemented peripheral write to 0x{offset:x}: 0x{value:x}")
+        pwm._warn_kind(kind, offset, value)
     except BaseException as error:
         park_error(error)
 
@@ -374,7 +369,7 @@ cdef class _Channel:
 
 
 cdef class RPPWM:
-    def __init__(self, rp2040, name):
+    def __init__(self, rp2040, name, mcu_index=-1):
         cdef PwmHost host
         cdef _Channel channel
         cdef _TimerView timer
@@ -390,31 +385,37 @@ cdef class RPPWM:
         self.rp2040 = rp2040
         self.name = name
         self.clock = clock
-        mcu = native_mcu(rp2040)
-        if mcu != NULL:
-            # the line goes from the C++ block straight to the chip's CPU, with no Python in between
-            self._irq_line.mcu = mcu
-            self._irq_line.line = <uint32_t> int(IRQ.PWM_WRAP)
-            host.irq = mcu_irq_line
-            host.irq_ctx = &self._irq_line
+        self._from_mcu = mcu_index >= 0
+        if mcu_index >= 0:
+            # the chip's C++ `Mcu` holds this block (its line, request and pins are wired inside): this object is the Python view of it
+            self._block = <PwmBlock*> <size_t> rp2040._native_pwm_address()
         else:
-            host.irq = _irq_trampoline
-            host.irq_ctx = NULL
-        if mcu != NULL:
-            # the request goes from the C++ block straight to the chip (and its DMA), with no Python in between
-            self._dreq_base.mcu = mcu
-            self._dreq_base.base = <uint32_t> int(DREQChannel.DREQ_PWM_WRAP0)
-            host.dreq = mcu_dreq_base
-            host.dreq_ctx = &self._dreq_base
-        else:
-            host.dreq = _dreq_trampoline
-            host.dreq_ctx = NULL
-        host.pin_changed = _pin_changed_trampoline
-        host.pin_read = _pin_read_trampoline
-        host.warn = _warn_trampoline
-        host.ctx = <void*> self
-        host.failed = pending_flag()
-        self._block.init(&(<SimulationClock> clock)._clock, host, <double> rp2040.clk_sys)
+            self._block = &self._own
+            mcu = native_mcu(rp2040)
+            if mcu != NULL:
+                # the line goes from the C++ block straight to the chip's CPU, with no Python in between
+                self._irq_line.mcu = mcu
+                self._irq_line.line = <uint32_t> int(IRQ.PWM_WRAP)
+                host.irq = mcu_irq_line
+                host.irq_ctx = &self._irq_line
+            else:
+                host.irq = _irq_trampoline
+                host.irq_ctx = NULL
+            if mcu != NULL:
+                # the request goes from the C++ block straight to the chip (and its DMA), with no Python in between
+                self._dreq_base.mcu = mcu
+                self._dreq_base.base = <uint32_t> int(DREQChannel.DREQ_PWM_WRAP0)
+                host.dreq = mcu_dreq_base
+                host.dreq_ctx = &self._dreq_base
+            else:
+                host.dreq = _dreq_trampoline
+                host.dreq_ctx = NULL
+            host.pin_changed = _pin_changed_trampoline
+            host.pin_read = _pin_read_trampoline
+            host.warn = _warn_trampoline
+            host.ctx = <void*> self
+            host.failed = pending_flag()
+            self._own.init(&(<SimulationClock> clock)._clock, host, <double> rp2040.clk_sys)
         views = []
         for i in range(8):
             channel = _Channel.__new__(_Channel)
@@ -447,9 +448,19 @@ cdef class RPPWM:
             views.append(channel)
         self.channels = views
 
+    def _warn_kind(self, kind, offset, value):
+        """A register access the block does not implement, as the logger's message (the chip's host calls this for the block it built)."""
+        if kind == kPwmWarnRead:
+            self.warn(f"Unimplemented peripheral read from 0x{offset:x}")
+        elif kind == kPwmWarnReadAtomicArea:
+            self.warn("Unimplemented read from peripheral in the atomic operation region")
+        else:
+            self.warn(f"Unimplemented peripheral write to 0x{offset:x}: 0x{value:x}")
+
     def __dealloc__(self):
-        # Safe whichever of this block and its clock the collector frees first: the C++ clock unlinks its alarms when it dies.
-        self._block.detach()
+        # Safe whichever of this block and its clock the collector frees first: the C++ clock unlinks its alarms when it dies. The chip's own block is the `Mcu`'s to detach.
+        if self._block == &self._own:
+            self._own.detach()
 
     # --- the reference's attributes --------------------------------------------------------------
 

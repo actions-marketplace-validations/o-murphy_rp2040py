@@ -133,6 +133,7 @@ cdef extern from "pio.hpp" namespace "rp2040core":
 cdef class RPPIO:
     cdef McuIrqLines _irq_line  # the line straight to the chip, when it has one (core/mcu.hpp)
     cdef PioBlock* _block  # the chip's own (core/mcu.hpp): this object is its Python view
+    cdef public bint _from_mcu  # (always: a PIO shell is the view of the chip's block)
     cdef public object rp2040
     cdef public str name
     cdef public list machines

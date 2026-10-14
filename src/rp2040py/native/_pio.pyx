@@ -578,6 +578,7 @@ cdef class RPPIO:
                 "the native PIO is a view of a block of the native chip's C++ core; "
                 f"{type(rp2040).__name__} is not that (the pure-Python chip has the pure-Python peripherals/_pio.RPPIO)"
             )
+        self._from_mcu = True
         address = block_address(index)  # (a block of the chip: re-initialised here, so a shell that replaces another one starts from reset)
         if address is None:
             raise ValueError(f"the chip has no PIO block {index}")

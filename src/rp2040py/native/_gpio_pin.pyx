@@ -102,7 +102,7 @@ cdef cppbool _io_interrupt_trampoline(void* ctx) noexcept:
 cdef cppbool _input_trampoline(void* ctx, uint32_t pin_index, cppbool function_is_pwm) noexcept:
     cdef GPIOPinBank owner = <GPIOPinBank> ctx
     try:
-        owner._world_input(pin_index, bool(function_is_pwm))
+        owner._world_input(pin_index, bool(function_is_pwm), 3)
     except BaseException as error:
         park_error(error)
         return False
@@ -189,11 +189,13 @@ cdef class GPIOPinBank:
         for listener in pin._listeners:
             listener(value, last_value)
 
-    def _world_input(self, pin_index, function_is_pwm):
+    def _world_input(self, pin_index, function_is_pwm, pio_mask):
         rp = self.rp2040
         if function_is_pwm:
             rp.pwm.gpio_on_input(pin_index)
-        for pio in rp.pio:
+        for pio_index, pio in enumerate(rp.pio):
+            if not (pio_mask >> pio_index) & 1:
+                continue
             for machine in pio.machines:
                 if (
                     machine.enabled

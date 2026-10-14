@@ -36,7 +36,7 @@ from rp2040py.native._memory_map cimport (
     kWordIndexed,
 )
 from rp2040py.native._dma cimport RPDMA
-from rp2040py.native._mcu cimport kMcuBlockBusctrl, kMcuBlockRtc, kMcuBlockSyscfg, kMcuBlockSysinfo, kMcuBlockTbman, kMcuBlockVreg, Mcu, McuHost, kMcuBlockAdc, kMcuBlockClocks, kMcuBlockDma, kMcuBlockI2c0, kMcuBlockI2c1, kMcuBlockIoBank0, kMcuBlockIoQspi, kMcuBlockPadsBank0, kMcuBlockPadsQspi, kMcuBlockPllSys, kMcuBlockPllUsb, kMcuBlockPpb, kMcuBlockRosc, kMcuBlockSio, kMcuBlockSpi0, kMcuBlockSpi1, kMcuBlockTimer, kMcuBlockUart0, kMcuBlockUart1, kMcuBlockWatchdog, kMcuBlockXosc
+from rp2040py.native._mcu cimport kMcuBlockBusctrl, kMcuBlockRtc, kMcuBlockSyscfg, kMcuBlockSysinfo, kMcuBlockTbman, kMcuBlockVreg, Mcu, McuHost, kMcuBlockAdc, kMcuBlockClocks, kMcuBlockDma, kMcuBlockI2c0, kMcuBlockI2c1, kMcuBlockIoBank0, kMcuBlockIoQspi, kMcuBlockPadsBank0, kMcuBlockPadsQspi, kMcuBlockPllSys, kMcuBlockPllUsb, kMcuBlockPpb, kMcuBlockPwm, kMcuBlockRosc, kMcuBlockSio, kMcuBlockSpi0, kMcuBlockSpi1, kMcuBlockTimer, kMcuBlockUart0, kMcuBlockUart1, kMcuBlockWatchdog, kMcuBlockXosc
 from rp2040py.native._pending cimport park_error, pending_flag, raise_if_pending
 from rp2040py.native._pio cimport PioBlock
 from rp2040py.native._bus cimport BusHost, kBusWarnInvalidRead, kBusWarnUnalignedRead
@@ -318,6 +318,7 @@ cdef dict _BLOCK_WINDOW = {
     kMcuBlockIoQspi: 0x40018,
     kMcuBlockPadsBank0: 0x4001C,
     kMcuBlockPadsQspi: 0x40020,
+    kMcuBlockPwm: 0x40050,
 }  # the block the `Mcu` built -> its key in the peripherals table
 
 
@@ -391,10 +392,10 @@ cdef bool _w_pin_changed(void* ctx, uint32_t bank, uint32_t pin, int new_state, 
     return True
 
 
-cdef bool _w_pin_input_changed(void* ctx, uint32_t bank, uint32_t pin, bool function_is_pwm) noexcept:
+cdef bool _w_pin_input_changed(void* ctx, uint32_t bank, uint32_t pin, bool pwm, uint32_t pio_mask) noexcept:
     cdef RP2040 chip = <RP2040> ctx
     try:
-        _bank_of(chip, bank)._world_input(pin, function_is_pwm)
+        _bank_of(chip, bank)._world_input(pin, pwm, pio_mask)
     except BaseException as error:
         park_error(error)
         return False
@@ -687,7 +688,7 @@ cdef class RP2040:
             ),
         ]
         self.i2c = [RPI2C(self, "I2C0", IRQ.I2C0, 0), RPI2C(self, "I2C1", IRQ.I2C1, 1)]
-        self.pwm = RPPWM(self, "PWM_BASE")
+        self.pwm = RPPWM(self, "PWM_BASE", 0)
         self.adc = RPADC(self, "ADC", 0)
 
         # The chip's pins are slots of two banks (30 GPIO pins, 6 QSPI pins). The native ones share two C++ banks: the IO_BANK0 / IO_QSPI / PADS windows work on them directly, and the
@@ -1098,6 +1099,14 @@ cdef class RP2040:
 
     def _bind_pin_sources(self):
         """Points the chip's native pin banks at the registers of the native SIO / PIO / PWM blocks, where there are such (core/pin.hpp's direct sources); callable again whenever one is replaced."""
+        # A PWM or a PIO that is the host's own (not the `Mcu`'s) is told of a pin input that moved by the host, not inside (`Mcu::set_pwm_world` / `set_pio_world`).
+        pwm_block = self._pwm_block  # (a cdef field: not reachable by getattr)
+        if pwm_block is not None:
+            self._mcu.set_pwm_world(not getattr(pwm_block, "_from_mcu", False))
+        pio_blocks = self._pio_blocks
+        if pio_blocks is not None:
+            for index in range(2):
+                self._mcu.set_pio_world(index, not (index < len(pio_blocks) and getattr(pio_blocks[index], "_from_mcu", False)))
         for bank in (getattr(self, "_gpio_bank", None), getattr(self, "_qspi_bank", None)):
             if isinstance(bank, _NativeGPIOPinBank):  # a pure-Python bank (an oracle's reference pins) reads the blocks itself
                 bind_pin_sources(bank, self)
@@ -1464,6 +1473,9 @@ cdef class RP2040:
 
     def _native_pads_address(self, bank):
         return <size_t> &self._mcu.pads(<uint32_t> bank)
+
+    def _native_pwm_address(self):
+        return <size_t> &self._mcu.pwm()
 
     def _native_sio_address(self):
         return <size_t> &self._mcu.sio()

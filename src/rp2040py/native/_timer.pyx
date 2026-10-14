@@ -55,7 +55,7 @@ cdef void _warn_trampoline(void* ctx, uint32_t kind, uint32_t offset, int64_t va
 
 
 cdef class RPTimer:
-    def __init__(self, rp2040, name):
+    def __init__(self, rp2040, name, mcu_index=-1):
         cdef TimerHost host
         clock = rp2040.clock
         if not isinstance(clock, SimulationClock):
@@ -66,6 +66,11 @@ cdef class RPTimer:
         self.rp2040 = rp2040
         self.name = name
         self.clock = clock
+        if mcu_index >= 0:
+            # the chip's C++ `Mcu` has built this block already - with its window on the bus, its line and request on the chip - and this object is the Python view of it
+            self._block = <TimerBlock*> <size_t> rp2040._native_timer_address()
+            return
+        self._block = &self._own
         mcu = native_mcu(rp2040)
         if mcu != NULL:
             # the lines go from the C++ block straight to the chip's CPU, with no Python in between (the block passes the absolute NVIC line)
@@ -80,11 +85,21 @@ cdef class RPTimer:
         host.ctx = <void*> self
         for i in range(4):
             host.lines[i] = _TIMER_IRQS[i]
-        self._block.init(&(<SimulationClock> clock)._clock, host)
+        self._own.init(&(<SimulationClock> clock)._clock, host)
+
+    def _warn_kind(self, kind, offset, value):
+        """A register access the block does not implement, as the logger's message (the chip's host calls this for the block it built)."""
+        if kind == kTimerWarnRead:
+            self.warn(f"Unimplemented peripheral read from 0x{offset:x}")
+        elif kind == kTimerWarnReadAtomicArea:
+            self.warn("Unimplemented read from peripheral in the atomic operation region")
+        else:
+            self.warn(f"Unimplemented peripheral write to 0x{offset:x}: 0x{value:x}")
 
     def __dealloc__(self):
         # Safe whichever of this block and its clock the collector frees first: the C++ clock unlinks its alarms when it dies.
-        self._block.detach()
+        if self._block == &self._own:
+            self._own.detach()
 
     # --- BasePeripheral's surface -----------------------------------------------------------------
 

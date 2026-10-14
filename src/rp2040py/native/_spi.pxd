@@ -77,7 +77,8 @@ cdef extern from "spi.hpp" namespace "rp2040core":
 cdef class RPSPI:
     cdef McuDreqPair _dreq_pair  # the DMA request straight to the chip, when it has one (core/mcu.hpp)
     cdef McuIrqLine _irq_line  # the line straight to the chip, when it has one (core/mcu.hpp)
-    cdef SpiBlock _block
+    cdef SpiBlock* _block  # the chip's (`Mcu` builds and wires it), or `_own` for a block made directly (a stand-in chip, a test)
+    cdef SpiBlock _own
     cdef public object rp2040
     cdef public object name
     cdef public object irq

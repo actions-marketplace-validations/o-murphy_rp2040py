@@ -96,7 +96,8 @@ cdef extern from "i2c.hpp" namespace "rp2040core":
 
 cdef class RPI2C:
     cdef McuIrqLine _irq_line  # the line straight to the chip, when it has one (core/mcu.hpp)
-    cdef I2cBlock _block
+    cdef I2cBlock* _block  # the chip's (`Mcu` builds and wires it), or `_own` for a block made directly (a stand-in chip, a test)
+    cdef I2cBlock _own
     cdef public object rp2040
     cdef public object name
     cdef public object irq

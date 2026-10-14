@@ -158,7 +158,7 @@ cdef class _AlarmView:
 
 
 cdef class RPADC:
-    def __init__(self, rp2040, name):
+    def __init__(self, rp2040, name, mcu_index=-1):
         cdef AdcHost host
         clock = rp2040.clock
         if not isinstance(clock, SimulationClock):
@@ -175,6 +175,11 @@ cdef class RPADC:
         self.dreq = DREQChannel.DREQ_ADC
         self._on_adc_read = None
         self._sample_time = 2
+        if mcu_index >= 0:
+            # the chip's C++ `Mcu` has built this block already - with its window on the bus, its line and request on the chip - and this object is the Python view of it
+            self._block = <AdcBlock*> <size_t> rp2040._native_adc_address()
+            return
+        self._block = &self._own
         mcu = native_mcu(rp2040)
         if mcu != NULL:
             # the line goes from the C++ block straight to the chip's CPU, with no Python in between
@@ -199,11 +204,32 @@ cdef class RPADC:
         host.warn = _warn_trampoline
         host.ctx = <void*> self
         host.failed = pending_flag()
-        self._block.init(&(<SimulationClock> clock)._clock, host)
+        self._own.init(&(<SimulationClock> clock)._clock, host)
+
+    def _world_read(self, channel):
+        """A conversion was requested: the attached device answers; with none, the reference's default device does."""
+        callback = self._on_adc_read
+        if callback is None:
+            self._block.default_adc_read(channel)
+            return
+        callback(channel)
+
+    def _world_channel_value(self, channel):
+        return int(self.channel_values[channel])
+
+    def _warn_kind(self, kind, offset, value):
+        """A register access the block does not implement, as the logger's message (the chip's host calls this for the block it built)."""
+        if kind == kAdcWarnRead:
+            self.warn(f"Unimplemented peripheral read from 0x{offset:x}")
+        elif kind == kAdcWarnReadAtomicArea:
+            self.warn("Unimplemented read from peripheral in the atomic operation region")
+        else:
+            self.warn(f"Unimplemented peripheral write to 0x{offset:x}: 0x{value:x}")
 
     def __dealloc__(self):
         # Safe whichever of this block and its clock the collector frees first: the C++ clock unlinks its alarms when it dies.
-        self._block.detach()
+        if self._block == &self._own:
+            self._own.detach()
 
     # --- the device on the pins ------------------------------------------------------------------
 

@@ -23,6 +23,8 @@ static double monotonic(void*) noexcept { return fake_now += fake_step; }
 
 static bool alarm_fail(void*) noexcept { return false; }
 
+static DmaBlock dma_probe;  // (never initialised: only its DREQ bits are read)
+
 int main() {
     Mcu mcu;
     mcu.bus.mem.attach({0x20000000, 4096, 4096, 0xFFFFFFFF, sram, kSubWord});
@@ -234,6 +236,8 @@ int main() {
         struct World {
             int warns = 0;
             uint32_t block = 99, kind = 99, offset = 0;
+            int transmits = 0;
+            uint32_t transmit_instance = 99, transmit_value = 0;
         } world;
         Mcu m;
         m.cpu.init(&m.bus, {}, 25);
@@ -245,6 +249,17 @@ int main() {
             w->block = block;
             w->kind = kind;
             w->offset = offset;
+        };
+        host.spi_transmit = [](void* ctx, uint32_t instance, uint32_t value) {
+            World* w = static_cast<World*>(ctx);
+            ++w->transmits;
+            w->transmit_instance = instance;
+            w->transmit_value = value;
+            return true;
+        };
+        host.spi_bit_ns = [](void*, uint32_t, double* nanos) {
+            *nanos = 1000.0;  // the host answers for the bit clock: 1 us per SSPCLKOUT period
+            return true;
         };
         m.build(host);
         const uint32_t rtc = 0x4005C000;  // (literal: the constant under test must not vouch for itself)
@@ -300,6 +315,43 @@ int main() {
         CHECK(world.block == kMcuBlockSysinfo && world.warns == before + 3);
         (void)m.bus.read32(0x40004000 + 0x3C);
         CHECK(world.block == kMcuBlockSyscfg && world.warns == before + 4);
+
+        // Group 2 (step 3a): TIMER, ADC, UART x2, SPI x2, I2C x2. Literals only.
+        const uint32_t bases[8] = {0x40054000, 0x4004C000, 0x40034000, 0x40038000, 0x4003C000, 0x40040000, 0x40044000, 0x40048000};
+        const uint32_t ids[8] = {kMcuBlockTimer, kMcuBlockAdc, kMcuBlockUart0, kMcuBlockUart1, kMcuBlockSpi0, kMcuBlockSpi1, kMcuBlockI2c0, kMcuBlockI2c1};
+        for (int k = 0; k < 8; ++k) {  // each block warns under its own id (the instance ones through their McuInstance)
+            const int w = world.warns;
+            (void)m.bus.read32(bases[k] + 0x200);
+            CHECK(world.warns == w + 1 && world.block == ids[k] && world.kind == kRegWarnRead && world.offset == 0x200);
+        }
+        m.bus.write32(0x40054000 + 0x3C, 1);  // TIMER.INTF: forces TIMER_IRQ_0
+        CHECK((m.cpu.pending_interrupts & (1u << 0)) != 0);
+        for (uint32_t u = 0; u < 2; ++u) {  // UART: the TX interrupt, and the TX request on the DMA
+            const uint32_t base = bases[2 + u];
+            m.bus.write32(base + 0x30, 0x301);  // UARTCR: UARTEN | TXE | RXE
+            m.bus.write32(base + 0x38, 1u << 5);  // UARTIMSC: TX interrupt
+            m.bus.write32(base + 0x00, 0x41);    // UARTDR
+            CHECK((m.cpu.pending_interrupts & (1u << (20 + u))) != 0);
+            m.bus.write32(base + 0x48, 1u << 1);  // UARTDMACR: TXDMAE
+        }
+        CHECK(m.set_dreq(40, true) && !dma_probe.dreq(20) && !dma_probe.dreq(22));  // (no DMA attached yet: nowhere to go)
+        m.attach_dma(&dma_probe);
+        for (uint32_t u = 0; u < 2; ++u) m.bus.write32(bases[2 + u] + 0x48, 0), m.bus.write32(bases[2 + u] + 0x48, 1u << 1);
+        CHECK(dma_probe.dreq(20) && dma_probe.dreq(22) && !dma_probe.dreq(21));
+        for (uint32_t i = 0; i < 2; ++i) {  // SPI: the TX request
+            m.bus.write32(bases[4 + i] + 0x04, 1u << 1);  // SSPCR1: SSE
+            m.bus.write32(bases[4 + i] + 0x24, 1u << 1);  // SSPDMACR: TXDMAE
+        }
+        CHECK(dma_probe.dreq(16) && dma_probe.dreq(18) && !dma_probe.dreq(17));
+        m.bus.write32(bases[5] + 0x00, 0x7);  // SSPCR0: DSS = 8-bit frames
+        m.bus.write32(bases[5] + 0x08, 0x5A);  // SSPDR of SPI1: a word on the wire, which the host (not the block) sees, with the instance
+        CHECK(m.clock().tick(1e6));
+        CHECK(world.transmits == 1 && world.transmit_instance == 1 && world.transmit_value == 0x5A);
+        m.bus.write32(bases[4] + 0x14, 1u << 3);  // SSPIMSC: TXIM - the TX FIFO is under half full, so SPI0's line rises
+        CHECK((m.cpu.pending_interrupts & (1u << 18)) != 0);
+        m.bus.write32(bases[1] + 0x1C, 1);  // ADC.INTF: forces ADC_IRQ_FIFO
+        CHECK((m.cpu.pending_interrupts & (1u << 22)) != 0);
+        m.attach_dma(nullptr);
     }
 
     if (failures == 0) std::printf("test_mcu: ok\n");

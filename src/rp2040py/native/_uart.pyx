@@ -177,7 +177,7 @@ cdef class _TxFifo:
 
 
 cdef class RPUART:
-    def __init__(self, rp2040, name, irq, dreq):
+    def __init__(self, rp2040, name, irq, dreq, mcu_index=-1):
         cdef UartHost host
         clock = rp2040.clock
         if not isinstance(clock, SimulationClock):
@@ -193,6 +193,11 @@ cdef class RPUART:
         self.dreq = dreq
         self.on_byte = None
         self.on_baud_rate_change = None
+        if mcu_index >= 0:
+            # the chip's C++ `Mcu` has built this block already - with its window on the bus, its line and request on the chip - and this object is the Python view of it
+            self._block = <UartBlock*> <size_t> rp2040._native_uart_address(mcu_index)
+            return
+        self._block = &self._own
         mcu = native_mcu(rp2040)
         if mcu != NULL:
             # the line goes from the C++ block straight to the chip's CPU, with no Python in between
@@ -219,11 +224,35 @@ cdef class RPUART:
         host.warn = _warn_trampoline
         host.ctx = <void*> self
         host.failed = pending_flag()
-        self._block.init(&(<SimulationClock> clock)._clock, host)
+        self._own.init(&(<SimulationClock> clock)._clock, host)
+
+    def _world_byte(self, byte):
+        """A transmitted byte, for the device the host attached (the chip's host calls this for the block it built)."""
+        callback = self.on_byte
+        if callback:
+            callback(byte)
+
+    def _world_baud(self):
+        callback = self.on_baud_rate_change
+        if callback:
+            callback(self.baud_rate)
+
+    def _world_bit_ns(self):
+        return _bit_ns(self.rp2040.clk_peri, self.baud_divider)
+
+    def _warn_kind(self, kind, offset, value):
+        """A register access the block does not implement, as the logger's message (the chip's host calls this for the block it built)."""
+        if kind == kUartWarnRead:
+            self.warn(f"Unimplemented peripheral read from 0x{offset:x}")
+        elif kind == kUartWarnReadAtomicArea:
+            self.warn("Unimplemented read from peripheral in the atomic operation region")
+        else:
+            self.warn(f"Unimplemented peripheral write to 0x{offset:x}: 0x{value:x}")
 
     def __dealloc__(self):
         # Safe whichever of this block and its clock the collector frees first: the C++ clock unlinks its alarms when it dies.
-        self._block.detach()
+        if self._block == &self._own:
+            self._own.detach()
 
     # --- the reference's attributes --------------------------------------------------------------
 

@@ -36,7 +36,7 @@ from rp2040py.native._memory_map cimport (
     kWordIndexed,
 )
 from rp2040py.native._dma cimport RPDMA
-from rp2040py.native._mcu cimport kMcuBlockBusctrl, kMcuBlockRtc, kMcuBlockSyscfg, kMcuBlockSysinfo, kMcuBlockTbman, kMcuBlockVreg, Mcu, McuHost
+from rp2040py.native._mcu cimport kMcuBlockBusctrl, kMcuBlockRtc, kMcuBlockSyscfg, kMcuBlockSysinfo, kMcuBlockTbman, kMcuBlockVreg, Mcu, McuHost, kMcuBlockAdc, kMcuBlockI2c0, kMcuBlockI2c1, kMcuBlockSpi0, kMcuBlockSpi1, kMcuBlockTimer, kMcuBlockUart0, kMcuBlockUart1
 from rp2040py.native._pending cimport park_error, pending_flag, raise_if_pending
 from rp2040py.native._pio cimport PioBlock
 from rp2040py.native._bus cimport BusHost, kBusWarnInvalidRead, kBusWarnUnalignedRead
@@ -299,6 +299,14 @@ cdef dict _BLOCK_WINDOW = {
     kMcuBlockVreg: 0x40064,
     kMcuBlockSysinfo: 0x40000,
     kMcuBlockSyscfg: 0x40004,
+    kMcuBlockTimer: 0x40054,
+    kMcuBlockAdc: 0x4004C,
+    kMcuBlockUart0: 0x40034,
+    kMcuBlockUart1: 0x40038,
+    kMcuBlockSpi0: 0x4003C,
+    kMcuBlockSpi1: 0x40040,
+    kMcuBlockI2c0: 0x40044,
+    kMcuBlockI2c1: 0x40048,
 }  # the block the `Mcu` built -> its key in the peripherals table
 
 
@@ -312,6 +320,120 @@ cdef void _mcu_warn(void* ctx, uint32_t block, uint32_t kind, uint32_t offset, i
             warn(kind, offset, value)
     except BaseException as error:
         park_error(error)
+
+
+cdef bool _w_uart_byte(void* ctx, uint32_t instance, uint32_t byte) noexcept:
+    cdef RP2040 chip = <RP2040> ctx
+    try:
+        chip.uart[instance]._world_byte(byte)
+    except BaseException as error:
+        park_error(error)
+        return False
+    return True
+
+
+cdef bool _w_uart_baud(void* ctx, uint32_t instance) noexcept:
+    cdef RP2040 chip = <RP2040> ctx
+    try:
+        chip.uart[instance]._world_baud()
+    except BaseException as error:
+        park_error(error)
+        return False
+    return True
+
+
+cdef bool _w_uart_bit_ns(void* ctx, uint32_t instance, double* nanos) noexcept:
+    cdef RP2040 chip = <RP2040> ctx
+    try:
+        nanos[0] = <double> chip.uart[instance]._world_bit_ns()
+    except BaseException as error:
+        park_error(error)
+        return False
+    return True
+
+
+cdef bool _w_spi_transmit(void* ctx, uint32_t instance, uint32_t value) noexcept:
+    cdef RP2040 chip = <RP2040> ctx
+    try:
+        return <bool> chip.spi[instance]._world_transmit(value)
+    except BaseException as error:
+        park_error(error)
+        return False
+
+
+cdef bool _w_spi_bit_ns(void* ctx, uint32_t instance, double* nanos) noexcept:
+    cdef RP2040 chip = <RP2040> ctx
+    try:
+        nanos[0] = <double> chip.spi[instance]._world_bit_ns()
+    except BaseException as error:
+        park_error(error)
+        return False
+    return True
+
+
+cdef bool _w_i2c_start(void* ctx, uint32_t instance, bool repeated) noexcept:
+    cdef RP2040 chip = <RP2040> ctx
+    try:
+        return <bool> chip.i2c[instance]._world_start(repeated)
+    except BaseException as error:
+        park_error(error)
+        return False
+
+
+cdef bool _w_i2c_connect(void* ctx, uint32_t instance, uint32_t address, uint32_t mode) noexcept:
+    cdef RP2040 chip = <RP2040> ctx
+    try:
+        return <bool> chip.i2c[instance]._world_connect(address, mode)
+    except BaseException as error:
+        park_error(error)
+        return False
+
+
+cdef bool _w_i2c_write(void* ctx, uint32_t instance, uint32_t value) noexcept:
+    cdef RP2040 chip = <RP2040> ctx
+    try:
+        return <bool> chip.i2c[instance]._world_write(value)
+    except BaseException as error:
+        park_error(error)
+        return False
+
+
+cdef bool _w_i2c_read(void* ctx, uint32_t instance, bool ack) noexcept:
+    cdef RP2040 chip = <RP2040> ctx
+    try:
+        return <bool> chip.i2c[instance]._world_read(ack)
+    except BaseException as error:
+        park_error(error)
+        return False
+
+
+cdef bool _w_i2c_stop(void* ctx, uint32_t instance) noexcept:
+    cdef RP2040 chip = <RP2040> ctx
+    try:
+        return <bool> chip.i2c[instance]._world_stop()
+    except BaseException as error:
+        park_error(error)
+        return False
+
+
+cdef bool _w_adc_read(void* ctx, uint32_t channel) noexcept:
+    cdef RP2040 chip = <RP2040> ctx
+    try:
+        chip.adc._world_read(channel)
+    except BaseException as error:
+        park_error(error)
+        return False
+    return True
+
+
+cdef bool _w_adc_channel_value(void* ctx, uint32_t channel, int64_t* value) noexcept:
+    cdef RP2040 chip = <RP2040> ctx
+    try:
+        value[0] = <int64_t> chip.adc._world_channel_value(<object> channel)
+    except BaseException as error:
+        park_error(error)
+        return False
+    return True
 
 
 cdef dict _DREQ_BY_NUMBER = {int(channel): channel for channel in DREQChannel}
@@ -412,6 +534,18 @@ cdef class RP2040:
         world.warn = _mcu_warn
         world.ctx = <void*> self
         world.failed = pending_flag()
+        world.uart_byte = _w_uart_byte
+        world.uart_baud = _w_uart_baud
+        world.uart_bit_ns = _w_uart_bit_ns
+        world.spi_transmit = _w_spi_transmit
+        world.spi_bit_ns = _w_spi_bit_ns
+        world.i2c_start = _w_i2c_start
+        world.i2c_connect = _w_i2c_connect
+        world.i2c_write = _w_i2c_write
+        world.i2c_read = _w_i2c_read
+        world.i2c_stop = _w_i2c_stop
+        world.adc_read = _w_adc_read
+        world.adc_channel_value = _w_adc_channel_value
         self._mcu.build(world)
 
         # Clocks
@@ -427,15 +561,15 @@ cdef class RP2040:
 
         self.uart = [
             RPUART(
-                self, "UART0", IRQ.UART0, IUARTDMAChannels(rx=DREQChannel.DREQ_UART0_RX, tx=DREQChannel.DREQ_UART0_TX)
+                self, "UART0", IRQ.UART0, IUARTDMAChannels(rx=DREQChannel.DREQ_UART0_RX, tx=DREQChannel.DREQ_UART0_TX), 0
             ),
             RPUART(
-                self, "UART1", IRQ.UART1, IUARTDMAChannels(rx=DREQChannel.DREQ_UART1_RX, tx=DREQChannel.DREQ_UART1_TX)
+                self, "UART1", IRQ.UART1, IUARTDMAChannels(rx=DREQChannel.DREQ_UART1_RX, tx=DREQChannel.DREQ_UART1_TX), 1
             ),
         ]
-        self.i2c = [RPI2C(self, "I2C0", IRQ.I2C0), RPI2C(self, "I2C1", IRQ.I2C1)]
+        self.i2c = [RPI2C(self, "I2C0", IRQ.I2C0, 0), RPI2C(self, "I2C1", IRQ.I2C1, 1)]
         self.pwm = RPPWM(self, "PWM_BASE")
-        self.adc = RPADC(self, "ADC")
+        self.adc = RPADC(self, "ADC", 0)
 
         # The chip's pins are slots of two banks (30 GPIO pins, 6 QSPI pins). The native ones share two C++ banks: the IO_BANK0 / IO_QSPI / PADS windows work on them directly, and the
         # chip asks the bank for what is a property of all its pins at once (`gpio_values`, the IO_BANK0 interrupt line). The facade hands out the pure-Python pins and banks instead when
@@ -472,8 +606,8 @@ cdef class RP2040:
         # would be the only such reach-in in the tree.
         self.vreg_and_chip_reset = RPVREGAndChipReset(self, "VREG_AND_CHIP_RESET_BASE")
         self.spi = [
-            RPSPI(self, "SPI0", IRQ.SPI0, ISPIDMAChannels(rx=DREQChannel.DREQ_SPI0_RX, tx=DREQChannel.DREQ_SPI0_TX)),
-            RPSPI(self, "SPI1", IRQ.SPI1, ISPIDMAChannels(rx=DREQChannel.DREQ_SPI1_RX, tx=DREQChannel.DREQ_SPI1_TX)),
+            RPSPI(self, "SPI0", IRQ.SPI0, ISPIDMAChannels(rx=DREQChannel.DREQ_SPI0_RX, tx=DREQChannel.DREQ_SPI0_TX), 0),
+            RPSPI(self, "SPI1", IRQ.SPI1, ISPIDMAChannels(rx=DREQChannel.DREQ_SPI1_RX, tx=DREQChannel.DREQ_SPI1_TX), 1),
         ]
 
         self.logger = ConsoleLogger(LogLevel.DEBUG, True)
@@ -486,7 +620,7 @@ cdef class RP2040:
         self.psm = RPPSM(self, "PSM_BASE")
         self.pads_bank0 = RPPADS(self, "PADS_BANK0_BASE", "bank0")
         self.pads_qspi = RPPADS(self, "PADS_QSPI_BASE", "qspi")
-        self.timer = RPTimer(self, "TIMER_BASE")
+        self.timer = RPTimer(self, "TIMER_BASE", 0)
         self.rtc = RP2040RTC(self, "RTC_BASE")
         self.clocks = RPClocks(self, "CLOCKS_BASE")  # after the PLLs and the blocks it drives (PPB, PWM, watchdog, RTC): the native tree points at their C++ blocks
         self.busctrl = RPBUSCTRL(self, "BUSCTRL_BASE")
@@ -1157,6 +1291,22 @@ cdef class RP2040:
     def _native_syscfg_address(self):
         """The address of the SYSCFG block the `Mcu` built, for the shell that is its Python view."""
         return <size_t> &self._mcu.syscfg()
+
+    def _native_timer_address(self):
+        """The address of the TIMER block the `Mcu` built, for the shell that is its Python view."""
+        return <size_t> &self._mcu.timer()
+
+    def _native_adc_address(self):
+        return <size_t> &self._mcu.adc()
+
+    def _native_uart_address(self, index):
+        return <size_t> &self._mcu.uart(<uint32_t> index)
+
+    def _native_spi_address(self, index):
+        return <size_t> &self._mcu.spi(<uint32_t> index)
+
+    def _native_i2c_address(self, index):
+        return <size_t> &self._mcu.i2c(<uint32_t> index)
 
     def _native_tbman_address(self):
         """The address of the TBMAN block the `Mcu` built, for the shell that is its Python view."""

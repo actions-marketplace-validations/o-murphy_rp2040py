@@ -80,7 +80,8 @@ cdef extern from "uart.hpp" namespace "rp2040core":
         WindowHandler window_handler() noexcept
 
 cdef class RPUART:
-    cdef UartBlock _block
+    cdef UartBlock* _block  # the chip's (`Mcu` builds and wires it), or `_own` for a block made directly (a stand-in chip, a test)
+    cdef UartBlock _own
     cdef McuDreqPair _dreq_pair  # the DMA request straight to the chip, when it has one (core/mcu.hpp)
     cdef McuIrqLine _irq_line  # the line straight to the chip, when it has one (core/mcu.hpp)
     cdef public object rp2040

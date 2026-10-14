@@ -142,7 +142,7 @@ cdef class _Fifo:
 
 
 cdef class RPSPI:
-    def __init__(self, rp2040, name, irq, dreq):
+    def __init__(self, rp2040, name, irq, dreq, mcu_index=-1):
         cdef SpiHost host
         clock = rp2040.clock
         if not isinstance(clock, SimulationClock):
@@ -157,6 +157,13 @@ cdef class RPSPI:
         self.irq = irq
         self.dreq = dreq
         self._on_transmit = None
+        if mcu_index >= 0:
+            # the chip's C++ `Mcu` has built this block already - with its window on the bus, its line and request on the chip - and this object is the Python view of it
+            self._block = <SpiBlock*> <size_t> rp2040._native_spi_address(mcu_index)
+            if not self._block.power_on():
+                raise_if_pending()
+            return
+        self._block = &self._own
         mcu = native_mcu(rp2040)
         if mcu != NULL:
             # the line goes from the C++ block straight to the chip's CPU, with no Python in between
@@ -182,14 +189,35 @@ cdef class RPSPI:
         host.warn = _warn_trampoline
         host.ctx = <void*> self
         host.failed = pending_flag()
-        self._block.init(&(<SimulationClock> clock)._clock, host)
+        self._own.init(&(<SimulationClock> clock)._clock, host)
         # The reference's constructor publishes both DREQs.
         if not self._block.power_on():
             raise_if_pending()
 
+    def _world_transmit(self, value):
+        """A word is on the wire: the attached device answers; with none, the byte comes straight back as 0 (the reference's default device)."""
+        callback = self._on_transmit
+        if callback is None:
+            return bool(self._block.complete_transmit(0))
+        callback(value)
+        return True
+
+    def _world_bit_ns(self):
+        return _bit_ns(self.rp2040.clk_peri, self._block.clock_divisor, (self._block.control0 >> SCR_SHIFT) & SCR_MASK)
+
+    def _warn_kind(self, kind, offset, value):
+        """A register access the block does not implement, as the logger's message (the chip's host calls this for the block it built)."""
+        if kind == kSpiWarnRead:
+            self.warn(f"Unimplemented peripheral read from 0x{offset:x}")
+        elif kind == kSpiWarnReadAtomicArea:
+            self.warn("Unimplemented read from peripheral in the atomic operation region")
+        else:
+            self.warn(f"Unimplemented peripheral write to 0x{offset:x}: 0x{value:x}")
+
     def __dealloc__(self):
         # Safe whichever of this block and its clock the collector frees first: the C++ clock unlinks its alarms when it dies.
-        self._block.detach()
+        if self._block == &self._own:
+            self._own.detach()
 
     # --- the device on the bus -------------------------------------------------------------------
 

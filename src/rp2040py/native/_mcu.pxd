@@ -10,11 +10,16 @@ from rp2040py.native._clock cimport Clock
 from rp2040py.native._cpu cimport Cpu
 from rp2040py.native._dma cimport DmaBlock
 from rp2040py.native._pio cimport PioBlock
+from rp2040py.native._adc cimport AdcBlock
 from rp2040py.native._busctrl cimport BusctrlBlock
+from rp2040py.native._i2c cimport I2cBlock
 from rp2040py.native._rtc cimport RtcBlock
+from rp2040py.native._spi cimport SpiBlock
 from rp2040py.native._syscfg cimport SyscfgBlock
 from rp2040py.native._sysinfo cimport SysInfoBlock
 from rp2040py.native._tbman cimport TbmanBlock
+from rp2040py.native._timer cimport TimerBlock
+from rp2040py.native._uart cimport UartBlock
 from rp2040py.native._vreg_and_chip_reset cimport VregBlock
 
 cdef extern from "mcu.hpp" namespace "rp2040core":
@@ -31,12 +36,32 @@ cdef extern from "mcu.hpp" namespace "rp2040core":
     cdef const uint32_t kMcuBlockVreg
     cdef const uint32_t kMcuBlockSysinfo
     cdef const uint32_t kMcuBlockSyscfg
+    cdef const uint32_t kMcuBlockTimer
+    cdef const uint32_t kMcuBlockAdc
+    cdef const uint32_t kMcuBlockUart0
+    cdef const uint32_t kMcuBlockUart1
+    cdef const uint32_t kMcuBlockSpi0
+    cdef const uint32_t kMcuBlockSpi1
+    cdef const uint32_t kMcuBlockI2c0
+    cdef const uint32_t kMcuBlockI2c1
 
     cdef cppclass McuHost:
         McuHost() noexcept
         McuWarnFn warn
         void* ctx
         const int* failed
+        bool (*uart_byte)(void* ctx, uint32_t instance, uint32_t byte) noexcept
+        bool (*uart_baud)(void* ctx, uint32_t instance) noexcept
+        bool (*uart_bit_ns)(void* ctx, uint32_t instance, double* nanos) noexcept
+        bool (*spi_transmit)(void* ctx, uint32_t instance, uint32_t value) noexcept
+        bool (*spi_bit_ns)(void* ctx, uint32_t instance, double* nanos) noexcept
+        bool (*i2c_start)(void* ctx, uint32_t instance, bool repeated) noexcept
+        bool (*i2c_connect)(void* ctx, uint32_t instance, uint32_t address, uint32_t mode) noexcept
+        bool (*i2c_write)(void* ctx, uint32_t instance, uint32_t value) noexcept
+        bool (*i2c_read)(void* ctx, uint32_t instance, bool ack) noexcept
+        bool (*i2c_stop)(void* ctx, uint32_t instance) noexcept
+        bool (*adc_read)(void* ctx, uint32_t channel) noexcept
+        bool (*adc_channel_value)(void* ctx, uint32_t channel, int64_t* value) noexcept
 
     cdef cppclass Mcu:
         Mcu() noexcept
@@ -64,6 +89,11 @@ cdef extern from "mcu.hpp" namespace "rp2040core":
         VregBlock& vreg() noexcept
         SysInfoBlock& sysinfo() noexcept
         SyscfgBlock& syscfg() noexcept
+        TimerBlock& timer() noexcept
+        AdcBlock& adc() noexcept
+        UartBlock& uart(uint32_t i) noexcept
+        SpiBlock& spi(uint32_t i) noexcept
+        I2cBlock& i2c(uint32_t i) noexcept
         void set_clk_changed_flag(const uint8_t* flag) noexcept
         void set_monotonic(McuMonotonicFn monotonic) noexcept
         int run(const McuLimits& limits, McuResult* result) noexcept

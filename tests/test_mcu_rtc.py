@@ -103,3 +103,38 @@ def test_sysinfo_reads_the_revision_off_the_bootrom_the_chip_holds(chip):
 def test_syscfg_nmi_mask_is_the_cpus_own(chip):
     chip.write_uint32(0x40004000, 0x6)
     assert chip.core.interrupt_nmi_mask == 0x6
+
+
+@pytest.mark.parametrize(
+    "base, name",
+    [
+        (0x40054000, "TIMER_BASE"),
+        (0x4004C000, "ADC"),
+        (0x40034000, "UART0"),
+        (0x40038000, "UART1"),
+        (0x4003C000, "SPI0"),
+        (0x40040000, "SPI1"),
+        (0x40044000, "I2C0"),
+        (0x40048000, "I2C1"),
+    ],
+)
+def test_the_blocks_with_lines_and_devices_warn_under_their_own_names(chip, base, name):
+    chip.read_uint32(base + 0x200)  # no such register in any of them
+    assert chip.logger.messages == [("warning", name, "Unimplemented peripheral read from 0x200")]
+
+
+def test_an_adc_conversion_asks_the_device_the_host_attached(chip):
+    seen: list[int] = []
+    chip.adc.on_adc_read = seen.append  # type: ignore[method-assign]
+    chip.write_uint32(0x4004C000, 0b101)  # CS: EN | START_ONCE
+    chip.clock.tick(1e6)
+    assert seen == [0]
+
+
+def test_an_spi_word_on_the_wire_goes_to_the_device_the_host_attached(chip):
+    words: list[int] = []
+    chip.spi[0].on_transmit = words.append  # type: ignore[method-assign]
+    chip.write_uint32(0x4003C000 + 0x00, 0x7)  # SSPCR0: 8-bit frames
+    chip.write_uint32(0x4003C000 + 0x04, 0x2)  # SSPCR1: SSE
+    chip.write_uint32(0x4003C000 + 0x08, 0x5A)  # SSPDR
+    assert words == [0x5A]

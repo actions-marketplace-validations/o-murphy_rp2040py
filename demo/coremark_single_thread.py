@@ -2,7 +2,7 @@
 """CoreMark on the emulated RP2040: downloads the single-core UF2 into the firmware cache, runs it
 through the USB CDC console and exits on the result line.
 
-Usage: python demo/coremark_run.py [--image firmware.uf2 | URL] [extra `rp2040py micropython` flags]
+Usage: python demo/coremark_single_thread.py [--image firmware.uf2 | URL] [extra `rp2040py micropython` flags]
 
 Thin wrapper around `rp2040py micropython`. The image is fetched and cached in
 ~/.cache/rp2040py exactly as `--image <url>` is for any other firmware, so it is downloaded once.

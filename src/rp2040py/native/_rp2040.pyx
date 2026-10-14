@@ -36,7 +36,7 @@ from rp2040py.native._memory_map cimport (
     kWordIndexed,
 )
 from rp2040py.native._dma cimport RPDMA
-from rp2040py.native._mcu cimport kMcuBlockBusctrl, kMcuBlockRtc, kMcuBlockSyscfg, kMcuBlockSysinfo, kMcuBlockTbman, kMcuBlockVreg, Mcu, McuHost, kMcuBlockAdc, kMcuBlockClocks, kMcuBlockI2c0, kMcuBlockI2c1, kMcuBlockPllSys, kMcuBlockPllUsb, kMcuBlockRosc, kMcuBlockSpi0, kMcuBlockSpi1, kMcuBlockTimer, kMcuBlockUart0, kMcuBlockUart1, kMcuBlockXosc
+from rp2040py.native._mcu cimport kMcuBlockBusctrl, kMcuBlockRtc, kMcuBlockSyscfg, kMcuBlockSysinfo, kMcuBlockTbman, kMcuBlockVreg, Mcu, McuHost, kMcuBlockAdc, kMcuBlockClocks, kMcuBlockDma, kMcuBlockI2c0, kMcuBlockI2c1, kMcuBlockPllSys, kMcuBlockPllUsb, kMcuBlockPpb, kMcuBlockRosc, kMcuBlockSpi0, kMcuBlockSpi1, kMcuBlockTimer, kMcuBlockUart0, kMcuBlockUart1, kMcuBlockWatchdog, kMcuBlockXosc
 from rp2040py.native._pending cimport park_error, pending_flag, raise_if_pending
 from rp2040py.native._pio cimport PioBlock
 from rp2040py.native._bus cimport BusHost, kBusWarnInvalidRead, kBusWarnUnalignedRead
@@ -312,6 +312,8 @@ cdef dict _BLOCK_WINDOW = {
     kMcuBlockPllUsb: 0x4002C,
     kMcuBlockXosc: 0x40024,
     kMcuBlockRosc: 0x40060,
+    kMcuBlockWatchdog: 0x40058,
+    kMcuBlockDma: 0x50000,
 }  # the block the `Mcu` built -> its key in the peripherals table
 
 
@@ -319,7 +321,7 @@ cdef void _mcu_warn(void* ctx, uint32_t block, uint32_t kind, uint32_t offset, i
     # What a block that the `Mcu` built says about a register access it does not implement: the Python view of that block (the one in the peripherals table) words it for the logger.
     cdef RP2040 chip = <RP2040> ctx
     try:
-        view = chip._peripherals.get(_BLOCK_WINDOW[block])
+        view = chip._ppb if block == kMcuBlockPpb else chip._peripherals.get(_BLOCK_WINDOW[block])  # (the PPB is not in the peripherals table: the bus reaches it on its own)
         warn = getattr(view, "_warn_kind", None)
         if warn is not None:
             warn(kind, offset, value)
@@ -358,6 +360,34 @@ cdef bool _w_spi_transmit(void* ctx, uint32_t instance, uint32_t value) noexcept
 
 XOSC_STATUS = 0x04
 XOSC_STATUS_STABLE = 1 << 31
+
+
+cdef void _w_system_reset_request(void* ctx) noexcept:
+    cdef RP2040 chip = <RP2040> ctx
+    try:
+        chip.ppb._world_system_reset()
+    except BaseException as error:
+        park_error(error)
+
+
+cdef bool _w_watchdog_trigger(void* ctx) noexcept:
+    cdef RP2040 chip = <RP2040> ctx
+    try:
+        chip.watchdog._world_trigger()
+    except BaseException as error:
+        park_error(error)
+        return False
+    return True
+
+
+cdef bool _w_watchdog_tick(void* ctx, double tick_hz) noexcept:
+    cdef RP2040 chip = <RP2040> ctx
+    try:
+        chip.watchdog._world_tick(tick_hz)
+    except BaseException as error:
+        park_error(error)
+        return False
+    return True
 
 
 cdef double _w_xosc_hz(void* ctx) noexcept:
@@ -555,6 +585,9 @@ cdef class RP2040:
         world.failed = pending_flag()
         world.uart_byte = _w_uart_byte
         world.uart_baud = _w_uart_baud
+        world.system_reset_request = _w_system_reset_request
+        world.watchdog_trigger = _w_watchdog_trigger
+        world.watchdog_tick = _w_watchdog_tick
         world.xosc_hz = _w_xosc_hz
         world.rosc_hz = _w_rosc_hz
         world.spi_transmit = _w_spi_transmit
@@ -575,7 +608,7 @@ cdef class RP2040:
         self.rosc_freq = 6.5 * MHZ
         self._clock_listeners = set()
 
-        self.ppb = RPPPB(self, "PPB")
+        self.ppb = RPPPB(self, "PPB", 0)
         self.sio = RPSIO(self)
 
         self.uart = [
@@ -612,13 +645,13 @@ cdef class RP2040:
         for _qspi_pin, _pad_reset in zip(self.qspi, QSPI_PAD_RESET_VALUES):
             _qspi_pin.reset(io=False, pad_reset=_pad_reset)
 
-        self.dma = RPDMA(self, "DMA")
+        self.dma = RPDMA(self, "DMA", 0)
         self.pio = [
             RPPIO(self, "PIO0", IRQ.PIO0_IRQ0, 0),
             RPPIO(self, "PIO1", IRQ.PIO1_IRQ0, 1),
         ]
         self.usb_ctrl = RPUSBController(self, "USB")
-        self.watchdog = RPWatchdog(self, "WATCHDOG_BASE")
+        self.watchdog = RPWatchdog(self, "WATCHDOG_BASE", 0)
         # Named, not just an entry in `peripherals` below: BaseDevice.hard_reset() has to
         # record *which* reset just happened in CHIP_RESET (0089 Phase 1), the same way it
         # reaches self.watchdog for REASON - a dict lookup by base address would work but
@@ -1116,7 +1149,7 @@ cdef class RP2040:
         # between; anything else (a recorder, a test double, a pure-Python DMA) gets the requests through a hook, instead of the DMA, as it always did.
         if type(value) is RPDMA:
             self._mcu.set_dreq_hook(NULL, NULL)
-            self._mcu.attach_dma(&(<RPDMA> value)._block)
+            self._mcu.attach_dma((<RPDMA> value)._block)
         else:
             self._mcu.attach_dma(NULL)
             self._mcu.set_dreq_hook(_dreq_hook, <void*> self)
@@ -1335,6 +1368,15 @@ cdef class RP2040:
     @clk_peri.setter
     def clk_peri(self, value) -> None:
         self._mcu.clocks().force_clk_peri(<double> value)
+
+    def _native_ppb_address(self):
+        return <size_t> &self._mcu.ppb()
+
+    def _native_watchdog_address(self):
+        return <size_t> &self._mcu.watchdog()
+
+    def _native_dma_address(self):
+        return <size_t> &self._mcu.dma()
 
     def _native_clocks_address(self):
         """The address of the CLOCKS block the `Mcu` built (the tree), for the shell that is its Python view."""

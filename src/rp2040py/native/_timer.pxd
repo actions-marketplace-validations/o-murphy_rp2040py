@@ -46,6 +46,7 @@ cdef class RPTimer:
     cdef McuIrqLines _irq_line  # the line straight to the chip, when it has one (core/mcu.hpp)
     cdef TimerBlock* _block  # the chip's (`Mcu` builds and wires it), or `_own` for a block made directly (a stand-in chip, a test)
     cdef TimerBlock _own
+    cdef public bint _from_mcu  # this is the view of the `Mcu`'s block (the watchdog's tick reaches it in C++)
     cdef public object rp2040
     cdef public object name
     cdef public object clock

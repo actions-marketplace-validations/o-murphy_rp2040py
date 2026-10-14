@@ -54,12 +54,7 @@ cdef double _clk_sys_trampoline(void* ctx) noexcept:
 cdef void _warn_trampoline(void* ctx, uint32_t kind, uint32_t offset, int64_t value) noexcept:
     cdef RPDMA dma = <RPDMA> ctx
     try:
-        if kind == kDmaWarnRead:
-            dma.warn(f"Unimplemented peripheral read from 0x{offset:x}")
-        elif kind == kDmaWarnReadAtomicArea:
-            dma.warn("Unimplemented read from peripheral in the atomic operation region")
-        else:
-            dma.warn(f"Unimplemented peripheral write to 0x{offset:x}: 0x{value:x}")
+        dma._warn_kind(kind, offset, value)
     except BaseException as error:
         park_error(error)
 
@@ -196,7 +191,7 @@ cdef class _DreqView:
 
 
 cdef class RPDMA:
-    def __init__(self, rp2040, name):
+    def __init__(self, rp2040, name, mcu_index=-1):
         cdef DmaHost host
         cdef Bus* bus
         clock = rp2040.clock
@@ -210,27 +205,33 @@ cdef class RPDMA:
         self.rp2040 = rp2040
         self.name = name
         self.clock = clock
-        bus = <Bus*> <size_t> bus_address()
-        mcu = native_mcu(rp2040)
-        if mcu != NULL:
-            # the lines go from the C++ block straight to the chip's CPU, with no Python in between (the block passes the absolute NVIC line)
-            self._irq_line.mcu = mcu
-            self._irq_line.base = 0
-            host.irq = mcu_irq_lines
-            host.irq_ctx = &self._irq_line
+        if mcu_index >= 0:
+            # the chip's C++ `Mcu` has built this block already and bound it to the tree and the bus - this object is the Python view of it
+            self._block = <DmaBlock*> <size_t> rp2040._native_dma_address()
+            self._unsubscribe_clock = None
         else:
-            host.irq = _irq_trampoline
-            host.irq_ctx = NULL
-        host.clk_sys = _clk_sys_trampoline
-        host.warn = _warn_trampoline
-        host.ctx = <void*> self
-        host.failed = pending_flag()
-        host.lines[0] = <uint32_t> int(IRQ.DMA_IRQ0)
-        host.lines[1] = <uint32_t> int(IRQ.DMA_IRQ1)
-        self._block.init(bus, &(<SimulationClock> clock)._clock, host)
-        # A ready transfer takes one clk_sys cycle: keep that period current without asking Python on every transfer
-        self._block.transfer_ns = 1e9 / <double> rp2040.clk_sys
-        self._unsubscribe_clock = rp2040.add_clock_listener(self._clk_sys_changed)
+            bus = <Bus*> <size_t> bus_address()
+            mcu = native_mcu(rp2040)
+            if mcu != NULL:
+                # the lines go from the C++ block straight to the chip's CPU, with no Python in between (the block passes the absolute NVIC line)
+                self._irq_line.mcu = mcu
+                self._irq_line.base = 0
+                host.irq = mcu_irq_lines
+                host.irq_ctx = &self._irq_line
+            else:
+                host.irq = _irq_trampoline
+                host.irq_ctx = NULL
+            host.clk_sys = _clk_sys_trampoline
+            host.warn = _warn_trampoline
+            host.ctx = <void*> self
+            host.failed = pending_flag()
+            host.lines[0] = <uint32_t> int(IRQ.DMA_IRQ0)
+            host.lines[1] = <uint32_t> int(IRQ.DMA_IRQ1)
+            self._block = &self._own
+            self._own.init(bus, &(<SimulationClock> clock)._clock, host)
+            # A ready transfer takes one clk_sys cycle: keep that period current without asking Python on every transfer
+            self._own.transfer_ns = 1e9 / <double> rp2040.clk_sys
+            self._unsubscribe_clock = rp2040.add_clock_listener(self._clk_sys_changed)
         self._bound_tree = None
         self._channels = []
         cdef _Channel view
@@ -259,12 +260,22 @@ cdef class RPDMA:
         if self._bound_tree is not tree:
             return
         self._bound_tree = None
-        self._block.bind_clock(_clk_sys_trampoline, NULL, <double> self.rp2040.clk_sys)
+        self._block.bind_clock(_clk_sys_trampoline, <void*> self, <double> self.rp2040.clk_sys)
         self._unsubscribe_clock = self.rp2040.add_clock_listener(self._clk_sys_changed)
 
+    def _warn_kind(self, kind, offset, value):
+        """A register access the block does not implement, as the logger's message (the chip's host calls this for the block it built)."""
+        if kind == kDmaWarnRead:
+            self.warn(f"Unimplemented peripheral read from 0x{offset:x}")
+        elif kind == kDmaWarnReadAtomicArea:
+            self.warn("Unimplemented read from peripheral in the atomic operation region")
+        else:
+            self.warn(f"Unimplemented peripheral write to 0x{offset:x}: 0x{value:x}")
+
     def __dealloc__(self):
-        # Safe whichever of this block and its clock the collector frees first: the C++ clock unlinks its alarms when it dies.
-        self._block.detach()
+        # Safe whichever of this block and its clock the collector frees first: the C++ clock unlinks its alarms when it dies. The chip's own block is the `Mcu`'s to detach.
+        if self._block == &self._own:
+            self._own.detach()
 
     # --- the reference's attributes --------------------------------------------------------------
 

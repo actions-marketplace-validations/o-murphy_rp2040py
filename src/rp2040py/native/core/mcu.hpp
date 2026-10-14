@@ -28,6 +28,7 @@
 #include "dma.hpp"
 #include "i2c.hpp"
 #include "pll.hpp"
+#include "ppb.hpp"
 #include "pin.hpp"
 #include "pio.hpp"
 #include "busctrl.hpp"
@@ -42,6 +43,7 @@
 #include "timer.hpp"
 #include "uart.hpp"
 #include "vreg.hpp"
+#include "watchdog.hpp"
 #include "xosc.hpp"
 
 namespace rp2040core {
@@ -53,7 +55,7 @@ using McuResult = BatchResult;
 // What the world supplies to a chip that builds itself (step 3a of the revised plan, record 0096): the one interface the blocks go through for what the core cannot answer alone.
 // For now it is the warning (a register access the block does not implement: the logger of the host); the pins, the console and the rest come with the blocks that need them.
 // `warn(ctx, block, kind, offset, value)`: `block` is a `McuBlock`, `kind` the `kRegWarn*` code of core_host.hpp. `failed` is the host's parked-failure flag, shared by every block.
-enum McuBlock : uint32_t { kMcuBlockRtc = 0, kMcuBlockTbman = 1, kMcuBlockBusctrl = 2, kMcuBlockVreg = 3, kMcuBlockSysinfo = 4, kMcuBlockSyscfg = 5, kMcuBlockTimer = 6, kMcuBlockAdc = 7, kMcuBlockUart0 = 8, kMcuBlockUart1 = 9, kMcuBlockSpi0 = 10, kMcuBlockSpi1 = 11, kMcuBlockI2c0 = 12, kMcuBlockI2c1 = 13, kMcuBlockClocks = 14, kMcuBlockPllSys = 15, kMcuBlockPllUsb = 16, kMcuBlockXosc = 17, kMcuBlockRosc = 18 };
+enum McuBlock : uint32_t { kMcuBlockRtc = 0, kMcuBlockTbman = 1, kMcuBlockBusctrl = 2, kMcuBlockVreg = 3, kMcuBlockSysinfo = 4, kMcuBlockSyscfg = 5, kMcuBlockTimer = 6, kMcuBlockAdc = 7, kMcuBlockUart0 = 8, kMcuBlockUart1 = 9, kMcuBlockSpi0 = 10, kMcuBlockSpi1 = 11, kMcuBlockI2c0 = 12, kMcuBlockI2c1 = 13, kMcuBlockClocks = 14, kMcuBlockPllSys = 15, kMcuBlockPllUsb = 16, kMcuBlockXosc = 17, kMcuBlockRosc = 18, kMcuBlockPpb = 19, kMcuBlockWatchdog = 20, kMcuBlockDma = 21 };
 struct McuHost {
     void (*warn)(void* ctx, uint32_t block, uint32_t kind, uint32_t offset, int64_t value) = nullptr;
     void* ctx = nullptr;
@@ -70,6 +72,9 @@ struct McuHost {
     bool (*i2c_write)(void* ctx, uint32_t instance, uint32_t value) = nullptr;          // ... to take a byte ...
     bool (*i2c_read)(void* ctx, uint32_t instance, bool ack) = nullptr;                 // ... to give a byte ...
     bool (*i2c_stop)(void* ctx, uint32_t instance) = nullptr;                           // ... to produce a STOP; each answers with the block's `complete_*()`
+    void (*system_reset_request)(void* ctx) = nullptr;                                  // AIRCR.SYSRESETREQ; without it the core alone is reset
+    bool (*watchdog_trigger)(void* ctx) = nullptr;                                      // the watchdog fired (or was triggered): the chip's reset; without it nothing happens
+    bool (*watchdog_tick)(void* ctx, double tick_hz) = nullptr;                         // the tick changed (0: stopped), after the TIMER and SysTick have followed it
     double (*xosc_hz)(void* ctx) = nullptr;                                             // only while the host has put its own crystal block over the chip's
     double (*rosc_hz)(void* ctx) = nullptr;                                             // ... or its own ring oscillator
     bool (*adc_read)(void* ctx, uint32_t channel) = nullptr;                            // a conversion was requested; the device answers by pushing a sample
@@ -77,6 +82,9 @@ struct McuHost {
 };
 
 constexpr uint32_t kRtcBase = 0x4005C000;    // RTC_BASE
+constexpr uint32_t kWatchdogBase = 0x40058000, kDmaBase = 0x50000000;
+constexpr uint32_t kIrqDma[2] = {11, 12};
+constexpr uint32_t kMaxHardwareIrq = 25;  // the highest NVIC line the chip wires (RTC_IRQ)
 constexpr uint32_t kClocksBase = 0x40008000, kPllSysBase = 0x40028000, kPllUsbBase = 0x4002C000, kXoscBase = 0x40024000, kRoscBase = 0x40060000;
 constexpr uint32_t kTimerBase = 0x40054000;  // TIMER_BASE (the lines are 0..3)
 constexpr uint32_t kAdcBase = 0x4004C000;    // ADC_BASE
@@ -117,6 +125,9 @@ public:
     ~Mcu() {  // (unlinks every alarm from the clock, which may be gone already: safe)
         rtc_.detach();
         clocks_.detach();
+        watchdog_.detach();
+        ppb_.detach();
+        own_dma_.detach();
         rosc_.detach();
         timer_.detach();
         adc_.detach();
@@ -168,6 +179,35 @@ public:
         bus.windows.attach(kPllUsbBase, pll_[1].window_handler());
         bus.windows.attach(kXoscBase, xosc_.window_handler());
         bus.windows.attach(kRoscBase, rosc_.window_handler());
+
+        // The core's own peripherals and the DMA: PPB (SysTick, NVIC, SCB on the CPU), the watchdog (it tells the TIMER and SysTick their tick) and the DMA (on the bus, reading clk_sys from the tree).
+        PpbHost pp;
+        pp.warn = block_warn<kMcuBlockPpb>;
+        pp.system_reset_request = ppb_reset_request;
+        pp.ctx = this;
+        ppb_.init(&cpu, clock_, pp, clocks_.clk_sys(), kMaxHardwareIrq);
+        bus.set_ppb(ppb_.window_handler());
+
+        WatchdogHost wd;
+        wd.warn = block_warn<kMcuBlockWatchdog>;
+        wd.trigger = watchdog_trigger;
+        wd.tick_changed = watchdog_tick;
+        wd.ctx = this;
+        wd.failed = host.failed;
+        watchdog_.init(clock_, wd);
+        bus.windows.attach(kWatchdogBase, watchdog_.window_handler());
+
+        DmaHost dm;
+        dm.irq = timer_irq;  // (the DMA passes the absolute NVIC line, like the TIMER)
+        dm.warn = block_warn<kMcuBlockDma>;
+        dm.ctx = this;
+        dm.failed = host.failed;
+        dm.lines[0] = kIrqDma[0];
+        dm.lines[1] = kIrqDma[1];
+        own_dma_.init(&bus, clock_, dm);
+        own_dma_.bind_clock(clocks_clk_sys, &clocks_, clocks_.clk_sys());
+        bus.windows.attach(kDmaBase, own_dma_.window_handler());
+        attach_dma(&own_dma_);
 
         RtcHost h;
         h.warn = block_warn<kMcuBlockRtc>;
@@ -277,6 +317,9 @@ public:
     VregBlock& vreg() noexcept { return vreg_; }
     SysInfoBlock& sysinfo() noexcept { return sysinfo_; }
     SyscfgBlock& syscfg() noexcept { return syscfg_; }
+    PpbBlock& ppb() noexcept { return ppb_; }
+    WatchdogBlock& watchdog() noexcept { return watchdog_; }
+    DmaBlock& dma() noexcept { return own_dma_; }
     ClocksBlock& clocks() noexcept { return clocks_; }
     PllBlock& pll(uint32_t i) noexcept { return pll_[i & 1]; }
     XoscBlock& xosc() noexcept { return xosc_; }
@@ -375,6 +418,25 @@ private:
     static bool tree_changed(void* chip) noexcept {
         Mcu* m = static_cast<Mcu*>(chip);
         return m->tree_hook_ != nullptr ? m->tree_hook_(m->tree_hook_ctx_) : m->clocks_.retune();
+    }
+    static void ppb_reset_request(void* chip) noexcept {
+        Mcu* m = static_cast<Mcu*>(chip);
+        if (m->host_world_.system_reset_request != nullptr) {
+            m->host_world_.system_reset_request(m->host_world_.ctx);
+        } else {
+            (void)m->cpu.reset();  // "Reset the core only" (datasheet 2.4.2.9)
+        }
+    }
+    static bool watchdog_trigger(void* chip) noexcept {
+        Mcu* m = static_cast<Mcu*>(chip);
+        return m->host_world_.watchdog_trigger == nullptr || m->host_world_.watchdog_trigger(m->host_world_.ctx);
+    }
+    // The watchdog's tick moved: the TIMER and SysTick count on it, then the host's listeners hear of it.
+    static bool watchdog_tick(void* chip, double tick_hz) noexcept {
+        Mcu* m = static_cast<Mcu*>(chip);
+        m->timer_.tick_changed(tick_hz);
+        m->ppb_.tick_changed(tick_hz);
+        return m->host_world_.watchdog_tick == nullptr || m->host_world_.watchdog_tick(m->host_world_.ctx, tick_hz);
     }
     static double tree_xosc_hz(void* chip) noexcept {
         Mcu* m = static_cast<Mcu*>(chip);
@@ -498,6 +560,9 @@ private:
     SysInfoBlock sysinfo_;
     SyscfgBlock syscfg_;
     TimerBlock timer_;
+    PpbBlock ppb_;
+    WatchdogBlock watchdog_;
+    DmaBlock own_dma_;  // (`dma_` is the block the requests go to: this one, unless the host attached another)
     AdcBlock adc_;
     UartBlock uart_[2];
     SpiBlock spi_[2];

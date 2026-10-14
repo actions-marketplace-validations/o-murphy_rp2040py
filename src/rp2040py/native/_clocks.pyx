@@ -208,7 +208,7 @@ cdef class RPClocks:
         self._block.clear_sinks()
         ok = self._block.add_sys_sink(_sys_sink, <void*> self)
         ok = ok and (
-            self._block.add_sys_sink(ppb_sys_sink, <void*> &(<RPPPB> ppb)._block)
+            self._block.add_sys_sink(ppb_sys_sink, <void*> (<RPPPB> ppb)._block)
             if isinstance(ppb, RPPPB)
             else self._block.add_sys_sink(_ppb_python_sink, <void*> self)
         )
@@ -239,11 +239,11 @@ cdef class RPClocks:
             # the DMA reads clk_sys from the tree and the tree keeps its cycle time current: the Python listener it registered for that is not needed any more
             (<RPDMA> dma)._block.bind_clock(clocks_clk_sys, <void*> self._block, self._block.clk_sys())
             (<RPDMA> dma)._leave_the_python_clock(self)
-            ok = ok and self._block.add_sys_sink(dma_sys_sink, <void*> &(<RPDMA> dma)._block)
+            ok = ok and self._block.add_sys_sink(dma_sys_sink, <void*> (<RPDMA> dma)._block)
         ok = ok and self._block.add_sys_sink(_listeners_sink, <void*> self)
         ok = ok and self._block.add_peri_sink(_peri_sink, <void*> self)
         ok = ok and (
-            self._block.add_ref_sink(watchdog_ref_sink, <void*> &(<RPWatchdog> watchdog)._block)
+            self._block.add_ref_sink(watchdog_ref_sink, <void*> (<RPWatchdog> watchdog)._block)
             if isinstance(watchdog, RPWatchdog)
             else self._block.add_ref_sink(_watchdog_python_sink, <void*> self)
         )

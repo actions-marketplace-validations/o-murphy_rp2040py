@@ -78,7 +78,8 @@ cdef extern from "dma.hpp" namespace "rp2040core":
 
 cdef class RPDMA:
     cdef McuIrqLines _irq_line  # the line straight to the chip, when it has one (core/mcu.hpp)
-    cdef DmaBlock _block
+    cdef DmaBlock* _block  # the chip's (`Mcu` builds and wires it), or `_own` for a block made directly (a stand-in chip, a test)
+    cdef DmaBlock _own
     cdef public object rp2040
     cdef public object name
     cdef public object clock

@@ -30,10 +30,7 @@ __all__ = ("RPPPB",)
 cdef void _warn_trampoline(void* ctx, uint32_t kind, uint32_t offset, int64_t value) noexcept:
     cdef RPPPB ppb = <RPPPB> ctx
     try:
-        if kind == kPpbWarnRead:
-            ppb.warn(f"Unimplemented peripheral read from 0x{offset:x}")
-        else:
-            ppb.warn(f"Unimplemented peripheral write to 0x{offset:x}: 0x{value:x}")
+        ppb._warn_kind(kind, offset, value)
     except BaseException as error:
         park_error(error)
 
@@ -137,7 +134,7 @@ cdef class _TimerView:
 
 
 cdef class RPPPB:
-    def __init__(self, rp2040, name):
+    def __init__(self, rp2040, name, mcu_index=-1):
         cdef PpbHost host
         cdef _TimerView timer
         cdef _AlarmView alarm
@@ -161,11 +158,17 @@ cdef class RPPPB:
         self.clock = clock
         self._core = rp2040.core
         cpu = <Cpu*> (<size_t> native_cpu_address())
-        host.warn = _warn_trampoline
-        host.system_reset_request = _system_reset_trampoline
         self.on_system_reset_request = self._default_system_reset_request
-        host.ctx = <void*> self
-        self._block.init(cpu, &(<SimulationClock> clock)._clock, host, <double> rp2040.clk_sys, <uint32_t> int(MAX_HARDWARE_IRQ))
+        self._from_mcu = mcu_index >= 0
+        if mcu_index >= 0:
+            # the chip's C++ `Mcu` has built this block already and wired it (its window, its lines, the clock tree, the watchdog's tick) - this object is the Python view of it
+            self._block = <PpbBlock*> <size_t> rp2040._native_ppb_address()
+        else:
+            self._block = &self._own
+            host.warn = _warn_trampoline
+            host.system_reset_request = _system_reset_trampoline
+            host.ctx = <void*> self
+            self._own.init(cpu, &(<SimulationClock> clock)._clock, host, <double> rp2040.clk_sys, <uint32_t> int(MAX_HARDWARE_IRQ))
         timer = _TimerView.__new__(_TimerView)
         timer._owner = self
         timer._timer = &self._block.timer
@@ -201,9 +204,21 @@ cdef class RPPPB:
     def mpu_rasr(self):
         return [self._block.mpu_rasr[i] for i in range(8)]
 
+    def _warn_kind(self, kind, offset, value):
+        """A register access the block does not implement, as the logger's message (the chip's host calls this for the block it built)."""
+        if kind == kPpbWarnRead:
+            self.warn(f"Unimplemented peripheral read from 0x{offset:x}")
+        else:
+            self.warn(f"Unimplemented peripheral write to 0x{offset:x}: 0x{value:x}")
+
+    def _world_system_reset(self):
+        """AIRCR.SYSRESETREQ: whatever `on_system_reset_request` is now (the chip's host calls this for the block it built)."""
+        self.on_system_reset_request()
+
     def __dealloc__(self):
-        # Safe whichever of this block and its clock the collector frees first: the C++ clock unlinks its alarms when it dies.
-        self._block.detach()
+        # Safe whichever of this block and its clock the collector frees first: the C++ clock unlinks its alarms when it dies. The chip's own block is the `Mcu`'s to detach.
+        if self._block == &self._own:
+            self._own.detach()
 
     # --- the reference's attributes --------------------------------------------------------------
 

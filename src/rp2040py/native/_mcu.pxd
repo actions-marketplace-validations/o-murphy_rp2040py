@@ -15,6 +15,7 @@ from rp2040py.native._busctrl cimport BusctrlBlock
 from rp2040py.native._clocks cimport ClocksBlock
 from rp2040py.native._i2c cimport I2cBlock
 from rp2040py.native._pll cimport PllBlock
+from rp2040py.native._ppb cimport PpbBlock
 from rp2040py.native._rosc cimport RoscBlock
 from rp2040py.native._rtc cimport RtcBlock
 from rp2040py.native._spi cimport SpiBlock
@@ -24,6 +25,7 @@ from rp2040py.native._tbman cimport TbmanBlock
 from rp2040py.native._timer cimport TimerBlock
 from rp2040py.native._uart cimport UartBlock
 from rp2040py.native._vreg_and_chip_reset cimport VregBlock
+from rp2040py.native._watchdog cimport WatchdogBlock
 from rp2040py.native._xosc cimport XoscBlock
 
 cdef extern from "mcu.hpp" namespace "rp2040core":
@@ -54,6 +56,9 @@ cdef extern from "mcu.hpp" namespace "rp2040core":
     cdef const uint32_t kMcuBlockPllUsb
     cdef const uint32_t kMcuBlockXosc
     cdef const uint32_t kMcuBlockRosc
+    cdef const uint32_t kMcuBlockPpb
+    cdef const uint32_t kMcuBlockWatchdog
+    cdef const uint32_t kMcuBlockDma
 
     cdef cppclass McuHost:
         McuHost() noexcept
@@ -68,6 +73,9 @@ cdef extern from "mcu.hpp" namespace "rp2040core":
         bool (*i2c_write)(void* ctx, uint32_t instance, uint32_t value) noexcept
         bool (*i2c_read)(void* ctx, uint32_t instance, bool ack) noexcept
         bool (*i2c_stop)(void* ctx, uint32_t instance) noexcept
+        void (*system_reset_request)(void* ctx) noexcept
+        bool (*watchdog_trigger)(void* ctx) noexcept
+        bool (*watchdog_tick)(void* ctx, double tick_hz) noexcept
         double (*xosc_hz)(void* ctx) noexcept
         double (*rosc_hz)(void* ctx) noexcept
         bool (*adc_read)(void* ctx, uint32_t channel) noexcept
@@ -99,6 +107,9 @@ cdef extern from "mcu.hpp" namespace "rp2040core":
         VregBlock& vreg() noexcept
         SysInfoBlock& sysinfo() noexcept
         SyscfgBlock& syscfg() noexcept
+        PpbBlock& ppb() noexcept
+        WatchdogBlock& watchdog() noexcept
+        DmaBlock& dma() noexcept
         ClocksBlock& clocks() noexcept
         PllBlock& pll(uint32_t i) noexcept
         XoscBlock& xosc() noexcept

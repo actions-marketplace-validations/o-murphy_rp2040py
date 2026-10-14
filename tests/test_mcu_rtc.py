@@ -159,3 +159,32 @@ def test_the_peripheral_clock_is_the_trees_and_can_be_fixed_by_the_host(chip):
     assert chip.clk_peri == 125e6
     chip.clk_peri = 48e6
     assert chip.clk_peri == 48e6
+
+
+@pytest.mark.parametrize(
+    "address, name, offset",
+    [
+        (0xE000EF00, "PPB", "0xf00"),
+        (0x40058200, "WATCHDOG_BASE", "0x200"),
+        (0x50000600, "DMA", "0x600"),
+    ],
+)
+def test_the_ppb_the_watchdog_and_the_dma_warn_under_their_own_names(chip, address, name, offset):
+    chip.read_uint32(address)
+    assert chip.logger.messages == [("warning", name, f"Unimplemented peripheral read from {offset}")]
+
+
+def test_the_watchdog_tick_reaches_the_timer_and_systick_and_then_the_hosts_listeners(chip):
+    heard: list[float] = []
+    chip.watchdog.add_tick_listener(heard.append)
+    chip.watchdog.clk_ref_changed(12e6)
+    chip.write_uint32(0x40058000 + 0x2C, 12 | (1 << 9))  # WATCHDOG.TICK: 12 cycles of clk_ref, enabled
+    assert chip.timer.tick_hz == 1e6 and chip.ppb.tick_hz == 1e6
+    assert heard == [1e6]
+
+
+def test_a_watchdog_trigger_is_the_chips_reset_whatever_the_hook_is(chip):
+    calls: list[str] = []
+    chip.watchdog.on_watchdog_trigger = lambda: calls.append("reset")  # type: ignore[method-assign]
+    chip.write_uint32(0x40058000 + 0x00, 1 << 31)  # WATCHDOG.CTRL.TRIGGER
+    assert calls == ["reset"]

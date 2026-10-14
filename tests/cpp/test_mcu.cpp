@@ -238,6 +238,8 @@ int main() {
             uint32_t block = 99, kind = 99, offset = 0;
             int transmits = 0;
             int uart_bytes = 0;
+            int resets = 0, triggers = 0, ticks = 0;
+            double last_tick = -1.0;
             uint32_t uart_instance = 99, uart_value = 0;
             uint32_t transmit_instance = 99, transmit_value = 0;
         } world;
@@ -257,6 +259,17 @@ int main() {
             ++w->uart_bytes;
             w->uart_instance = instance;
             w->uart_value = byte;
+            return true;
+        };
+        host.system_reset_request = [](void* ctx) { ++static_cast<World*>(ctx)->resets; };
+        host.watchdog_trigger = [](void* ctx) {
+            ++static_cast<World*>(ctx)->triggers;
+            return true;
+        };
+        host.watchdog_tick = [](void* ctx, double hz) {
+            World* w = static_cast<World*>(ctx);
+            ++w->ticks;
+            w->last_tick = hz;
             return true;
         };
         host.spi_transmit = [](void* ctx, uint32_t instance, uint32_t value) {
@@ -381,6 +394,29 @@ int main() {
         CHECK(world.uart_bytes == bytes_before);
         CHECK(m.clock().tick(50e3));
         CHECK(world.uart_bytes == bytes_before + 1 && world.uart_instance == 1 && world.uart_value == 0x42);
+
+        // PPB, the watchdog and the DMA (group 4): built by the same call; the watchdog's tick reaches the TIMER and SysTick inside, then the host.
+        {
+            const int w = world.warns;
+            (void)m.bus.read32(0x40058000 + 0x200);
+            CHECK(world.warns == w + 1 && world.block == kMcuBlockWatchdog);
+            (void)m.bus.read32(0x50000000 + 0x600);
+            CHECK(world.warns == w + 2 && world.block == kMcuBlockDma);
+        }
+        m.bus.write32(0x50000000 + 0x408, 1);  // DMA.INTF0: forces DMA_IRQ_0 (11)
+        CHECK((m.cpu.pending_interrupts & (1u << 11)) != 0);
+        m.bus.write32(0x50000000 + 0x418, 1);  // DMA.INTF1: forces DMA_IRQ_1 (12)
+        CHECK((m.cpu.pending_interrupts & (1u << 12)) != 0);
+        m.attach_dma(&m.dma());  // (the earlier checks detached it)
+        CHECK(m.set_dreq(3, true) && m.dma().dreq(3));  // the chip's own DMA is the one the requests go to
+        m.bus.write32(0x40058000 + 0x00, 1u << 31);  // WATCHDOG.CTRL.TRIGGER: the chip's reset is the host's
+        CHECK(world.triggers == 1);
+        m.watchdog().clk_ref_changed(12e6);
+        m.bus.write32(0x40058000 + 0x2C, 12 | (1u << 9));  // WATCHDOG.TICK: 12 cycles of clk_ref, enabled -> 1 MHz
+        CHECK(m.timer().tick_hz() == 1e6 && m.ppb().tick_hz() == 1e6);  // the TIMER and SysTick follow it in C++ ...
+        CHECK(world.ticks >= 1 && world.last_tick == 1e6);              // ... and then the host hears of it
+        m.bus.write32(0xE000ED0C, 0x05FA0004);  // AIRCR: VECTKEY | SYSRESETREQ
+        CHECK(world.resets == 1);
     }
 
     if (failures == 0) std::printf("test_mcu: ok\n");

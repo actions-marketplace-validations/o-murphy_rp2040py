@@ -33,6 +33,7 @@ cdef extern from "vreg.hpp" namespace "rp2040core":
         WindowHandler window_handler() noexcept
 
 cdef class RPVREGAndChipReset:
-    cdef VregBlock _block
+    cdef VregBlock* _block  # the chip's (`Mcu` builds and wires it), or `_own` for a stand-in chip that has no `Mcu`
+    cdef VregBlock _own
     cdef public object rp2040
     cdef public object name

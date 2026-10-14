@@ -27,8 +27,12 @@
 #include "dma.hpp"
 #include "pin.hpp"
 #include "pio.hpp"
+#include "busctrl.hpp"
 #include "rtc.hpp"
+#include "syscfg.hpp"
+#include "sysinfo.hpp"
 #include "tbman.hpp"
+#include "vreg.hpp"
 
 namespace rp2040core {
 
@@ -39,7 +43,7 @@ using McuResult = BatchResult;
 // What the world supplies to a chip that builds itself (step 3a of the revised plan, record 0096): the one interface the blocks go through for what the core cannot answer alone.
 // For now it is the warning (a register access the block does not implement: the logger of the host); the pins, the console and the rest come with the blocks that need them.
 // `warn(ctx, block, kind, offset, value)`: `block` is a `McuBlock`, `kind` the `kRegWarn*` code of core_host.hpp. `failed` is the host's parked-failure flag, shared by every block.
-enum McuBlock : uint32_t { kMcuBlockRtc = 0, kMcuBlockTbman = 1 };
+enum McuBlock : uint32_t { kMcuBlockRtc = 0, kMcuBlockTbman = 1, kMcuBlockBusctrl = 2, kMcuBlockVreg = 3, kMcuBlockSysinfo = 4, kMcuBlockSyscfg = 5 };
 struct McuHost {
     void (*warn)(void* ctx, uint32_t block, uint32_t kind, uint32_t offset, int64_t value) = nullptr;
     void* ctx = nullptr;
@@ -48,6 +52,11 @@ struct McuHost {
 
 constexpr uint32_t kRtcBase = 0x4005C000;    // RTC_BASE
 constexpr uint32_t kTbmanBase = 0x4006C000;  // TBMAN_BASE
+constexpr uint32_t kBusctrlBase = 0x40030000;  // BUSCTRL_BASE
+constexpr uint32_t kVregBase = 0x40064000;     // VREG_AND_CHIP_RESET_BASE
+constexpr uint32_t kSysinfoBase = 0x40000000;  // SYSINFO_BASE
+constexpr uint32_t kSyscfgBase = 0x40004000;   // SYSCFG_BASE
+constexpr uint32_t kRomVersionAddress = 0x13;  // the bootrom's version byte (pico-sdk rp2040_rom_version(): the ROM header at 0x10, the fourth byte)
 constexpr uint32_t kIrqRtc = 25;           // RTC_IRQ
 
 class Mcu {
@@ -85,9 +94,42 @@ public:
         t.failed = host.failed;
         tbman_.init(t);
         bus.windows.attach(kTbmanBase, tbman_.window_handler());
+
+        BusctrlHost b;
+        b.warn = block_warn<kMcuBlockBusctrl>;
+        b.ctx = this;
+        b.failed = host.failed;
+        busctrl_.init(b);
+        bus.windows.attach(kBusctrlBase, busctrl_.window_handler());
+
+        VregHost v;
+        v.warn = block_warn<kMcuBlockVreg>;
+        v.ctx = this;
+        v.failed = host.failed;
+        vreg_.init(v);
+        bus.windows.attach(kVregBase, vreg_.window_handler());
+
+        SysInfoHost i;
+        i.rom_version = sysinfo_rom_version;  // read off the chip's own bus: the bootrom the chip holds
+        i.warn = block_warn<kMcuBlockSysinfo>;
+        i.ctx = this;
+        i.failed = host.failed;
+        sysinfo_.init(i);
+        bus.windows.attach(kSysinfoBase, sysinfo_.window_handler());
+
+        SyscfgHost c;
+        c.warn = block_warn<kMcuBlockSyscfg>;
+        c.ctx = this;
+        c.failed = host.failed;
+        syscfg_.init(&cpu, c);  // (PROC0_NMI_MASK is the chip's own CPU)
+        bus.windows.attach(kSyscfgBase, syscfg_.window_handler());
     }
     RtcBlock& rtc() noexcept { return rtc_; }
     TbmanBlock& tbman() noexcept { return tbman_; }
+    BusctrlBlock& busctrl() noexcept { return busctrl_; }
+    VregBlock& vreg() noexcept { return vreg_; }
+    SysInfoBlock& sysinfo() noexcept { return sysinfo_; }
+    SyscfgBlock& syscfg() noexcept { return syscfg_; }
 
     // The parts the chip owns. A host fills the bus's memory map and window table and calls `cpu.init(&bus, host, max_irq)` itself until the host interface does it.
     Cpu cpu;
@@ -160,11 +202,19 @@ private:
         Mcu* mcu = static_cast<Mcu*>(chip);
         if (mcu->host_world_.warn != nullptr) mcu->host_world_.warn(mcu->host_world_.ctx, Block, kind, offset, value);
     }
+    static bool sysinfo_rom_version(void* chip, uint32_t* version) noexcept {
+        *version = static_cast<Mcu*>(chip)->bus.read8(kRomVersionAddress);
+        return true;
+    }
     static bool rtc_irq(void* chip, bool level) noexcept { return static_cast<Mcu*>(chip)->set_interrupt(kIrqRtc, level); }
 
     PioBlock pio_[kPioBlocks];
     RtcBlock rtc_;
     TbmanBlock tbman_;
+    BusctrlBlock busctrl_;
+    VregBlock vreg_;
+    SysInfoBlock sysinfo_;
+    SyscfgBlock syscfg_;
     McuHost host_world_;
     IrqHook irq_hook_ = nullptr;
     void* irq_hook_ctx_ = nullptr;

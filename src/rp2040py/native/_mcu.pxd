@@ -10,8 +10,12 @@ from rp2040py.native._clock cimport Clock
 from rp2040py.native._cpu cimport Cpu
 from rp2040py.native._dma cimport DmaBlock
 from rp2040py.native._pio cimport PioBlock
+from rp2040py.native._busctrl cimport BusctrlBlock
 from rp2040py.native._rtc cimport RtcBlock
+from rp2040py.native._syscfg cimport SyscfgBlock
+from rp2040py.native._sysinfo cimport SysInfoBlock
 from rp2040py.native._tbman cimport TbmanBlock
+from rp2040py.native._vreg_and_chip_reset cimport VregBlock
 
 cdef extern from "mcu.hpp" namespace "rp2040core":
     ctypedef BatchParams McuLimits
@@ -23,6 +27,10 @@ cdef extern from "mcu.hpp" namespace "rp2040core":
 
     cdef const uint32_t kMcuBlockRtc
     cdef const uint32_t kMcuBlockTbman
+    cdef const uint32_t kMcuBlockBusctrl
+    cdef const uint32_t kMcuBlockVreg
+    cdef const uint32_t kMcuBlockSysinfo
+    cdef const uint32_t kMcuBlockSyscfg
 
     cdef cppclass McuHost:
         McuHost() noexcept
@@ -52,6 +60,10 @@ cdef extern from "mcu.hpp" namespace "rp2040core":
         void build(const McuHost& host) noexcept
         RtcBlock& rtc() noexcept
         TbmanBlock& tbman() noexcept
+        BusctrlBlock& busctrl() noexcept
+        VregBlock& vreg() noexcept
+        SysInfoBlock& sysinfo() noexcept
+        SyscfgBlock& syscfg() noexcept
         void set_clk_changed_flag(const uint8_t* flag) noexcept
         void set_monotonic(McuMonotonicFn monotonic) noexcept
         int run(const McuLimits& limits, McuResult* result) noexcept

@@ -278,6 +278,28 @@ int main() {
         CHECK(m.bus.read32(tbman) == 1 && world.warns == warns);
         (void)m.bus.read32(tbman + 0x10);
         CHECK(world.warns == warns + 1 && world.block == kMcuBlockTbman && world.kind == kTbmanWarnRead && world.offset == 0x10);
+
+        // BUSCTRL, VREG, SYSINFO and SYSCFG, built by the same call (group 1 of step 3a). Addresses and values are literals, so a wrong constant fails here.
+        static uint8_t rom[0x40];
+        m.bus.mem.attach({0x00000000, sizeof rom, sizeof rom, 0xFFFFFFFF, rom, kSubWord});
+        m.bus.write32(0x40030000, 0xFFFFFFFFu);  // BUSCTRL.BUS_PRIORITY: four 1-bit fields
+        CHECK(m.bus.read32(0x40030000) == 0x1111);
+        CHECK(m.bus.read32(0x40064000) == 0xB1);  // VREG reset value
+        m.bus.write32(0x40004000, 0x5);           // SYSCFG.PROC0_NMI_MASK is the chip's own CPU
+        CHECK(m.cpu.interrupt_nmi_mask == 0x5 && m.bus.read32(0x40004000) == 0x5);
+        rom[0x13] = 1;  // the bootrom version byte, read off the chip's own bus
+        CHECK(m.bus.read32(0x40000000) == 0x10002927);
+        rom[0x13] = 3;
+        CHECK(m.bus.read32(0x40000000) == 0x20002927);  // B2: revision 2
+        const int before = world.warns;
+        (void)m.bus.read32(0x40030000 + 0x3C);
+        CHECK(world.block == kMcuBlockBusctrl && world.warns == before + 1);
+        (void)m.bus.read32(0x40064000 + 0x3C);
+        CHECK(world.block == kMcuBlockVreg && world.warns == before + 2);
+        (void)m.bus.read32(0x40000000 + 0x3C);
+        CHECK(world.block == kMcuBlockSysinfo && world.warns == before + 3);
+        (void)m.bus.read32(0x40004000 + 0x3C);
+        CHECK(world.block == kMcuBlockSyscfg && world.warns == before + 4);
     }
 
     if (failures == 0) std::printf("test_mcu: ok\n");

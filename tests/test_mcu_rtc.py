@@ -77,3 +77,29 @@ def test_tbman_built_by_the_chip_says_asic_and_warns_for_a_register_that_does_no
     assert chip.logger.messages == []
     chip.read_uint32(TBMAN + 0x10)
     assert chip.logger.messages == [("warning", "TBMAN_BASE", "Unimplemented peripheral read from 0x10")]
+
+
+@pytest.mark.parametrize(
+    "base, name",
+    [
+        (0x40030000, "BUSCTRL_BASE"),
+        (0x40064000, "VREG_AND_CHIP_RESET_BASE"),
+        (0x40000000, "SYSINFO_BASE"),
+        (0x40004000, "SYSCFG"),
+    ],
+)
+def test_the_register_blocks_the_chip_built_warn_under_their_own_names(chip, base, name):
+    chip.read_uint32(base + 0x3C)  # no such register in any of them
+    assert chip.logger.messages == [("warning", name, "Unimplemented peripheral read from 0x3c")]
+
+
+def test_sysinfo_reads_the_revision_off_the_bootrom_the_chip_holds(chip):
+    chip.bootrom[4] = (chip.bootrom[4] & 0x00FFFFFF) | (3 << 24)  # ROM address 0x13: rp2040_rom_version() = 3 (B2)
+    assert chip.read_uint32(0x40000000) >> 28 == 2
+    chip.bootrom[4] = (chip.bootrom[4] & 0x00FFFFFF) | (1 << 24)
+    assert chip.read_uint32(0x40000000) >> 28 == 1
+
+
+def test_syscfg_nmi_mask_is_the_cpus_own(chip):
+    chip.write_uint32(0x40004000, 0x6)
+    assert chip.core.interrupt_nmi_mask == 0x6

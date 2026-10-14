@@ -36,7 +36,7 @@ from rp2040py.native._memory_map cimport (
     kWordIndexed,
 )
 from rp2040py.native._dma cimport RPDMA
-from rp2040py.native._mcu cimport kMcuBlockRtc, kMcuBlockTbman, Mcu, McuHost
+from rp2040py.native._mcu cimport kMcuBlockBusctrl, kMcuBlockRtc, kMcuBlockSyscfg, kMcuBlockSysinfo, kMcuBlockTbman, kMcuBlockVreg, Mcu, McuHost
 from rp2040py.native._pending cimport park_error, pending_flag, raise_if_pending
 from rp2040py.native._pio cimport PioBlock
 from rp2040py.native._bus cimport BusHost, kBusWarnInvalidRead, kBusWarnUnalignedRead
@@ -292,7 +292,14 @@ cdef bool _irq_hook(void* ctx, uint32_t irq, bool level) noexcept:
     return True
 
 
-cdef dict _BLOCK_WINDOW = {kMcuBlockRtc: 0x4005C, kMcuBlockTbman: 0x4006C}  # the block the `Mcu` built -> its key in the peripherals table
+cdef dict _BLOCK_WINDOW = {
+    kMcuBlockRtc: 0x4005C,
+    kMcuBlockTbman: 0x4006C,
+    kMcuBlockBusctrl: 0x40030,
+    kMcuBlockVreg: 0x40064,
+    kMcuBlockSysinfo: 0x40000,
+    kMcuBlockSyscfg: 0x40004,
+}  # the block the `Mcu` built -> its key in the peripherals table
 
 
 cdef void _mcu_warn(void* ctx, uint32_t block, uint32_t kind, uint32_t offset, int64_t value) noexcept:
@@ -1134,6 +1141,22 @@ cdef class RP2040:
     @property
     def gpio_values(self) -> int:
         return self._gpio_bank.input_values()
+
+    def _native_busctrl_address(self):
+        """The address of the BUSCTRL block the `Mcu` built, for the shell that is its Python view."""
+        return <size_t> &self._mcu.busctrl()
+
+    def _native_vreg_address(self):
+        """The address of the VREG block the `Mcu` built, for the shell that is its Python view."""
+        return <size_t> &self._mcu.vreg()
+
+    def _native_sysinfo_address(self):
+        """The address of the SYSINFO block the `Mcu` built, for the shell that is its Python view."""
+        return <size_t> &self._mcu.sysinfo()
+
+    def _native_syscfg_address(self):
+        """The address of the SYSCFG block the `Mcu` built, for the shell that is its Python view."""
+        return <size_t> &self._mcu.syscfg()
 
     def _native_tbman_address(self):
         """The address of the TBMAN block the `Mcu` built, for the shell that is its Python view."""

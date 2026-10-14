@@ -50,6 +50,7 @@ using DmaWarnFn = RegWarnFn;
 struct DmaHost {
     DmaIrqFn irq = nullptr;
     DmaClockFn clk_sys = nullptr;
+    void* clk_ctx = nullptr;           // the context `clk_sys` is called with; null: `ctx` (a host that answers it itself), non-null: the clock tree in C++ (`bind_clock`)
     DmaWarnFn warn = nullptr;
     void* ctx = nullptr;
     const int* failed = nullptr;       // the shared parked-failure flag (see _pending.pyx)
@@ -128,6 +129,16 @@ public:
     // current (1e9 / clk_sys) when clk_sys changes, so a transfer never asks Python for the clock.
     double transfer_ns = 8.0;
 
+    // The clock tree takes over `clk_sys` (core/clock_sinks.hpp): the pacing timers read it from the tree instead of asking the host, and the tree keeps the cycle time current
+    // through `clk_sys_changed()`. Called by whoever wires the tree to the block; a block never bound keeps asking its host.
+    void bind_clock(DmaClockFn fn, void* ctx, double clk_sys_hz) noexcept {
+        host_.clk_sys = fn;
+        host_.clk_ctx = ctx;
+        clk_sys_changed(clk_sys_hz);
+    }
+    // clk_sys is now `hz`: one clk_sys cycle is 1e9 / hz nanoseconds.
+    void clk_sys_changed(double hz) noexcept { transfer_ns = 1e9 / hz; }
+
     void init(Bus* bus, Clock* clock, const DmaHost& host) noexcept {
         bus_ = bus;
         clock_ = clock;
@@ -177,7 +188,7 @@ public:
             // every non-timer TREQ is a period of 0 whatever clk_sys is, so the host is not asked: a channel stalled on a DREQ is rescheduled after every transfer, and that must not cross into Python.
             return 0.0;
         }
-        const double clk = host_.clk_sys(host_.ctx);
+        const double clk = host_.clk_sys(host_.clk_ctx != nullptr ? host_.clk_ctx : host_.ctx);
         if (failed()) {
             *ok = false;
             return 0.0;

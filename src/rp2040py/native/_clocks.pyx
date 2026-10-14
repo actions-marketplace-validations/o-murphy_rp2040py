@@ -13,6 +13,7 @@ to the C++ blocks directly is the step that lets a headless core run the tree wi
 from libc.stdint cimport int64_t, uint32_t
 from libcpp cimport bool as cppbool
 
+from rp2040py.native._dma cimport RPDMA
 from rp2040py.native._pending cimport park_error, pending_flag, raise_if_pending
 from rp2040py.native._ppb cimport RPPPB
 from rp2040py.native._pll cimport RPPLL
@@ -166,13 +167,21 @@ cdef class RPClocks:
         self._block.init(&(<SimulationClock> clock)._clock, host, &(<RPPLL> pll_sys)._block, &(<RPPLL> pll_usb)._block)
         self.rebind_consumers()
 
+    def release_consumers(self):
+        """This tree is being replaced (the chip's `clocks` was assigned): the blocks that read their clock from it go back to asking the chip, and it stops telling anyone."""
+        for consumer in self._consumers or ():
+            if isinstance(consumer, RPDMA):
+                (<RPDMA> consumer)._rejoin_the_python_clock(self)
+        self._block.clear_sinks()
+        self._consumers = None
+
     def rebind_consumers(self):
         """(Re)registers the sinks, in the order of the reference's `update_clocks()`: the chip's `clk_sys`, SysTick, the PWM counters, the host's listeners; the chip's `clk_peri` and the UARTs (their
         baud-rate announcement is a host callback); the watchdog's tick; the RTC. A consumer that is a native block is told directly (core/clock_sinks.hpp); anything else - a recorder, a
         pure-Python reference swapped in by an oracle - through its Python methods. Called by the chip whenever one of the four is replaced; the blocks bound now are kept alive until then."""
         rp2040 = self.rp2040
-        ppb, pwm, watchdog, rtc = rp2040.ppb, rp2040.pwm, rp2040.watchdog, rp2040.rtc
-        self._consumers = (ppb, pwm, watchdog, rtc)
+        ppb, pwm, watchdog, rtc, dma = rp2040.ppb, rp2040.pwm, rp2040.watchdog, rp2040.rtc, rp2040.dma
+        self._consumers = (ppb, pwm, watchdog, rtc, dma)
         self._block.clear_sinks()
         ok = self._block.add_sys_sink(_sys_sink, <void*> self)
         ok = ok and (
@@ -185,6 +194,11 @@ cdef class RPClocks:
             if isinstance(pwm, RPPWM)
             else self._block.add_sys_sink(_pwm_python_sink, <void*> self)
         )
+        if isinstance(dma, RPDMA):
+            # the DMA reads clk_sys from the tree and the tree keeps its cycle time current: the Python listener it registered for that is not needed any more
+            (<RPDMA> dma)._block.bind_clock(clocks_clk_sys, <void*> &self._block, self._block.clk_sys())
+            (<RPDMA> dma)._leave_the_python_clock(self)
+            ok = ok and self._block.add_sys_sink(dma_sys_sink, <void*> &(<RPDMA> dma)._block)
         ok = ok and self._block.add_sys_sink(_listeners_sink, <void*> self)
         ok = ok and self._block.add_peri_sink(_peri_sink, <void*> self)
         ok = ok and (

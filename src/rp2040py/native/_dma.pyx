@@ -221,6 +221,7 @@ cdef class RPDMA:
         # A ready transfer takes one clk_sys cycle: keep that period current without asking Python on every transfer
         self._block.transfer_ns = 1e9 / <double> rp2040.clk_sys
         self._unsubscribe_clock = rp2040.add_clock_listener(self._clk_sys_changed)
+        self._bound_tree = None
         self._channels = []
         cdef _Channel view
         for i in range(12):
@@ -234,6 +235,22 @@ cdef class RPDMA:
 
     def _clk_sys_changed(self, clk_sys, old_clk_sys):
         self._block.transfer_ns = 1e9 / <double> clk_sys
+
+    def _leave_the_python_clock(self, tree):
+        """The native clock tree `tree` has taken over `clk_sys` (`RPClocks.rebind_consumers()` binds the block to it): the listener that kept the cycle time current is not needed any more.
+        The block keeps `tree` alive, since it reads the tree's C++ object."""
+        self._bound_tree = tree
+        if self._unsubscribe_clock is not None:
+            self._unsubscribe_clock()
+            self._unsubscribe_clock = None
+
+    def _rejoin_the_python_clock(self, tree):
+        """`tree` is going away (the chip's clock tree was replaced): back to asking the chip - the callback and the listener - if the block was reading that tree."""
+        if self._bound_tree is not tree:
+            return
+        self._bound_tree = None
+        self._block.bind_clock(_clk_sys_trampoline, NULL, <double> self.rp2040.clk_sys)
+        self._unsubscribe_clock = self.rp2040.add_clock_listener(self._clk_sys_changed)
 
     def __dealloc__(self):
         # Safe whichever of this block and its clock the collector frees first: the C++ clock unlinks its alarms when it dies.

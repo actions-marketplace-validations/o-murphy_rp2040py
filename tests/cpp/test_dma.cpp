@@ -148,6 +148,13 @@ static void fresh() {
     reset_env();
 }
 
+static double tree_clk = 100e6;
+static int tree_calls = 0;
+static double tree_clk_sys(void* ctx) {
+    ++tree_calls;
+    return *static_cast<double*>(ctx);
+}
+
 int main() {
     BusHost host;
     bus.init(host);
@@ -627,5 +634,24 @@ int main() {
     CHECK(reg(3, READ_ADDR) == 0x1111 && reg(3, WRITE_ADDR) == 0 && dma.read(3 * 0x40 + DBG_CTDREQ) == 0);
 
     if (failures == 0) std::printf("test_dma: all checks passed\n");
+    // ---- the clock tree takes over clk_sys (`bind_clock`) --------------------------------------------------------------------
+    fresh();
+    wr(TIMER0, (1u << 16) | 125u);
+    {
+        bool ok;
+        env.clk_calls = 0;
+        tree_calls = 0;
+        dma.bind_clock(tree_clk_sys, &tree_clk, 100e6);
+        CHECK(dma.transfer_ns == 10.0);                                                  // the cycle time is 1e9 / clk_sys from the first moment
+        CHECK(dma.get_timer(TREQ_TIMER0, &ok) == 125.0 * 1e6 / 100e6 && ok);             // the period is read from the tree ...
+        CHECK(tree_calls == 1 && env.clk_calls == 0);                                    // ... with the tree's context, and the host is not asked
+        dma.clk_sys_changed(50e6);
+        CHECK(dma.transfer_ns == 20.0);
+        dma.bind_clock(on_clk_sys, nullptr, 125e6);                                      // back to the host (a null context means the host's own)
+        env.clk_sys = 62.5e6;
+        CHECK(dma.transfer_ns == 8.0 && dma.get_timer(TREQ_TIMER0, &ok) == 125.0 * 1e6 / 62.5e6 && ok);
+        CHECK(env.clk_calls == 1 && tree_calls == 1);
+    }
+
     return failures == 0 ? 0 : 1;
 }

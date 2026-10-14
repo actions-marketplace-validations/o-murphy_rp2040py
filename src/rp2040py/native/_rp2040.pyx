@@ -846,7 +846,7 @@ cdef class RP2040:
         self._bus.set_ppb(self._direct_handler(value, False))
         self._rebind_clock_sinks()
 
-    # The clock tree tells these four of a change directly when they are native blocks (core/clock_sinks.hpp), so replacing one has to re-point the tree: every way of replacing is a property.
+    # The clock tree tells these five (with the DMA) of a change directly when they are native blocks (core/clock_sinks.hpp), so replacing one has to re-point the tree: every way of replacing is a property.
     @property
     def watchdog(self):
         return self._watchdog
@@ -854,6 +854,26 @@ cdef class RP2040:
     @watchdog.setter
     def watchdog(self, value) -> None:
         self._watchdog = value
+        self._rebind_clock_sinks()
+
+    @property
+    def clocks(self):
+        return self._clocks
+
+    @clocks.setter
+    def clocks(self, value) -> None:
+        old = self._clocks
+        self._clocks = value
+        if old is not None and old is not value and hasattr(old, "release_consumers"):
+            old.release_consumers()  # (the blocks it drove go back to asking the chip, and it stops telling them)
+
+    @property
+    def dma(self):
+        return self._dma
+
+    @dma.setter
+    def dma(self, value) -> None:
+        self._dma = value
         self._rebind_clock_sinks()
 
     @property
@@ -866,7 +886,7 @@ cdef class RP2040:
         self._rebind_clock_sinks()
 
     def _rebind_clock_sinks(self):
-        clocks = getattr(self, "clocks", None)  # (not there yet while the chip is being built)
+        clocks = self._clocks  # (None while the chip is being built)
         if clocks is not None and hasattr(clocks, "rebind_consumers"):
             clocks.rebind_consumers()
 

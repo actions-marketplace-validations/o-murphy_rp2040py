@@ -67,6 +67,8 @@ cdef extern from "clocks.hpp" namespace "rp2040core":
 cdef extern from "clock_sinks.hpp" namespace "rp2040core":
     cppbool ppb_sys_sink(void* ctx, double hz, double old) noexcept
     cppbool pwm_sys_sink(void* ctx, double hz, double old) noexcept
+    cppbool dma_sys_sink(void* ctx, double hz, double old) noexcept
+    double clocks_clk_sys(void* ctx) noexcept
     cppbool watchdog_ref_sink(void* ctx, double hz, double old) noexcept
     cppbool rtc_rtc_sink(void* ctx, double hz, double old) noexcept
 

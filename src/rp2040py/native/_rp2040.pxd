@@ -49,6 +49,8 @@ cdef class RP2040:
     cdef object _pio_blocks
     cdef object _ppb
     cdef object _watchdog
+    cdef object _dma
+    cdef object _clocks
     cdef object _rtc
     cdef object _sio_owner  # the trampoline context of a Python SIO/PPB (a native block is its own context)
     cdef object _ppb_owner

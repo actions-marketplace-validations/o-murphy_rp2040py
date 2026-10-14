@@ -21,6 +21,7 @@ cdef extern from "dma.hpp" namespace "rp2040core":
         DmaHost() noexcept
         DmaIrqFn irq
         DmaClockFn clk_sys
+        void* clk_ctx
         DmaWarnFn warn
         void* ctx
         const int* failed
@@ -68,6 +69,8 @@ cdef extern from "dma.hpp" namespace "rp2040core":
         cppbool write(uint32_t offset, int64_t value) noexcept
         cppbool write_atomic(uint32_t offset, int64_t raw, uint32_t atomic_type) noexcept
         WindowHandler window_handler() noexcept
+        void bind_clock(DmaClockFn fn, void* ctx, double clk_sys_hz) noexcept
+        void clk_sys_changed(double hz) noexcept
 
 
 cdef class RPDMA:
@@ -78,3 +81,4 @@ cdef class RPDMA:
     cdef object _channels
     cdef object _dreq_view
     cdef object _unsubscribe_clock
+    cdef object _bound_tree  # the native clock tree the block reads clk_sys from (None: it asks the chip, through the Python listener and callback)

@@ -6,6 +6,8 @@ from libcpp cimport bool as cppbool
 
 from rp2040py.native._clock cimport Clock
 from rp2040py.native._pll cimport PllBlock
+from rp2040py.native._rosc cimport RoscBlock
+from rp2040py.native._xosc cimport XoscBlock
 from rp2040py.native._window_map cimport WindowHandler
 
 cdef extern from "clocks.hpp" namespace "rp2040core":
@@ -30,6 +32,9 @@ cdef extern from "clocks.hpp" namespace "rp2040core":
         void init(Clock* clock, const ClocksHost& host, PllBlock* pll_sys, PllBlock* pll_usb) noexcept
         void detach() noexcept
         void clear_sinks() noexcept
+        void bind_xosc(const XoscBlock* block) noexcept
+        void bind_rosc(const RoscBlock* block) noexcept
+        void set_crystal_hz(double hz) noexcept
         int64_t raw_write_value() noexcept
         cppbool add_sys_sink(ClockSinkFn fn, void* ctx) noexcept
         cppbool add_peri_sink(ClockSinkFn fn, void* ctx) noexcept
@@ -69,6 +74,9 @@ cdef extern from "clock_sinks.hpp" namespace "rp2040core":
     cppbool pwm_sys_sink(void* ctx, double hz, double old) noexcept
     cppbool dma_sys_sink(void* ctx, double hz, double old) noexcept
     double clocks_clk_sys(void* ctx) noexcept
+    double clocks_xosc_hz(void* ctx) noexcept
+    cppbool clocks_retune(void* ctx) noexcept
+    cppbool clocks_retune_hz(void* ctx, double hz) noexcept
     cppbool watchdog_ref_sink(void* ctx, double hz, double old) noexcept
     cppbool rtc_rtc_sink(void* ctx, double hz, double old) noexcept
 

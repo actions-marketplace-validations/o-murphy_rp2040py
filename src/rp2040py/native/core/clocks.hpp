@@ -24,6 +24,8 @@
 #include "clock.hpp"
 #include "core_host.hpp"
 #include "pll.hpp"
+#include "rosc.hpp"
+#include "xosc.hpp"
 
 namespace rp2040core {
 
@@ -93,6 +95,9 @@ public:
         fc_alarm_.fire = &ClocksBlock::on_fc_done;
         fc_alarm_.ctx = this;
         n_sys_ = n_peri_ = n_ref_ = n_rtc_ = 0;
+        xosc_ = nullptr;
+        rosc_ = nullptr;
+        crystal_hz_ = 12e6;
         clk_sys_ = clk_peri_ = clocks_regs::DEFAULT_HZ;
         reset();
     }
@@ -135,9 +140,24 @@ public:
         return notify_ref_and_rtc();
     }
 
+    // ---- the oscillators ----
+    // The tree reads the crystal and the ring oscillator from their C++ blocks when it is given them: the crystal gives `crystal_hz` while its block is STABLE (enabled and not dormant) and nothing
+    // otherwise (datasheet 2.16), the ring oscillator the frequency its block last announced. `nullptr` takes a block back: the host's `xosc_hz` / `rosc_hz` answer again. The crystal's frequency is
+    // the board's (12 MHz on a Pico), a parameter of the world, not of the chip: `set_crystal_hz()`.
+    void bind_xosc(const XoscBlock* block) noexcept { xosc_ = block; }
+    void bind_rosc(const RoscBlock* block) noexcept { rosc_ = block; }
+    void set_crystal_hz(double hz) noexcept { crystal_hz_ = hz; }
+    double crystal_hz() const noexcept { return crystal_hz_; }
+
     // ---- the frequencies ----
-    double xosc_hz() const noexcept { return host_.xosc_hz ? host_.xosc_hz(host_.ctx) : 0.0; }
-    double rosc_hz() const noexcept { return host_.rosc_hz ? host_.rosc_hz(host_.ctx) : 0.0; }
+    double xosc_hz() const noexcept {
+        if (xosc_ != nullptr) return xosc_->stable ? crystal_hz_ : 0.0;
+        return host_.xosc_hz ? host_.xosc_hz(host_.ctx) : 0.0;
+    }
+    double rosc_hz() const noexcept {
+        if (rosc_ != nullptr) return rosc_->hz;
+        return host_.rosc_hz ? host_.rosc_hz(host_.ctx) : 0.0;
+    }
 
     double ref_freq() const noexcept { return ref_source_freq() / clock_divisor(ref_div & clocks_regs::DIV_INT_ONLY); }
     double sys_freq() const noexcept { return sys_source_freq() / clock_divisor(sys_div); }
@@ -421,6 +441,9 @@ private:
     ClocksHost host_;
     PllBlock* pll_sys_ = nullptr;
     PllBlock* pll_usb_ = nullptr;
+    const XoscBlock* xosc_ = nullptr;
+    const RoscBlock* rosc_ = nullptr;
+    double crystal_hz_ = 12e6;
     Alarm fc_alarm_;
     int64_t raw_write_value_ = 0;
 

@@ -58,6 +58,13 @@ cdef class RPXOSC:
         host.failed = pending_flag()
         self._block.init(host)
 
+    def _rejoin_the_python_tree(self, tree):
+        """`tree` is going away (the chip's clock tree was replaced): tell the chip through Python again, if this block was telling that tree."""
+        if self._bound_tree is not tree:
+            return
+        self._bound_tree = None
+        self._block.bind_stable_listener(_stable_trampoline, NULL)
+
     @property
     def raw_write_value(self):
         return self._block.raw_write_value()

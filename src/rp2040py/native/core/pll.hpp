@@ -26,6 +26,7 @@ using PllChangedFn = bool (*)(void* ctx);    // a register changed: the clock tr
 struct PllHost {
     RegWarnFn warn = nullptr;
     PllRefFn ref_hz = nullptr;
+    void* ref_ctx = nullptr;  // the context `ref_hz` is called with; null: `ctx` (see `bind_reference`)
     PllChangedFn changed = nullptr;
     void* ctx = nullptr;
     const int* failed = nullptr;  // the shared parked-failure flag (see _pending.pyx)
@@ -47,6 +48,12 @@ public:
     PllBlock& operator=(const PllBlock&) = delete;
 
     void init(const PllHost& host) noexcept { host_ = host; }
+
+    // Whoever owns the clock tree takes over the reference (core/clock_sinks.hpp `clocks_xosc_hz`) in place of the host's `ref_hz`; `fn == nullptr` takes it back.
+    void bind_reference(PllRefFn fn, void* ctx) noexcept {
+        host_.ref_hz = fn;
+        host_.ref_ctx = ctx;
+    }
 
     bool failed() const noexcept { return host_failed(host_.failed); }
     int64_t raw_write_value() const noexcept { return raw_write_value_; }
@@ -72,7 +79,7 @@ public:
 
     // FREF / REFDIV in Hz (0 until the crystal runs).
     double reference() const noexcept {
-        const double fref = host_.ref_hz ? host_.ref_hz(host_.ctx) : 0.0;
+        const double fref = host_.ref_hz ? host_.ref_hz(host_.ref_ctx != nullptr ? host_.ref_ctx : host_.ctx) : 0.0;
         const uint32_t div = refdiv();
         return fref / static_cast<double>(div ? div : 1);
     }

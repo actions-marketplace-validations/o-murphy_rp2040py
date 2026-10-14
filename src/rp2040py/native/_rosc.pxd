@@ -34,6 +34,7 @@ cdef extern from "rosc.hpp" namespace "rp2040core":
         RoscBlock() noexcept
         void init(Clock* clock, const RoscHost& host) noexcept
         void detach() noexcept
+        void bind_frequency_listener(RoscFrequencyFn fn, void* ctx) noexcept
         int64_t raw_write_value() noexcept
         cppbool reset() noexcept
         double frequency() noexcept
@@ -62,3 +63,4 @@ cdef class RPROSC:
     cdef public object clock
     cdef public object random_bit
     cdef object _rng
+    cdef object _bound_tree  # the native clock tree this block tells directly (None: it tells the chip through Python)

@@ -28,6 +28,7 @@ using XoscStableFn = bool (*)(void* ctx);  // the oscillator started or stopped 
 struct XoscHost {
     RegWarnFn warn = nullptr;
     XoscStableFn stable_changed = nullptr;  // optional
+    void* stable_ctx = nullptr;             // the context `stable_changed` is called with; null: `ctx` (see `bind_stable_listener`)
     void* ctx = nullptr;
     const int* failed = nullptr;  // the shared parked-failure flag (see _pending.pyx)
 };
@@ -48,6 +49,12 @@ public:
     XoscBlock& operator=(const XoscBlock&) = delete;
 
     void init(const XoscHost& host) noexcept { host_ = host; }
+
+    // Whoever owns the clock tree asks to be told directly when the crystal starts or stops (core/clock_sinks.hpp), in place of the host's `stable_changed`; `fn == nullptr` takes it back.
+    void bind_stable_listener(XoscStableFn fn, void* ctx) noexcept {
+        host_.stable_changed = fn;
+        host_.stable_ctx = ctx;
+    }
 
     bool failed() const noexcept { return host_failed(host_.failed); }
     int64_t raw_write_value() const noexcept { return raw_write_value_; }
@@ -99,7 +106,7 @@ public:
         if (!write_register(offset, value)) return false;
         // The crystal starting or stopping changes what the clock tree delivers (nothing from XOSC while it is stopped): a write that flipped STABLE tells the host. `reset()` does not: the CLOCKS
         // domain reset re-derives the tree itself, and a retune in the middle of a chip reset would drop clk_sys to the ring oscillator.
-        if (stable != was_stable && host_.stable_changed) return host_.stable_changed(host_.ctx);
+        if (stable != was_stable && host_.stable_changed) return host_.stable_changed(host_.stable_ctx != nullptr ? host_.stable_ctx : host_.ctx);
         return true;
     }
 

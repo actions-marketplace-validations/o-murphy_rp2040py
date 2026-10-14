@@ -8,7 +8,7 @@ operations:
   datasheet's tables make interesting (the valid and invalid ENABLE / FREQ_RANGE codes, the passwords, DIV around 0xAA0 + 0..31, the dormant words), unimplemented offsets included (so the
   warnings are compared);
 * **simulated time** (``clock.tick()``), which COUNT counts against, and ``reset()``;
-* the chip's **clock tree**: ``rosc_freq``, ``clk_sys`` and ``clk_peri`` are compared after each step and every call of ``update_clocks()`` is logged with its time;
+* the chip's **clock tree**: ``rosc_freq``, ``clk_sys`` and ``clk_peri`` are compared after each step and every change of the frequency the chip holds is logged with its time;
 * the **random bit source**: a deterministic generator installed as the block's ``random_bit`` hook, whose every call is logged - so *when* the block asks for a bit is compared too.
 
 After **each** step: the register file read through the bus (RANDOMBIT excepted - it consumes the source), the block's private state, the derived frequency and the remaining count, the
@@ -87,13 +87,6 @@ class Rig:
                 method,
                 lambda name, message, _m=method: log.append(("log", chip.clock.nanos, _m, str(name), str(message))),
             )
-        original = chip.update_clocks
-
-        def update_clocks() -> None:
-            log.append(("clocks", chip.clock.nanos, float(chip.rosc_freq)))
-            original()
-
-        chip.update_clocks = update_clocks  # type: ignore[method-assign]
 
         def random_bit() -> int:
             # A 16-bit Fibonacci LFSR: deterministic, both rigs draw the same sequence if they ask the same number of times
@@ -107,6 +100,16 @@ class Rig:
     # --- the operations --------------------------------------------------------------------------------------------------
 
     def apply(self, op: tuple) -> Any:
+        # The native ROSC reaches the clock tree without calling the chip's update_clocks(), so a retune is seen as the frequency the chip holds changing across the operation
+        before = float(self.chip.rosc_freq)
+        try:
+            return self._apply(op)
+        finally:
+            after = float(self.chip.rosc_freq)
+            if after != before:
+                self.log.append(("clocks", self.chip.clock.nanos, after))
+
+    def _apply(self, op: tuple) -> Any:
         kind = op[0]
         chip = self.chip
         if kind == "write":

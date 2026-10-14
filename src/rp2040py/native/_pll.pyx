@@ -65,6 +65,13 @@ cdef class RPPLL:
         host.failed = pending_flag()
         self._block.init(host)
 
+    def _rejoin_the_python_tree(self, tree):
+        """`tree` is going away (the chip's clock tree was replaced): ask the chip through Python for the reference again, if the PLL was asking that tree."""
+        if self._bound_tree is not tree:
+            return
+        self._bound_tree = None
+        self._block.bind_reference(_ref_trampoline, NULL)
+
     @property
     def raw_write_value(self):
         return self._block.raw_write_value()

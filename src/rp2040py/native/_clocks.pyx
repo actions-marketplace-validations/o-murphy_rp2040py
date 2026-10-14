@@ -17,10 +17,12 @@ from rp2040py.native._dma cimport RPDMA
 from rp2040py.native._pending cimport park_error, pending_flag, raise_if_pending
 from rp2040py.native._ppb cimport RPPPB
 from rp2040py.native._pll cimport RPPLL
+from rp2040py.native._rosc cimport RPROSC
 from rp2040py.native._pwm cimport RPPWM
 from rp2040py.native._rtc cimport RP2040RTC
 from rp2040py.native._simulation_clock cimport SimulationClock
 from rp2040py.native._watchdog cimport RPWatchdog
+from rp2040py.native._xosc cimport RPXOSC
 from rp2040py.native._window_map cimport WindowHandler
 
 __all__ = ("RPClocks",)
@@ -172,7 +174,15 @@ cdef class RPClocks:
         for consumer in self._consumers or ():
             if isinstance(consumer, RPDMA):
                 (<RPDMA> consumer)._rejoin_the_python_clock(self)
+            elif isinstance(consumer, RPXOSC):
+                (<RPXOSC> consumer)._rejoin_the_python_tree(self)
+            elif isinstance(consumer, RPROSC):
+                (<RPROSC> consumer)._rejoin_the_python_tree(self)
+            elif isinstance(consumer, RPPLL):
+                (<RPPLL> consumer)._rejoin_the_python_tree(self)
         self._block.clear_sinks()
+        self._block.bind_xosc(NULL)
+        self._block.bind_rosc(NULL)
         self._consumers = None
 
     def rebind_consumers(self):
@@ -181,7 +191,8 @@ cdef class RPClocks:
         pure-Python reference swapped in by an oracle - through its Python methods. Called by the chip whenever one of the four is replaced; the blocks bound now are kept alive until then."""
         rp2040 = self.rp2040
         ppb, pwm, watchdog, rtc, dma = rp2040.ppb, rp2040.pwm, rp2040.watchdog, rp2040.rtc, rp2040.dma
-        self._consumers = (ppb, pwm, watchdog, rtc, dma)
+        xosc, rosc = rp2040.xosc, rp2040.rosc
+        self._consumers = (ppb, pwm, watchdog, rtc, dma, xosc, rosc, self._pll_sys, self._pll_usb)
         self._block.clear_sinks()
         ok = self._block.add_sys_sink(_sys_sink, <void*> self)
         ok = ok and (
@@ -194,6 +205,24 @@ cdef class RPClocks:
             if isinstance(pwm, RPPWM)
             else self._block.add_sys_sink(_pwm_python_sink, <void*> self)
         )
+        # The oscillators are read from their C++ blocks, which tell the tree when they change, and the PLLs take the crystal from the tree: nothing of this goes through Python. The crystal's
+        # frequency is the board's (`chip.xosc_freq`, a parameter of the world). Anything else (a recorder, a reference swapped in by an oracle) is read and told through its Python methods.
+        self._block.set_crystal_hz(<double> rp2040.xosc_freq)
+        if isinstance(xosc, RPXOSC):
+            self._block.bind_xosc(&(<RPXOSC> xosc)._block)
+            (<RPXOSC> xosc)._block.bind_stable_listener(clocks_retune, <void*> &self._block)
+            (<RPXOSC> xosc)._bound_tree = self
+        else:
+            self._block.bind_xosc(NULL)
+        if isinstance(rosc, RPROSC):
+            self._block.bind_rosc(&(<RPROSC> rosc)._block)
+            (<RPROSC> rosc)._block.bind_frequency_listener(clocks_retune_hz, <void*> &self._block)
+            (<RPROSC> rosc)._bound_tree = self
+        else:
+            self._block.bind_rosc(NULL)
+        for pll in (self._pll_sys, self._pll_usb):
+            (<RPPLL> pll)._block.bind_reference(clocks_xosc_hz, <void*> &self._block)
+            (<RPPLL> pll)._bound_tree = self
         if isinstance(dma, RPDMA):
             # the DMA reads clk_sys from the tree and the tree keeps its cycle time current: the Python listener it registered for that is not needed any more
             (<RPDMA> dma)._block.bind_clock(clocks_clk_sys, <void*> &self._block, self._block.clk_sys())
@@ -246,6 +275,10 @@ cdef class RPClocks:
         if not self._block.retune():
             raise_if_pending()
         raise_if_pending()
+
+    def set_crystal_hz(self, hz):
+        """The board's crystal (`chip.xosc_freq`): what the crystal block delivers while it is stable."""
+        self._block.set_crystal_hz(<double> hz)
 
     @property
     def ref_freq(self):

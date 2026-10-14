@@ -26,6 +26,7 @@ cdef extern from "pll.hpp" namespace "rp2040core":
     cdef cppclass PllBlock:
         PllBlock() noexcept
         void init(const PllHost& host) noexcept
+        void bind_reference(PllRefFn fn, void* ctx) noexcept
         int64_t raw_write_value() noexcept
         void reset() noexcept
         uint32_t refdiv() noexcept
@@ -46,5 +47,6 @@ cdef extern from "pll.hpp" namespace "rp2040core":
 
 cdef class RPPLL:
     cdef PllBlock _block
+    cdef object _bound_tree  # the native clock tree this PLL takes its reference from (None: it asks the chip through Python)
     cdef public object rp2040
     cdef public object name

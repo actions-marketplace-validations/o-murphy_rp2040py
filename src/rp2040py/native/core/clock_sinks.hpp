@@ -34,6 +34,13 @@ inline bool dma_sys_sink(void* ctx, double hz, double) noexcept {
 // What the DMA calls for `clk_sys` once it is bound to the tree (`DmaBlock::bind_clock`): the context is the `ClocksBlock`.
 inline double clocks_clk_sys(void* ctx) noexcept { return static_cast<ClocksBlock*>(ctx)->clk_sys(); }
 
+// What the PLLs take as their reference once the tree owns the crystal (`PllBlock::bind_reference`): the crystal's output as the tree sees it. The context is the `ClocksBlock`.
+inline double clocks_xosc_hz(void* ctx) noexcept { return static_cast<ClocksBlock*>(ctx)->xosc_hz(); }
+
+// What the crystal and the ring oscillator call when they change (`XoscBlock::bind_stable_listener`, `RoscBlock::bind_frequency_listener`): the tree is re-derived. The context is the `ClocksBlock`.
+inline bool clocks_retune(void* ctx) noexcept { return static_cast<ClocksBlock*>(ctx)->retune(); }
+inline bool clocks_retune_hz(void* ctx, double) noexcept { return static_cast<ClocksBlock*>(ctx)->retune(); }
+
 inline bool watchdog_ref_sink(void* ctx, double hz, double) noexcept { return static_cast<WatchdogBlock*>(ctx)->clk_ref_changed(hz); }
 
 inline bool rtc_rtc_sink(void* ctx, double hz, double) noexcept { return static_cast<RtcBlock*>(ctx)->clk_rtc_changed(hz); }

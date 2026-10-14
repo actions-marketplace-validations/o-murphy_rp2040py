@@ -39,6 +39,7 @@ using RoscBitFn = bool (*)(void* ctx, uint32_t* bit);          // one random bit
 struct RoscHost {
     RoscWarnFn warn = nullptr;
     RoscFrequencyFn frequency_changed = nullptr;
+    void* frequency_ctx = nullptr;  // the context `frequency_changed` is called with; null: `ctx` (see `bind_frequency_listener`)
     RoscBitFn random_bit = nullptr;
     void* ctx = nullptr;
     const int* failed = nullptr;  // the shared parked-failure flag (see _pending.pyx)
@@ -69,6 +70,12 @@ public:
         clock_ = clock;
         host_ = host;
         clock_->add_rebase_listener(&rebase_listener_, &RoscBlock::on_rebase, this);  // the clock's origin moved: COUNT's epoch is an absolute tick count
+    }
+
+    // Whoever owns the clock tree asks to be told directly when the output frequency changes (core/clock_sinks.hpp), in place of the host's `frequency_changed`; `fn == nullptr` takes it back.
+    void bind_frequency_listener(RoscFrequencyFn fn, void* ctx) noexcept {
+        host_.frequency_changed = fn;
+        host_.frequency_ctx = ctx;
     }
 
     // Takes the block off the clock's rebase list; the owner calls it before the block goes away.
@@ -287,7 +294,7 @@ private:
         if (f != hz) {
             rebase_count();
             hz = f;
-            if (!host_.frequency_changed(host_.ctx, f)) return false;
+            if (!host_.frequency_changed(host_.frequency_ctx != nullptr ? host_.frequency_ctx : host_.ctx, f)) return false;
         }
         return true;
     }

@@ -27,6 +27,7 @@ cdef extern from "xosc.hpp" namespace "rp2040core":
     cdef cppclass XoscBlock:
         XoscBlock() noexcept
         void init(const XoscHost& host) noexcept
+        void bind_stable_listener(XoscStableFn fn, void* ctx) noexcept
         int64_t raw_write_value() noexcept
         cppbool reset() noexcept
         uint32_t ctrl
@@ -44,5 +45,6 @@ cdef extern from "xosc.hpp" namespace "rp2040core":
 
 cdef class RPXOSC:
     cdef XoscBlock _block
+    cdef object _bound_tree  # the native clock tree this block tells directly (None: it tells the chip through Python)
     cdef public object rp2040
     cdef public object name

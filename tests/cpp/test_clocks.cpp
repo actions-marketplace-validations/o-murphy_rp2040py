@@ -4,6 +4,7 @@
 // of it (sys sinks only on a change, ref and rtc sinks on every retune), the CLOCKS-domain reset, the frequency counter, and the failure of a sink.
 #include <cstdio>
 
+#include "clock_sinks.hpp"
 #include "clocks.hpp"
 
 using namespace rp2040core;
@@ -574,10 +575,117 @@ static void test_atomic_aliases_decode_against_a_read() {
     CHECK(clocks.raw_write_value() == 1);
 }
 
+// ---- the oscillators as blocks ----
+static bool rosc_freq_host(void*, double) { return true; }
+static bool rosc_bit_host(void*, uint32_t* bit) {
+    *bit = 0;
+    return true;
+}
+static void rosc_warn_host(void*, uint32_t, uint32_t, int64_t) {}
+
+static void test_the_tree_reads_the_oscillators_from_their_blocks() {
+    fresh();
+    XoscBlock xosc;
+    XoscHost xhost;
+    xhost.warn = on_warn;
+    xhost.failed = &env.failed;
+    xosc.init(xhost);
+    RoscBlock rosc;
+    RoscHost rhost;
+    rhost.warn = rosc_warn_host;
+    rhost.frequency_changed = rosc_freq_host;
+    rhost.random_bit = rosc_bit_host;
+    rosc.init(&clk, rhost);
+
+    CHECK(clocks.xosc_hz() == 12 * MHZ && clocks.rosc_hz() == 6.5 * MHZ);  // (the host's answers)
+    clocks.bind_xosc(&xosc);
+    clocks.bind_rosc(&rosc);
+    CHECK(clocks.xosc_hz() == 0.0);  // a crystal that has not been enabled delivers nothing
+    CHECK(xosc.write(xosc_regs::REG_CTRL, (xosc_regs::CTRL_ENABLE_ENABLE << xosc_regs::CTRL_ENABLE_LSB) | xosc_regs::CTRL_FREQ_RANGE_1_15MHZ));
+    CHECK(clocks.xosc_hz() == 12 * MHZ && clocks.crystal_hz() == 12 * MHZ);
+    clocks.set_crystal_hz(24 * MHZ);  // the board's crystal
+    CHECK(clocks.xosc_hz() == 24 * MHZ);
+    CHECK(xosc.write(xosc_regs::REG_DORMANT, xosc_regs::DORMANT_VALUE));
+    CHECK(clocks.xosc_hz() == 0.0);  // dormant: stopped
+    CHECK(xosc.write(xosc_regs::REG_DORMANT, xosc_regs::WAKE_VALUE));
+    CHECK(clocks.xosc_hz() == 24 * MHZ);
+
+    CHECK(clocks.rosc_hz() == rosc.hz && rosc.hz == 6.5 * MHZ);
+    CHECK(rosc.write(rosc_regs::REG_DIV, rosc_regs::DIV_PASS + 8));  // div 8: twice as fast
+    CHECK(clocks.rosc_hz() == rosc.hz && rosc.hz == 13 * MHZ);
+
+    // the frequency counter and the generators see the blocks' values
+    W(FC0_REF_KHZ, 12000);
+    W(FC0_SRC, FC0_SRC_ROSC);
+    clk.tick(400000);
+    CHECK((clocks.read(FC0_RESULT) >> 5) == 13000);
+    W(FC0_SRC, FC0_SRC_XOSC);
+    clk.tick(400000);
+    CHECK((clocks.read(FC0_RESULT) >> 5) == 24000);
+
+    // taken back: the host answers again
+    clocks.bind_xosc(nullptr);
+    clocks.bind_rosc(nullptr);
+    CHECK(clocks.xosc_hz() == 12 * MHZ && clocks.rosc_hz() == 6.5 * MHZ);
+    rosc.detach();
+}
+
+static void test_the_oscillators_tell_the_tree_directly() {
+    fresh();
+    sdk_clocks();  // clk_ref on the crystal, clk_sys on PLL_SYS, clk_peri on clk_sys
+    XoscBlock xosc;
+    XoscHost xhost;
+    xhost.warn = on_warn;
+    xhost.failed = &env.failed;
+    xosc.init(xhost);
+    RoscBlock rosc;
+    RoscHost rhost;
+    rhost.warn = rosc_warn_host;
+    rhost.frequency_changed = rosc_freq_host;
+    rhost.random_bit = rosc_bit_host;
+    rosc.init(&clk, rhost);
+    clocks.bind_xosc(&xosc);
+    clocks.bind_rosc(&rosc);
+    xosc.bind_stable_listener(clocks_retune, &clocks);
+    rosc.bind_frequency_listener(clocks_retune_hz, &clocks);
+    pll_sys.bind_reference(clocks_xosc_hz, &clocks);
+
+    // the PLL was set up before there was a block: its reference is the tree's crystal, which is not running
+    CHECK(pll_sys.reference() == 0.0 && pll_sys.frequency() == 0.0);
+    env.n = 0;
+    CHECK(xosc.write(xosc_regs::REG_CTRL, (xosc_regs::CTRL_ENABLE_ENABLE << xosc_regs::CTRL_ENABLE_LSB) | xosc_regs::CTRL_FREQ_RANGE_1_15MHZ));
+    CHECK(pll_sys.frequency() == 125 * MHZ && clocks.ref_freq() == 12 * MHZ);  // the crystal started: the PLL and clk_ref have a reference
+    CHECK(env.n >= 2 && env.calls[env.n - 2].sink == 'r' && env.calls[env.n - 1].sink == 'c');  // and the tree was re-derived (the ref and rtc sinks hear of every retune)
+
+    // the ring oscillator changing moves what runs from it
+    W(SYS_CTRL, 0);  // clk_sys from clk_ref ... which is on the crystal
+    W(REF_CTRL, REF_SRC_ROSC);
+    CHECK(clocks.clk_sys() == 6.5 * MHZ);
+    env.n = 0;
+    CHECK(rosc.write(rosc_regs::REG_DIV, rosc_regs::DIV_PASS + 8));
+    CHECK(clocks.clk_sys() == 13 * MHZ);
+    CHECK(env.n >= 3 && env.calls[0].sink == 's');
+
+    // a failing sink is reported through the oscillator's write
+    env.fail_sink = env.n + 1;
+    CHECK(!rosc.write(rosc_regs::REG_DIV, rosc_regs::DIV_PASS + 16));
+    env.fail_sink = 0;
+    env.failed = 0;
+
+    xosc.bind_stable_listener(nullptr, nullptr);
+    rosc.bind_frequency_listener(nullptr, nullptr);
+    pll_sys.bind_reference(nullptr, nullptr);
+    clocks.bind_xosc(nullptr);
+    clocks.bind_rosc(nullptr);
+    rosc.detach();
+}
+
 int main() {
     test_defaults();
     test_register_masks();
     test_gpout_registers_are_stored();
+    test_the_tree_reads_the_oscillators_from_their_blocks();
+    test_the_oscillators_tell_the_tree_directly();
     test_the_sdk_sequence_settles_at_125_mhz();
     test_a_200_mhz_clk_sys_and_the_order_of_the_sinks();
     test_a_retune_with_no_change_tells_only_the_ref_and_rtc_sinks();

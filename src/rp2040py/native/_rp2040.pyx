@@ -868,6 +868,48 @@ cdef class RP2040:
             old.release_consumers()  # (the blocks it drove go back to asking the chip, and it stops telling them)
 
     @property
+    def xosc(self):
+        return self._xosc
+
+    @xosc.setter
+    def xosc(self, value) -> None:
+        self._xosc = value
+        self._rebind_clock_sinks()
+
+    @property
+    def rosc(self):
+        return self._rosc
+
+    @rosc.setter
+    def rosc(self, value) -> None:
+        self._rosc = value
+        self._rebind_clock_sinks()
+
+    @property
+    def xosc_freq(self):
+        """The board's crystal (12 MHz on a Pico): a parameter of the world, which the clock tree reads (`RPClocks.set_crystal_hz`)."""
+        return self._xosc_freq
+
+    @xosc_freq.setter
+    def xosc_freq(self, value) -> None:
+        self._xosc_freq = value
+        clocks = self._clocks
+        if clocks is not None and hasattr(clocks, "set_crystal_hz"):
+            clocks.set_crystal_hz(value)
+            self.update_clocks()
+
+    @property
+    def rosc_freq(self):
+        """The ring oscillator's output: the frequency its block last announced (a native tree reads it from the C++ block, and nothing writes this any more); a reference block that
+        assigns it (an oracle's pure-Python ROSC) is read back as assigned."""
+        rosc = self._rosc
+        return getattr(rosc, "_hz", self._rosc_freq) if rosc is not None else self._rosc_freq
+
+    @rosc_freq.setter
+    def rosc_freq(self, value) -> None:
+        self._rosc_freq = value
+
+    @property
     def dma(self):
         return self._dma
 

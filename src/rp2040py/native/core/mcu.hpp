@@ -35,6 +35,8 @@
 #include "pwm.hpp"
 #include "pin.hpp"
 #include "pio.hpp"
+#include "ssi.hpp"
+#include "xip_ctrl.hpp"
 #include "busctrl.hpp"
 #include "clock_sinks.hpp"
 #include "clocks.hpp"
@@ -60,7 +62,7 @@ using McuResult = BatchResult;
 // What the world supplies to a chip that builds itself (step 3a of the revised plan, record 0096): the one interface the blocks go through for what the core cannot answer alone.
 // For now it is the warning (a register access the block does not implement: the logger of the host); the pins, the console and the rest come with the blocks that need them.
 // `warn(ctx, block, kind, offset, value)`: `block` is a `McuBlock`, `kind` the `kRegWarn*` code of core_host.hpp. `failed` is the host's parked-failure flag, shared by every block.
-enum McuBlock : uint32_t { kMcuBlockRtc = 0, kMcuBlockTbman = 1, kMcuBlockBusctrl = 2, kMcuBlockVreg = 3, kMcuBlockSysinfo = 4, kMcuBlockSyscfg = 5, kMcuBlockTimer = 6, kMcuBlockAdc = 7, kMcuBlockUart0 = 8, kMcuBlockUart1 = 9, kMcuBlockSpi0 = 10, kMcuBlockSpi1 = 11, kMcuBlockI2c0 = 12, kMcuBlockI2c1 = 13, kMcuBlockClocks = 14, kMcuBlockPllSys = 15, kMcuBlockPllUsb = 16, kMcuBlockXosc = 17, kMcuBlockRosc = 18, kMcuBlockPpb = 19, kMcuBlockWatchdog = 20, kMcuBlockDma = 21, kMcuBlockIoBank0 = 22, kMcuBlockIoQspi = 23, kMcuBlockPadsBank0 = 24, kMcuBlockPadsQspi = 25, kMcuBlockSio = 26, kMcuBlockPwm = 27, kMcuBlockPio0 = 28, kMcuBlockPio1 = 29 };
+enum McuBlock : uint32_t { kMcuBlockRtc = 0, kMcuBlockTbman = 1, kMcuBlockBusctrl = 2, kMcuBlockVreg = 3, kMcuBlockSysinfo = 4, kMcuBlockSyscfg = 5, kMcuBlockTimer = 6, kMcuBlockAdc = 7, kMcuBlockUart0 = 8, kMcuBlockUart1 = 9, kMcuBlockSpi0 = 10, kMcuBlockSpi1 = 11, kMcuBlockI2c0 = 12, kMcuBlockI2c1 = 13, kMcuBlockClocks = 14, kMcuBlockPllSys = 15, kMcuBlockPllUsb = 16, kMcuBlockXosc = 17, kMcuBlockRosc = 18, kMcuBlockPpb = 19, kMcuBlockWatchdog = 20, kMcuBlockDma = 21, kMcuBlockIoBank0 = 22, kMcuBlockIoQspi = 23, kMcuBlockPadsBank0 = 24, kMcuBlockPadsQspi = 25, kMcuBlockSio = 26, kMcuBlockPwm = 27, kMcuBlockPio0 = 28, kMcuBlockPio1 = 29, kMcuBlockSsi = 30, kMcuBlockXip = 31 };
 struct McuHost {
     void (*warn)(void* ctx, uint32_t block, uint32_t kind, uint32_t offset, int64_t value) = nullptr;
     void* ctx = nullptr;
@@ -89,6 +91,9 @@ struct McuHost {
     void (*system_reset_request)(void* ctx) = nullptr;                                  // AIRCR.SYSRESETREQ; without it the core alone is reset
     bool (*watchdog_trigger)(void* ctx) = nullptr;                                      // the watchdog fired (or was triggered): the chip's reset; without it nothing happens
     bool (*watchdog_tick)(void* ctx, double tick_hz) = nullptr;                         // the tick changed (0: stopped), after the TIMER and SysTick have followed it
+    // The flash path. An SSI the host has replaced is asked for its BAUDR (`ssi_baudr`) by the XIP stream's pace; with a clock tree the host has put over the chip's, `clk_sys` is the host's. Both optional.
+    bool (*ssi_baudr)(void* ctx, double* value) = nullptr;
+    bool (*clk_sys)(void* ctx, double* hz) = nullptr;
     bool (*pio_started)(void* ctx, uint32_t index) = nullptr;                           // CTRL started a stopped PIO: the host runs its "no owning Simulator" fallback (the asyncio task of `run()`)
     double (*xosc_hz)(void* ctx) = nullptr;                                             // only while the host has put its own crystal block over the chip's
     double (*rosc_hz)(void* ctx) = nullptr;                                             // ... or its own ring oscillator
@@ -98,6 +103,7 @@ struct McuHost {
 
 constexpr uint32_t kRtcBase = 0x4005C000;    // RTC_BASE
 constexpr uint32_t kPwmBase = 0x40050000, kIrqPwm = 4, kDreqPwm0 = 24;  // PWM_BASE, PWM_IRQ_WRAP, DREQ_PWM_WRAP0
+constexpr uint32_t kXipCtrlBase = 0x14000000, kSsiBase = 0x18000000, kXipAuxBase = 0x50400000, kIrqXip = 6, kDreqXipStream = 37, kDreqXipSsiTx = 38, kDreqXipSsiRx = 39;  // XIP_CTRL_BASE, XIP_SSI_BASE, XIP_AUX_BASE, XIP_IRQ, DREQ_XIP_STREAM / _SSITX / _SSIRX
 constexpr uint32_t kPio0Base = 0x50200000, kPio1Base = 0x50300000, kIrqPio0 = 7, kIrqPio1 = 9;  // PIO0_BASE, PIO1_BASE, PIO0_IRQ_0, PIO1_IRQ_0
 constexpr uint32_t kIoBank0Base = 0x40014000, kIoQspiBase = 0x40018000, kPadsBank0Base = 0x4001C000, kPadsQspiBase = 0x40020000;
 constexpr uint32_t kIrqIoBank0 = 13;  // IO_IRQ_BANK0
@@ -150,6 +156,8 @@ public:
         rosc_.detach();
         timer_.detach();
         pwm_.detach();
+        ssi_.detach();
+        xip_.detach();
         adc_.detach();
         for (int i = 0; i < 2; ++i) {
             uart_[i].detach();
@@ -318,6 +326,34 @@ public:
             bus.windows.attach(i == 0 ? kPio0Base : kPio1Base, pio_[i].window_handler());
         }
         bind_pio_pins();
+
+        // The flash path: the SSI (the bootrom's flash commands, its chip select the QSPI_SS pin) and XIP_CTRL (the cache, the flash window and the stream) work on the chip's flash buffer
+        // (`set_flash`). The XIP stream's pace derives from `clk_sys` (the tree) and SSI.BAUDR.
+        if (flash_ != nullptr) {  // (an embedder with no flash image has neither block)
+            SsiHost sd;
+            sd.warn = block_warn<kMcuBlockSsi>;
+            sd.irq = ssi_irq;
+            sd.irq_ctx = this;
+            sd.dreq = ssi_dreq;
+            sd.dreq_ctx = this;
+            sd.ctx = this;
+            ssi_.init(flash_, flash_size_, sd);
+            bus.windows.attach(kSsiBase, ssi_.window_handler());
+            bind_ssi_cs();
+            XipHost xh;
+            xh.warn = block_warn<kMcuBlockXip>;
+            xh.dreq = xip_dreq;
+            xh.dreq_ctx = this;
+            xh.clk_sys = xip_clk_sys;
+            xh.baudr = xip_baudr;
+            xh.ctx = this;
+            xh.failed = host.failed;
+            xip_.init(clock_, flash_, flash_size_, xh);
+            bus.windows.attach(kXipCtrlBase, xip_.window_handler());
+            bus.windows.attach(kXipAuxBase, xip_.aux_window_handler());
+            bus.mem.set_xip(xip_.hooks());
+            (void)xip_.reset();
+        }
 
         RtcHost h;
         h.warn = block_warn<kMcuBlockRtc>;
@@ -493,6 +529,18 @@ public:
     }
     // `world` true: the PWM / this PIO is the host's own (a reference an oracle swapped in), so a pin input that moved is told to the host for it, not to the `Mcu`'s block.
     void set_pwm_world(bool world) noexcept { pwm_world_ = world; }
+    // `world` true: the SSI is the host's own: this one leaves the chip-select pin (two blocks applying every command to the one flash would double it) and the XIP stream asks the host for BAUDR.
+    void set_ssi_world(bool world) noexcept {
+        ssi_world_ = world;
+        bind_ssi_cs();
+    }
+    // The chip's flash image: the host's buffer, which outlives the chip. Set before `build()`.
+    void set_flash(uint8_t* data, uint32_t size) noexcept {
+        flash_ = data;
+        flash_size_ = size;
+    }
+    SsiBlock& ssi() noexcept { return ssi_; }
+    XipBlock& xip() noexcept { return xip_; }
     void set_pio_world(uint32_t index, bool world) noexcept { pio_world_[index & 1] = world; }
     void attach_dma(DmaBlock* dma) noexcept { dma_ = dma; }
     void set_dreq_hook(DreqHook hook, void* ctx) noexcept {
@@ -567,6 +615,29 @@ private:
         for (int p = 0; p < kPioBlocks; ++p) {
             for (uint32_t pin = 0; pin < 30; ++pin) pio_[p].bind_pin(pin, pins_world_[0] ? nullptr : &gpio_bank_, pin);
         }
+    }
+    // The SSI's and XIP_CTRL's hosts.
+    static bool ssi_irq(void* chip, bool level) noexcept { return static_cast<Mcu*>(chip)->set_interrupt(kIrqXip, level); }
+    static bool ssi_dreq(void* chip, bool tx, bool asserted) noexcept { return static_cast<Mcu*>(chip)->set_dreq(tx ? kDreqXipSsiTx : kDreqXipSsiRx, asserted); }
+    static bool xip_dreq(void* chip, bool asserted) noexcept { return static_cast<Mcu*>(chip)->set_dreq(kDreqXipStream, asserted); }
+    static bool xip_clk_sys(void* chip, double* hz) noexcept {
+        Mcu* m = static_cast<Mcu*>(chip);
+        const McuHost& w = m->host_world_;
+        if (m->tree_hook_ != nullptr && w.clk_sys != nullptr) return w.clk_sys(w.ctx, hz);
+        *hz = m->clocks_.clk_sys();
+        return true;
+    }
+    static bool xip_baudr(void* chip, double* value) noexcept {
+        Mcu* m = static_cast<Mcu*>(chip);
+        const McuHost& w = m->host_world_;
+        if (m->ssi_world_) return w.ssi_baudr == nullptr || w.ssi_baudr(w.ctx, value);
+        *value = static_cast<double>(m->ssi_.baudr() & 0xFFFFu);
+        return true;
+    }
+    // The SSI listens to QSPI_SS (slot 1 of the QSPI bank) directly - unless the host has replaced the SSI, which then listens to the pin on its own.
+    void bind_ssi_cs() noexcept {
+        ssi_.detach();
+        if (!ssi_world_) (void)ssi_.bind_cs(&qspi_bank_, 1);
     }
     // The PWM's host: its line and requests, and the pins it drives and reads (the GPIO bank).
     static bool pwm_irq(void* chip, bool level) noexcept { return static_cast<Mcu*>(chip)->set_interrupt(kIrqPwm, level); }
@@ -790,6 +861,11 @@ private:
     bool pio_world_[2] = {false, false};
     PwmBlock pwm_;
     McuInstance pio_ctx_[2];
+    SsiBlock ssi_;
+    XipBlock xip_;
+    uint8_t* flash_ = nullptr;
+    uint32_t flash_size_ = 0;
+    bool ssi_world_ = false;
     SioBlock sio_;
     PpbBlock ppb_;
     WatchdogBlock watchdog_;

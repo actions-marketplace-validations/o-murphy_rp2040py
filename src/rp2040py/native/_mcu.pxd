@@ -23,6 +23,8 @@ from rp2040py.native._pwm cimport PwmBlock
 from rp2040py.native._rosc cimport RoscBlock
 from rp2040py.native._rtc cimport RtcBlock
 from rp2040py.native._sio cimport SioBlock
+from rp2040py.native._ssi cimport SsiBlock
+from rp2040py.native._xip_ctrl cimport XipBlock
 from rp2040py.native._spi cimport SpiBlock
 from rp2040py.native._syscfg cimport SyscfgBlock
 from rp2040py.native._sysinfo cimport SysInfoBlock
@@ -72,6 +74,8 @@ cdef extern from "mcu.hpp" namespace "rp2040core":
     cdef const uint32_t kMcuBlockPwm
     cdef const uint32_t kMcuBlockPio0
     cdef const uint32_t kMcuBlockPio1
+    cdef const uint32_t kMcuBlockSsi
+    cdef const uint32_t kMcuBlockXip
 
     cdef cppclass McuHost:
         McuHost() noexcept
@@ -97,6 +101,8 @@ cdef extern from "mcu.hpp" namespace "rp2040core":
         double (*xosc_hz)(void* ctx) noexcept
         double (*rosc_hz)(void* ctx) noexcept
         bool (*adc_read)(void* ctx, uint32_t channel) noexcept
+        bool (*ssi_baudr)(void* ctx, double* value) noexcept
+        bool (*clk_sys)(void* ctx, double* hz) noexcept
         bool (*pio_started)(void* ctx, uint32_t index) noexcept
         bool (*adc_channel_value)(void* ctx, uint32_t channel, int64_t* value) noexcept
 
@@ -130,6 +136,10 @@ cdef extern from "mcu.hpp" namespace "rp2040core":
         IoBlock& io(uint32_t bank) noexcept
         PadsBlock& pads(uint32_t bank) noexcept
         SioBlock& sio() noexcept
+        SsiBlock& ssi() noexcept
+        XipBlock& xip() noexcept
+        void set_flash(uint8_t* data, uint32_t size) noexcept
+        void set_ssi_world(bool world) noexcept
         PwmBlock& pwm() noexcept
         PpbBlock& ppb() noexcept
         WatchdogBlock& watchdog() noexcept

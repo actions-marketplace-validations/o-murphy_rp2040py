@@ -36,7 +36,7 @@ from rp2040py.native._memory_map cimport (
     kWordIndexed,
 )
 from rp2040py.native._dma cimport RPDMA
-from rp2040py.native._mcu cimport kMcuBlockBusctrl, kMcuBlockRtc, kMcuBlockSyscfg, kMcuBlockSysinfo, kMcuBlockTbman, kMcuBlockVreg, Mcu, McuHost, kMcuBlockAdc, kMcuBlockClocks, kMcuBlockDma, kMcuBlockI2c0, kMcuBlockI2c1, kMcuBlockIoBank0, kMcuBlockIoQspi, kMcuBlockPadsBank0, kMcuBlockPadsQspi, kMcuBlockPllSys, kMcuBlockPllUsb, kMcuBlockPpb, kMcuBlockPio0, kMcuBlockPio1, kMcuBlockPwm, kMcuBlockRosc, kMcuBlockSio, kMcuBlockSpi0, kMcuBlockSpi1, kMcuBlockTimer, kMcuBlockUart0, kMcuBlockUart1, kMcuBlockWatchdog, kMcuBlockXosc
+from rp2040py.native._mcu cimport kMcuBlockBusctrl, kMcuBlockRtc, kMcuBlockSyscfg, kMcuBlockSysinfo, kMcuBlockTbman, kMcuBlockVreg, Mcu, McuHost, kMcuBlockAdc, kMcuBlockClocks, kMcuBlockDma, kMcuBlockI2c0, kMcuBlockI2c1, kMcuBlockIoBank0, kMcuBlockIoQspi, kMcuBlockPadsBank0, kMcuBlockPadsQspi, kMcuBlockPllSys, kMcuBlockPllUsb, kMcuBlockPpb, kMcuBlockPio0, kMcuBlockPio1, kMcuBlockPwm, kMcuBlockRosc, kMcuBlockSsi, kMcuBlockXip, kMcuBlockSio, kMcuBlockSpi0, kMcuBlockSpi1, kMcuBlockTimer, kMcuBlockUart0, kMcuBlockUart1, kMcuBlockWatchdog, kMcuBlockXosc
 from rp2040py.native._pending cimport park_error, pending_flag, raise_if_pending
 from rp2040py.native._pio cimport PioBlock
 from rp2040py.native._bus cimport BusHost, kBusWarnInvalidRead, kBusWarnUnalignedRead
@@ -321,6 +321,8 @@ cdef dict _BLOCK_WINDOW = {
     kMcuBlockPwm: 0x40050,
     kMcuBlockPio0: 0x50200,
     kMcuBlockPio1: 0x50300,
+    kMcuBlockSsi: 0x18000,
+    kMcuBlockXip: 0x14000,
 }  # the block the `Mcu` built -> its key in the peripherals table
 
 
@@ -519,6 +521,26 @@ cdef bool _w_i2c_stop(void* ctx, uint32_t instance) noexcept:
         return False
 
 
+cdef bool _w_ssi_baudr(void* ctx, double* value) noexcept:
+    cdef RP2040 chip = <RP2040> ctx
+    try:
+        value[0] = <double> (chip.ssi.read_uint32(0x14) & 0xFFFF)  # SSI.BAUDR
+    except BaseException as error:
+        park_error(error)
+        return False
+    return True
+
+
+cdef bool _w_clk_sys(void* ctx, double* hz) noexcept:
+    cdef RP2040 chip = <RP2040> ctx
+    try:
+        hz[0] = <double> chip.clk_sys
+    except BaseException as error:
+        park_error(error)
+        return False
+    return True
+
+
 cdef bool _w_pio_started(void* ctx, uint32_t index) noexcept:
     cdef RP2040 chip = <RP2040> ctx
     try:
@@ -678,7 +700,10 @@ cdef class RP2040:
         world.i2c_stop = _w_i2c_stop
         world.adc_read = _w_adc_read
         world.pio_started = _w_pio_started
+        world.ssi_baudr = _w_ssi_baudr
+        world.clk_sys = _w_clk_sys
         world.adc_channel_value = _w_adc_channel_value
+        self._mcu.set_flash(<uint8_t*> &self._flash[0], <uint32_t> self.flash_byte_size)
         self._mcu.build(world)
 
         # Clocks
@@ -759,7 +784,6 @@ cdef class RP2040:
         self.busctrl = RPBUSCTRL(self, "BUSCTRL_BASE")
         self.syscfg = RP2040SysCfg(self, "SYSCFG")
         self.xip_ctrl = RPXIPCtrl(self, "XIP_CTRL_BASE")
-        self._attach_xip_hooks(self.xip_ctrl)
         self.ssi = RPSSI(self, "SSI")
         self.xosc = RPXOSC(self, "XOSC_BASE", 0)
         self.io_bank0 = RPIO(self, "IO_BANK0_BASE", None, 0)
@@ -1486,6 +1510,22 @@ cdef class RP2040:
 
     def _native_pads_address(self, bank):
         return <size_t> &self._mcu.pads(<uint32_t> bank)
+
+    def _native_ssi_address(self):
+        return <size_t> &self._mcu.ssi()
+
+    def _native_xip_address(self):
+        return <size_t> &self._mcu.xip()
+
+    # The SSI is the `Mcu`'s own, or a host's (an oracle's reference): the `Mcu`'s listens to the chip-select pin and gives the XIP stream its BAUDR; a host's does both itself.
+    @property
+    def ssi(self):
+        return self._ssi_object
+
+    @ssi.setter
+    def ssi(self, block) -> None:
+        self._ssi_object = block
+        self._mcu.set_ssi_world(not getattr(block, "_from_mcu", False))
 
     def _native_pwm_address(self):
         return <size_t> &self._mcu.pwm()

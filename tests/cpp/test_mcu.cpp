@@ -23,6 +23,7 @@ static double monotonic(void*) noexcept { return fake_now += fake_step; }
 
 static bool alarm_fail(void*) noexcept { return false; }
 
+static uint8_t flash_image[65536];
 static DmaBlock dma_probe;  // (never initialised: only its DREQ bits are read)
 
 int main() {
@@ -291,6 +292,8 @@ int main() {
             w->transmit_value = value;
             return true;
         };
+        for (uint32_t i = 0; i < sizeof flash_image; ++i) flash_image[i] = static_cast<uint8_t>(i * 7 + 3);
+        m.set_flash(flash_image, sizeof flash_image);
         m.build(host);
         const uint32_t rtc = 0x4005C000;  // (literal: the constant under test must not vouch for itself)
         CHECK((m.cpu.pending_interrupts & (1u << 25)) == 0);
@@ -516,6 +519,33 @@ int main() {
         CHECK(m.pio_block(0)->check_changed_pins());  // (a forced instruction outside a cycle: the changed pins are checked on request)
         CHECK(world.pin_changes > pio_changes && world.pin_number == 9 && world.pin_new == 1);
         CHECK((m.bus.read32(0x40014000 + 8 * 9) & (1u << 8)) != 0);  // GPIO9_STATUS.OUTFROMPERI
+
+        // The flash path (group 6): the SSI and XIP_CTRL are built by the Mcu on the chip's flash image.
+        {
+            const int w = world.warns;
+            (void)m.bus.read32(0x18000000 + 0x100);
+            CHECK(world.warns == w + 1 && world.block == kMcuBlockSsi);
+            (void)m.bus.read32(0x15000000);  // the cache-as-SRAM segment while the cache is enabled: the memory map's XIP hook reports it
+            CHECK(world.warns == w + 2 && world.block == kMcuBlockXip);
+        }
+        CHECK(m.bus.read32(0x14000000 + 0x00) == 0x3);   // XIP_CTRL.CTRL: EN | ERR_BADWRITE
+        CHECK(m.bus.read32(0x18000000 + 0x5C) != 0);     // SSI VERSION_ID: the window is the SSI's own
+        // XIP_IRQ (6): the SSI's TX-empty interrupt, unmasked on an enabled SSI; and its TX request to the DMA (38).
+        CHECK((m.cpu.pending_interrupts & (1u << 6)) == 0);
+        m.bus.write32(0x18000000 + 0x08, 1);   // SSIENR
+        m.bus.write32(0x18000000 + 0x2C, 1);   // IMR: TXEIM
+        CHECK((m.cpu.pending_interrupts & (1u << 6)) != 0);
+        m.bus.write32(0x18000000 + 0x2C, 0);
+        CHECK((m.cpu.pending_interrupts & (1u << 6)) == 0);
+        m.bus.write32(0x18000000 + 0x4C, 2);   // DMACR: TDMAE
+        CHECK(m.dma().dreq(38));
+        // The XIP stream reads the flash image by itself at the pace of clk_sys and SSI.BAUDR: DREQ_XIP_STREAM (37) when a word is ready, and XIP_AUX hands it over.
+        m.bus.write32(0x18000000 + 0x14, 4);                 // SSI.BAUDR
+        m.bus.write32(0x14000000 + 0x14, 0x100);             // STREAM_ADDR
+        m.bus.write32(0x14000000 + 0x18, 1);                 // STREAM_CTR: one word
+        CHECK(m.clock().tick(1e6));
+        CHECK(m.dma().dreq(37));
+        CHECK(m.bus.read32(0x50400000) == (flash_image[0x100] | flash_image[0x101] << 8 | flash_image[0x102] << 16 | static_cast<uint32_t>(flash_image[0x103]) << 24));
     }
 
     if (failures == 0) std::printf("test_mcu: ok\n");

@@ -260,6 +260,9 @@ public:
 
     WindowHandler window_handler() noexcept { return BlockWindow<SsiBlock>::handler(this); }
 
+    // SSI.BAUDR as read (the XIP stream's pace derives from it).
+    uint32_t baudr() const noexcept { return baudr_; }
+
 private:
     // The chip-select pin's bank was destroyed first: forget it, so `detach()` has nothing to unregister from.
     static void on_bank_gone(void* ctx) noexcept { static_cast<SsiBlock*>(ctx)->bank_ = nullptr; }

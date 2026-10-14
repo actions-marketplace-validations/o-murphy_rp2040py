@@ -15,106 +15,38 @@ The reference's state is kept readable under its names (`ctrl`, `ctr_hit`, `ctr_
 from libc.stdint cimport int64_t, uint8_t, uint32_t
 from libcpp cimport bool as cppbool
 
-from rp2040py.native._pending cimport park_error, pending_flag, raise_if_pending
-from rp2040py.native._simulation_clock cimport SimulationClock
+from rp2040py.native._pending cimport raise_if_pending
 from rp2040py.native._window_map cimport WindowHandler
 
-from rp2040py.native._mcu_irq cimport Mcu, McuDreqLine, mcu_dreq_line, native_mcu
-from rp2040py.peripherals._xip_ctrl import DREQ_XIP_STREAM, SSI_BAUDR
 
 __all__ = ("RPXIPAux", "RPXIPCtrl")
 
 
-cdef void _warn_trampoline(void* ctx, uint32_t kind, uint32_t address, int64_t value) noexcept:
-    cdef RPXIPCtrl block = <RPXIPCtrl> ctx
-    try:
-        if kind == kXipWarnBadWrite:
-            block.warn(f"Write to the XIP alias at 0x{address:08x} (a bus fault with ERR_BADWRITE set)")
-        elif kind == kXipWarnSramRead:
-            block.warn(f"Read of the cache-as-SRAM at 0x{address:08x} while the cache is enabled or powered down (a bus error)")
-        elif kind == kXipWarnSramWrite:
-            block.warn(f"Write to the cache-as-SRAM at 0x{address:08x} while the cache is enabled or powered down (a bus error)")
-        else:
-            block.warn(f"Unimplemented peripheral write to 0x{address:x}: 0x{value:x}")
-    except BaseException as error:
-        park_error(error)
-
-
-cdef cppbool _dreq_trampoline(void* ctx, cppbool asserted) noexcept:
-    cdef RPXIPCtrl block = <RPXIPCtrl> ctx
-    try:
-        dma = block.rp2040.dma
-        if asserted:
-            dma.set_dreq(DREQ_XIP_STREAM)
-        else:
-            dma.clear_dreq(DREQ_XIP_STREAM)
-    except BaseException as error:
-        park_error(error)
-        return False
-    return True
-
-
-cdef cppbool _clk_sys_trampoline(void* ctx, double* value) noexcept:
-    cdef RPXIPCtrl block = <RPXIPCtrl> ctx
-    try:
-        value[0] = <double> block.rp2040.clk_sys
-    except BaseException as error:
-        park_error(error)
-        return False
-    return True
-
-
-cdef cppbool _baudr_trampoline(void* ctx, double* value) noexcept:
-    cdef RPXIPCtrl block = <RPXIPCtrl> ctx
-    try:
-        value[0] = <double> (block.rp2040.ssi.read_uint32(SSI_BAUDR) & 0xFFFF)
-    except BaseException as error:
-        park_error(error)
-        return False
-    return True
-
-
 cdef class RPXIPCtrl:
     def __init__(self, rp2040, name):
-        cdef XipHost host
-        clock = rp2040.clock
-        if not isinstance(clock, SimulationClock):
+        native_xip = getattr(rp2040, "_native_xip_address", None)
+        if native_xip is None:
             raise TypeError(
-                "the native XIP_CTRL schedules its stream on the native SimulationClock; "
-                f"{type(rp2040).__name__} with {type(clock).__name__} is not that "
+                f"the native XIP_CTRL is a view of a block of the native chip's C++ core; {type(rp2040).__name__} is not that "
                 "(use the pure-Python peripherals/_xip_ctrl.RPXIPCtrl with it)"
             )
-        native_flash = getattr(rp2040, "_native_flash_address", None)
-        if native_flash is None:
-            raise TypeError(
-                f"the native XIP_CTRL works on the native chip's flash buffer; {type(rp2040).__name__} is not that "
-                "(use the pure-Python peripherals/_xip_ctrl.RPXIPCtrl with it)"
-            )
-        flash_address, flash_size = native_flash()
+        # the chip's `Mcu` builds the block: its window, the flash window's hooks, the XIP_AUX window, its DMA request and its pace (clk_sys, SSI.BAUDR) are wired inside
+        self._from_mcu = True
+        self._block = <XipBlock*> <size_t> native_xip()
         self.rp2040 = rp2040
         self.name = name
-        self.clock = clock
-        host.warn = _warn_trampoline
-        mcu = native_mcu(rp2040)
-        if mcu != NULL:
-            # the request goes from the C++ block straight to the chip (and its DMA), with no Python in between
-            self._dreq_line.mcu = mcu
-            self._dreq_line.number = <uint32_t> DREQ_XIP_STREAM
-            host.dreq = mcu_dreq_line
-            host.dreq_ctx = &self._dreq_line
-        else:
-            host.dreq = _dreq_trampoline
-            host.dreq_ctx = NULL
-        host.clk_sys = _clk_sys_trampoline
-        host.baudr = _baudr_trampoline
-        host.ctx = <void*> self
-        host.failed = pending_flag()
-        self._block.init(&(<SimulationClock> clock)._clock, <const uint8_t*> <size_t> flash_address, <uint32_t> flash_size, host)
-        if not self._block.reset():
-            raise_if_pending()
+        self.clock = rp2040.clock
 
-    def __dealloc__(self):
-        self._block.detach()
+    def _warn_kind(self, kind, address, value):
+        """A bus fault the model cannot raise, or a register access it does not implement, as the logger's message (the chip's host calls this for the block it built)."""
+        if kind == kXipWarnBadWrite:
+            self.warn(f"Write to the XIP alias at 0x{address:08x} (a bus fault with ERR_BADWRITE set)")
+        elif kind == kXipWarnSramRead:
+            self.warn(f"Read of the cache-as-SRAM at 0x{address:08x} while the cache is enabled or powered down (a bus error)")
+        elif kind == kXipWarnSramWrite:
+            self.warn(f"Write to the cache-as-SRAM at 0x{address:08x} while the cache is enabled or powered down (a bus error)")
+        else:
+            self.warn(f"Unimplemented peripheral write to 0x{address:x}: 0x{value:x}")
 
     def reset(self):
         """The XIP domain (`PSM.WDSEL`'s XIP bit, see `RP2040.reset()`): registers to power-on, the stream stopped, the cache flushed; the data RAM keeps its contents."""

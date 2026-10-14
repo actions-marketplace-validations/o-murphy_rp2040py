@@ -25,8 +25,8 @@ One place to see, block by block and datasheet section by section, what is model
 | DMA | Partial | Yes + second pass + the datasheet examples | Ported | sniffer, priority/arbitration, error flags, I2C DREQs; bus contention |
 | PIO0/1 | Partial | Yes + second pass | Ported | `OUT_STICKY`/`INLINE_OUT_EN`/`OUT_EN_SEL`, autopull timing |
 | SSI (XIP flash controller) | Partial | Yes + XIP_CTRL pass | Ported | a flash-command model with a 16-entry RX FIFO, the six interrupts (`XIP_IRQ`), DMA requests 38/39 and `TMOD` = transmit only; the TX FIFO is always empty (a frame shifts at once); 7 of 28 registers stored only |
-| CLOCKS | Partial | Yes + second pass | Python only | resus, clock enables / sleep, GPIN, the GPOUT clock outputs; 18 of 48 registers are stubs |
-| PLL | Partial | Yes | Python only | power bits and LOCK follow the datasheet; no lock delay |
+| CLOCKS | Partial | Yes + second pass | C++ (`core/clocks.hpp`, `clock_sinks.hpp`) | resus, clock enables / sleep, GPIN, the GPOUT clock outputs; 18 of 48 registers are stubs |
+| PLL | Partial | Yes | C++ (`core/pll.hpp`) | power bits and LOCK follow the datasheet; no lock delay |
 | XOSC | Partial | Yes | Ported | DORMANT, the start-up delay and `COUNT` are stored; `STABLE` is set at once |
 | ROSC | Partial | Yes (read with the port) | Ported | the oscillator never stops (DORMANT and DISABLE are stored), STABLE is immediate, the drive strengths and the phase output do nothing |
 | PSM, RESETS, SYSINFO, TBMAN | Done | Yes | Ported | - |
@@ -199,4 +199,9 @@ Introduction (1), electrical and mechanical (5): n/a.
 |---|---|---|---|
 | WASM host and the drop-in for rp2040js | Missing | record 0099, step zero not started | Go-ahead |
 | Consolidating the Cython shells | Missing | less wrapper code once the ports are done | After the 0096 gate |
+| The core's step interface and top-level host interface (one flat struct of callbacks, `Mcu::run`; pacing stays the wrapper's) | Missing | 0096, entry of 2026-10-14 | After the plan; own go-ahead |
+| The reset cascade, the wiring and the chip-level interrupt lines (`set_interrupt`, `update_io_interrupt`) in C++; the DMA reading `clk_sys` from the tree | Missing | still in `native/_rp2040.pyx` and `_rp2040.py`; the pure-Python chip stays as the reference and fallback (0096, 2026-10-14) | After the plan; own go-ahead |
+| A chip-level oracle over every reset trigger (power-on, RUN pin, watchdog with each `WDSEL`) | Missing | holds the native cascade equal to the pure one | With the cascade |
+| How the empty-host gate gets its bytes (a UART REPL, or the USB CDC host shortcut in C++) | Missing | `usb/cdc.py` is Python behind host functions; a decision to take | Before the gate |
+| The gate review: MicroPython to the REPL on an empty host interface | Missing | 0096, entry of 2026-10-06 | After the above |
 | An intermediate single-core C++ release | Missing | after the gate review; keeps the three dual-core seams from 0096 (initiator id on bus accesses, IRQ line to core mask, per-core CPU state) | After the 0096 gate |

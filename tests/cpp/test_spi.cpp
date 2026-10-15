@@ -4,6 +4,7 @@
 // device that can be the reference's default (completes with 0 from inside the callback), an immediate one, a deferred one (completes on a later call) or a silent one.
 #include <cstdio>
 
+#include "clock.hpp"
 #include "fifo.hpp"
 #include "spi.hpp"
 
@@ -22,6 +23,7 @@ static int failures = 0;
 enum Mode { kDefault = 0, kImmediate = 1, kDeferred = 2, kSilent = 3 };
 
 static SpiBlock spi;
+static Clock clk;
 
 struct Env {
     bool irq_calls[256];
@@ -36,7 +38,8 @@ struct Env {
     int mode = kDefault;
     uint32_t next_rx = 0;
     int failed = 0;
-    bool fail_irq = false, fail_dreq = false, fail_transmit = false;
+    bool fail_irq = false, fail_dreq = false, fail_transmit = false, fail_bit = false;
+    double bit_ns = 0.0;  // one SSPCLKOUT period; 0 (the default of these checks) is an unconfigured bit clock: a word has no time on the wire
 };
 static Env env;
 
@@ -60,6 +63,11 @@ static bool on_transmit(void*, uint32_t value) {
     if (env.mode == kImmediate) { env.next_rx += 37; return spi.complete_transmit(env.next_rx); }
     return true;                                                           // deferred / silent: the device holds the byte
 }
+static bool on_bit(void*, double* nanos) {
+    *nanos = env.bit_ns;
+    if (env.fail_bit) { env.failed = 1; return false; }
+    return true;
+}
 static void on_warn(void*, uint32_t kind, uint32_t offset, int64_t value) {
     if (env.warns < 32) {
         env.warn_kind[env.warns] = kind;
@@ -77,9 +85,11 @@ static void fresh(int mode = kDefault, bool enabled = true) {
     host.irq = on_irq;
     host.dreq = on_dreq;
     host.transmit = on_transmit;
+    host.bit_ns = on_bit;
     host.warn = on_warn;
     host.failed = &env.failed;
-    spi.init(host);
+    clk.reset();
+    spi.init(&clk, host);
     spi.control0 = spi.dma_control = spi.clock_divisor = 0;
     spi.control1 = enabled ? CR1_SSE : 0;
     spi.int_raw = INT_TX;
@@ -276,6 +286,93 @@ static void test_a_deferred_device_completes_later_and_the_next_byte_follows() {
     CHECK(spi.complete_transmit(0xA2));
     CHECK(!spi.busy && spi.rx.count() == 2);
     CHECK(rd(DR) == 0xA1 && rd(DR) == 0xA2);                     // whole, unmasked
+}
+
+// A word occupies the wire for DATA_BITS SSPCLKOUT periods from the moment it leaves the TX FIFO; the device's reply is held until the last bit has gone.
+static void test_a_word_takes_data_bits_bit_clocks_and_an_early_reply_waits() {
+    fresh(kImmediate);
+    env.bit_ns = 100.0;
+    wr(CR0, 0x7);  // 8 bits
+    dr(0xA5);
+    CHECK(env.sent_n == 1 && spi.busy && spi.frame_active && spi.rx.empty());  // sent at once, the reply held
+    CHECK(clk.has_alarm() && clk.nanos_to_next_alarm() == 800.0);
+    CHECK((rd(SR) & SR_BSY) != 0);
+    CHECK(clk.tick(799.0) && spi.busy && spi.rx.empty());
+    CHECK(clk.tick(1.0));
+    CHECK(!spi.busy && !spi.frame_active && spi.rx.count() == 1 && (rd(SR) & SR_BSY) == 0);
+    CHECK(rd(DR) == 37);
+    // 16 bits take twice as long
+    wr(CR0, 0xF);
+    dr(1);
+    CHECK(clk.nanos_to_next_alarm() == 1600.0);
+}
+
+static void test_a_late_reply_completes_at_once_and_a_second_word_follows_the_first() {
+    fresh(kDeferred);
+    env.bit_ns = 10.0;
+    wr(CR0, 0x7);
+    dr(0x11);
+    dr(0x22);
+    CHECK(clk.tick(80.0) && spi.busy && !spi.frame_active && spi.rx.empty());  // the frame is over, the device has not answered: BSY stays up
+    CHECK(env.sent_n == 1 && spi.tx.count() == 1);
+    CHECK(spi.complete_transmit(0xA1));
+    CHECK(env.sent_n == 2 && env.sent[1] == 0x22 && spi.rx.count() == 1 && spi.frame_active);  // answered at once, and the second word starts its own 80 ns
+    CHECK(clk.nanos_to_next_alarm() == 80.0);
+    CHECK(spi.complete_transmit(0xA2) && spi.has_reply && spi.rx.count() == 1);  // early: held
+    CHECK(clk.tick(80.0) && !spi.busy && spi.rx.count() == 2);
+    CHECK(rd(DR) == 0xA1 && rd(DR) == 0xA2);
+    // a reply held for one word is not carried over to the next
+    dr(0x33);
+    dr(0x44);
+    CHECK(spi.complete_transmit(0xB1) && spi.has_reply);
+    CHECK(clk.tick(80.0) && env.sent_n == 4 && spi.rx.count() == 1 && !spi.has_reply);  // the first is delivered, the second word is on the wire
+    CHECK(clk.tick(80.0) && spi.busy && spi.rx.count() == 1);                           // the second has no reply yet
+}
+
+static void test_the_default_device_and_loop_back_are_held_for_the_frame_too() {
+    fresh(kDefault);
+    env.bit_ns = 20.0;
+    wr(CR0, 0x7);
+    dr(5);
+    CHECK(spi.busy && spi.rx.empty() && clk.nanos_to_next_alarm() == 160.0);
+    CHECK(clk.tick(160.0) && !spi.busy && spi.rx.count() == 1);
+    fresh(kSilent);
+    env.bit_ns = 20.0;
+    wr(CR0, 0x7);
+    wr(CR1, CR1_SSE | CR1_LBM);
+    dr(0x3C);
+    CHECK(env.sent_n == 0 && spi.busy && spi.rx.empty());
+    CHECK(clk.tick(160.0) && !spi.busy && spi.rx.count() == 1 && rd(DR) == 0x3C);
+}
+
+static void test_a_slave_and_an_unconfigured_bit_clock_have_no_frame_time() {
+    fresh(kImmediate);
+    env.bit_ns = 100.0;
+    wr(CR1, CR1_SSE | CR1_MS);
+    dr(1);
+    CHECK(!spi.frame_active && !clk.has_alarm() && spi.rx.count() == 1);
+    fresh(kImmediate);
+    env.bit_ns = 0.0;
+    dr(1);
+    CHECK(!spi.frame_active && !clk.has_alarm() && spi.rx.count() == 1);
+}
+
+static void test_reset_cancels_the_frame_and_drops_a_held_reply() {
+    fresh(kImmediate);
+    env.bit_ns = 100.0;
+    dr(1);
+    CHECK(spi.frame_active && spi.has_reply && clk.has_alarm());
+    CHECK(spi.reset());
+    CHECK(!spi.frame_active && !spi.has_reply && !clk.has_alarm() && !spi.busy);
+    CHECK(clk.tick(10000.0) && spi.rx.empty());
+}
+
+static void test_a_failing_bit_clock_stops_the_send_where_the_reference_would_have_raised() {
+    fresh(kImmediate);
+    env.bit_ns = 100.0;
+    env.fail_bit = true;
+    CHECK(!spi.write(DR, 1) && env.failed == 1);
+    CHECK(!spi.frame_active && !clk.has_alarm());
 }
 
 static void test_a_completion_with_nothing_sent_is_accepted() {
@@ -496,6 +593,12 @@ int main() {
     test_the_tx_interrupt_is_raw_while_at_most_four_are_queued();
     test_the_default_device_completes_from_inside_the_callback();
     test_a_deferred_device_completes_later_and_the_next_byte_follows();
+    test_a_word_takes_data_bits_bit_clocks_and_an_early_reply_waits();
+    test_a_late_reply_completes_at_once_and_a_second_word_follows_the_first();
+    test_the_default_device_and_loop_back_are_held_for_the_frame_too();
+    test_a_slave_and_an_unconfigured_bit_clock_have_no_frame_time();
+    test_reset_cancels_the_frame_and_drops_a_held_reply();
+    test_a_failing_bit_clock_stops_the_send_where_the_reference_would_have_raised();
     test_a_completion_with_nothing_sent_is_accepted();
     test_rx_threshold_overrun_and_icr();
     test_icr_drops_the_line_when_it_clears_the_last_enabled_interrupt();

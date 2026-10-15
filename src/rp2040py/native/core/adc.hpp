@@ -46,7 +46,9 @@ using AdcWarnFn = RegWarnFn;
 
 struct AdcHost {
     AdcIrqFn irq = nullptr;
+    void* irq_ctx = nullptr;  // the context of `irq` alone, when it is not `ctx` (a line bound straight to the chip, core/mcu.hpp)
     AdcDreqFn dreq = nullptr;
+    void* dreq_ctx = nullptr;  // the context of `dreq` alone, when it is not `ctx` (a request bound straight to the chip, core/mcu.hpp)
     AdcReadFn read = nullptr;
     AdcChannelValueFn channel_value = nullptr;
     AdcWarnFn warn = nullptr;
@@ -135,10 +137,10 @@ public:
         clock_->cancel(&sample_alarm);
         clock_->cancel(&multi_shot_alarm);
         if (!update_dma()) return false;
-        return host_.irq(host_.ctx, false);
+        return raise_irq(false);
     }
 
-    bool check_interrupts() noexcept { return host_.irq(host_.ctx, int_status() != 0); }
+    bool check_interrupts() noexcept { return raise_irq(int_status() != 0); }
 
     bool start_adc_read() noexcept {
         busy = true;
@@ -189,7 +191,7 @@ public:
         }
 
         // Multi-shot conversions
-        if (cs & CS_START_MANY) {
+        if ((cs & CS_START_MANY) && (cs & CS_EN)) {
             const double sample_ticks = kClockMhz * sample_time;
             const double div = divider();
             if (div > sample_ticks) {
@@ -220,6 +222,7 @@ public:
                 }
                 const uint32_t value = fifo.pull();
                 (void)update_dma();
+                (void)check_interrupts();  // draining below FCS.THRESH takes the interrupt line down (4.9.2.6)
                 return value;
             }
             case DIV: return clock_div;
@@ -281,7 +284,7 @@ private:
     uint32_t threshold() const noexcept { return (fcs >> adc_regs::FCS_THRESH_SHIFT) & adc_regs::FCS_THRES_MASK; }
 
     // The DREQ is asserted while DREQ_EN is set and the level is at or above the threshold, and deasserted otherwise (also when DREQ_EN is switched off).
-    bool update_dma() noexcept { return host_.dreq(host_.ctx, (fcs & adc_regs::FCS_DREQ_EN) != 0 && fifo.count() >= threshold()); }
+    bool update_dma() noexcept { return raise_dreq((fcs & adc_regs::FCS_DREQ_EN) != 0 && fifo.count() >= threshold()); }
 
     static bool on_sample_alarm(void* ctx) noexcept {
         AdcBlock* block = static_cast<AdcBlock*>(ctx);
@@ -292,9 +295,12 @@ private:
 
     static bool on_multi_shot_alarm(void* ctx) noexcept {
         AdcBlock* block = static_cast<AdcBlock*>(ctx);
-        if (block->cs & adc_regs::CS_START_MANY) return block->start_adc_read();
+        if ((block->cs & adc_regs::CS_START_MANY) && (block->cs & adc_regs::CS_EN)) return block->start_adc_read();  // clearing EN halts free-running
         return true;
     }
+
+    bool raise_dreq(bool asserted) noexcept { return host_.dreq(host_.dreq_ctx != nullptr ? host_.dreq_ctx : host_.ctx, asserted); }
+    bool raise_irq(bool level) noexcept { return host_.irq(host_.irq_ctx != nullptr ? host_.irq_ctx : host_.ctx, level); }
 
     AdcHost host_;
     Clock* clock_ = nullptr;

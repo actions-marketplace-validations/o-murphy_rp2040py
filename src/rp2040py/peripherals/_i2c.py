@@ -179,6 +179,7 @@ class RPI2C(BasePeripheral):
         self._busy = False
         self._stop = False
         self._pending_restart = False
+        self._abort_pending = False
         self._first_byte = False
         self._rx_fifo = FIFO(16)
         self._tx_fifo = FIFO(16)
@@ -220,6 +221,7 @@ class RPI2C(BasePeripheral):
         self._busy = False
         self._stop = False
         self._pending_restart = False
+        self._abort_pending = False
         self._first_byte = False
         self._rx_fifo.reset()
         self._tx_fifo.reset()
@@ -309,6 +311,17 @@ class RPI2C(BasePeripheral):
         self._update_rx_full()
         self._set_interrupts(R_TX_ABRT)
 
+    def _request_abort(self) -> None:
+        """IC_ENABLE.ABORT: the current transfer is completed and ended with a STOP; the Tx FIFO is flushed and TX_ABRT raised when that STOP is done (`complete_stop`). A master that is waiting
+        for its next command (a command without STOP, an empty FIFO: the SCL line held low) issues the STOP at once - "you can issue the ABORT (IC_ENABLE.ABORT) to relinquish the I2C bus"
+        (4.3.10.3)."""
+        self._abort_pending = True
+        self._stop = True
+        if not self._busy:
+            self._busy = True
+            self._state = I2CState.STOP
+            self.on_stop()
+
     def _next_command(self) -> None:
         enabled = self.enable & ENABLE
         blocked = self.enable & TX_CMD_BLOCK
@@ -395,8 +408,12 @@ class RPI2C(BasePeripheral):
         self._set_interrupts(R_STOP_DET)
         self._busy = False
         self._pending_restart = False
-        if self.enable & ABORT:
+        if self._abort_pending:
+            # "In response to an ABORT, the controller issues a STOP and flushes the Tx FIFO after completing the current transfer, then sets the TX_ABORT interrupt after the abort operation. The ABORT bit is
+            # cleared automatically after the abort operation." (IC_ENABLE, table 477)
+            self._abort_pending = False
             self.enable &= ~ABORT
+            self._abort(ABRT_USER_ABRT)
         else:
             self._next_command()
 
@@ -607,21 +624,23 @@ class RPI2C(BasePeripheral):
             self.tx_threshold = min(self.tx_threshold, self._tx_fifo.size)
 
         elif offset == IC_ENABLE:
+            was_enabled = bool(self.enable & ENABLE)
+            accepted = bool(value & ABORT) and not self.enable & ABORT
             value &= ENABLE_MASK
             # ABORT bit can only be set by software, not cleared.
             value |= self.enable & ABORT
-            if value & ABORT:
-                if self._state == I2CState.IDLE:
-                    value &= ~ABORT
-                else:
-                    self._abort(ABRT_USER_ABRT)
-                    self._stop = True
+            if accepted and (not was_enabled or self._state == I2CState.IDLE):
+                # "The software can set this bit only when ENABLE is already set; otherwise, the controller ignores any write to ABORT bit." Nothing is in progress when the bus is idle.
+                value &= ~ABORT
+                accepted = False
             if not (value & ENABLE):
                 self._tx_fifo.reset()
                 self._rx_fifo.reset()
                 self._update_rx_full()  # the RX FIFO is flushed and held in reset
                 self._clear_interrupts(R_ACTIVITY)  # "Disabling the DW_apb_i2c" clears the ACTIVITY bit
             self.enable = value
+            if accepted:
+                self._request_abort()  # after `enable` is written: the STOP may complete at once and clear the bit
             self._next_command()  # TX_CMD_BLOCK may have changed
 
         elif offset == IC_FS_SPKLEN:

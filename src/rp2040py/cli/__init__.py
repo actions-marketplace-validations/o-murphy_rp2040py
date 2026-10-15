@@ -942,7 +942,6 @@ def _bench_firmware(
             sys.exit(1)
         return
 
-    cycle_nanos = 1e9 / 125_000_000  # 125 MHz
     start = time.perf_counter()
     step_batch = 1_000_000
     executed = 0
@@ -958,7 +957,9 @@ def _bench_firmware(
                 clock.tick(clock.nanos_to_next_alarm)
             else:
                 cycles = rp2040.core.execute_instruction()
-                clock.tick(cycles * cycle_nanos)
+                clock.tick(
+                    cycles * 1e9 / rp2040.clk_sys
+                )  # one system clock per cycle: clk_sys follows the firmware's clock tree
                 executed += 1
     elapsed = time.perf_counter() - start
 

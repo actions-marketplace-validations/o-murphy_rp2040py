@@ -34,6 +34,7 @@ from typing import Any
 from rp2040py.irq import IRQ
 from rp2040py.peripherals.peripheral import BasePeripheral
 from rp2040py.rp2040 import RP2040
+from utils.clock_tree import set_clk_sys
 
 DMA_BASE = 0x50000000
 PROBE_BASE = 0x50400000  # an unused window (XIP_AUX on the chip), handed to the probe
@@ -197,7 +198,9 @@ class Rig:
         elif kind == "reset":
             chip.dma.reset()
         elif kind == "clk":
-            chip.clk_sys = op[1]
+            set_clk_sys(
+                chip, op[1]
+            )  # through the crystal, PLL_SYS and the CLOCKS registers, as firmware does: every DMA (native: bound to the tree; reference: a listener) hears of it
         else:
             raise ValueError(f"unknown op {op!r}")
         return None

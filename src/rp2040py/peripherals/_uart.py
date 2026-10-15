@@ -2,7 +2,7 @@ import math
 from collections.abc import Callable
 from typing import TYPE_CHECKING, NamedTuple
 
-from rp2040py.peripherals.dma import DREQChannel
+from rp2040py.peripherals._dma import DREQChannel
 from rp2040py.peripherals.peripheral import BasePeripheral
 from rp2040py.utils.fifo import FIFO
 
@@ -25,6 +25,24 @@ def _baud_rate(clk_peri: float, baud_divider: float) -> int:
     """The baud rate for a peripheral clock and a divider; also what the native UART's shell calls, so the rounding and a zero divider's `ZeroDivisionError`
     (the message included) are the same on both sides by construction."""
     return _js_round(clk_peri / (baud_divider * 16))
+
+
+def _bit_ns(clk_peri: float, baud_divider: float) -> float:
+    """Nanoseconds per bit: `baud = clk_peri / (16 x divider)`. 0.0 while the divider (or the clock) is zero - an UART nobody configured transmits instantly, as it always did; also what
+    the native UART's shell calls, so both sides compute the same double."""
+    if baud_divider <= 0 or clk_peri <= 0:
+        return 0.0
+    return 16 * baud_divider * 1e9 / clk_peri
+
+
+def _frame_bits(line_ctrl: int) -> int:
+    """Bits on the wire per character: start + data + parity (PEN) + 1 or 2 stop (STP2). `UARTLCR_H`: PEN bit 1, STP2 bit 3, WLEN bits 6:5."""
+    return (
+        1
+        + _WORD_LENGTH_BY_LCR_WLEN[(line_ctrl >> 5) & 0x3]
+        + (1 if line_ctrl & LCR_PEN else 0)
+        + (2 if line_ctrl & LCR_STP2 else 1)
+    )
 
 
 UARTDR = 0x0
@@ -53,9 +71,14 @@ UARTPCELLID3 = 0xFFC
 # UARTFR bits:
 TXFE = 1 << 7
 RXFF = 1 << 6
+TXFF = 1 << 5
 RXFE = 1 << 4
+BUSY = 1 << 3
 
 # UARTLCR_H bits:
+STP2 = 1 << 3
+LCR_STP2 = STP2
+LCR_PEN = 1 << 1
 FEN = 1 << 4
 
 # UARTCR bits:
@@ -88,6 +111,11 @@ ILPR_MASK = 0xFF
 
 _WORD_LENGTH_BY_LCR_WLEN = {0b00: 5, 0b01: 6, 0b10: 7, 0b11: 8}
 
+# UARTIFLS.TXIFLSEL (2:0): the transmit interrupt trigger, in entries of the 32-deep TX FIFO: b000 <= 1/8, b001 <= 1/4, b010 <= 1/2, b011 <= 3/4, b100 <= 7/8; b101-b111 are reserved
+# (treated as the reset value, 1/2)
+TX_FIFO_DEPTH = 32
+_TX_TRIGGER_BY_SEL = {0: 4, 1: 8, 2: 16, 3: 24, 4: 28}
+
 
 class IUARTDMAChannels(NamedTuple):
     rx: DREQChannel
@@ -103,6 +131,12 @@ class RPUART(BasePeripheral):
         self._ctrl_register = RXE | TXE
         self._line_ctrl_register = 0
         self.rx_fifo = FIFO(32)
+        # The transmitter: the TX FIFO (32 deep with FEN, a one-entry holding register without), and the shift register, which takes one character at a time and holds it for the
+        # character's time on the wire (`_char_ns`). With no baud rate configured that time is 0 and a character leaves at once.
+        self.tx_fifo = FIFO(TX_FIFO_DEPTH)
+        self._tx_shifting = False
+        self._tx_byte = 0
+        self._tx_alarm = rp2040.clock.create_alarm(self._on_tx_done)
         self._interrupt_mask = 0
         self._interrupt_status = 0
         self._int_divisor = 0
@@ -127,6 +161,9 @@ class RPUART(BasePeripheral):
         self._ctrl_register = RXE | TXE
         self._line_ctrl_register = 0
         self.rx_fifo.reset()
+        self.tx_fifo.reset()
+        self._tx_shifting = False
+        self._tx_alarm.cancel()
         self._interrupt_mask = 0
         self._interrupt_status = 0
         self._int_divisor = 0
@@ -173,8 +210,69 @@ class RPUART(BasePeripheral):
             self.on_baud_rate_change(self.baud_rate)
 
     @property
+    def tx_capacity(self) -> int:
+        """ "If the FIFOs are disabled (have a depth of one location)": 1, else 32."""
+        return TX_FIFO_DEPTH if self.fifos_enabled else 1
+
+    @property
+    def tx_full(self) -> bool:
+        return self.tx_fifo.item_count >= self.tx_capacity
+
+    @property
+    def tx_trigger(self) -> int:
+        """The level at or below which the TX interrupt asserts: the UARTIFLS.TXIFLSEL fraction of the FIFO, or empty (0) with the FIFOs disabled."""
+        if not self.fifos_enabled:
+            return 0
+        return _TX_TRIGGER_BY_SEL.get(self._ifls & 0x7, _TX_TRIGGER_BY_SEL[2])
+
+    @property
     def flags(self) -> int:
-        return (RXFF if self.rx_fifo.full else 0) | (RXFE if self.rx_fifo.empty else 0) | TXFE
+        return (
+            (RXFF if self.rx_fifo.full else 0)
+            | (RXFE if self.rx_fifo.empty else 0)
+            | (TXFE if self.tx_fifo.empty else 0)
+            | (TXFF if self.tx_full else 0)
+            # "BUSY ... set as soon as the transmit FIFO becomes non-empty ... until the complete byte, including all the stop bits, has been sent from the shift register"
+            | (BUSY if self._tx_shifting or not self.tx_fifo.empty else 0)
+        )
+
+    def _char_ns(self) -> float:
+        return _bit_ns(self.rp2040.clk_peri, self.baud_divider) * _frame_bits(self._line_ctrl_register)
+
+    def _tx_emit(self, byte: int) -> None:
+        if self._ctrl_register & LBE:
+            # "LBE: Loop back enable ... the UARTTXD path is fed back to the UARTRXD path": the byte reaches the receiver, not the device
+            self.feed_byte(byte)
+        elif self.on_byte:
+            self.on_byte(byte)
+
+    def _tx_pump(self) -> bool:
+        """Moves characters from the TX FIFO into the shift register while it is idle (and the UART and the transmitter are enabled). Each move is the FIFO falling by one: when that takes it
+        from above the trigger level to at or below it, UARTTXINTR is raised (4.2.6.3: "based on a transition through a level"; cleared by UARTICR or by writes taking the FIFO back above
+        the level - and not raised again by the characters that follow while it stays at or below). A character with no time on the wire is delivered at once. Returns whether anything moved."""
+        moved = False
+        while not self._tx_shifting and not self.tx_fifo.empty and self.enabled and self.tx_enabled:
+            before = self.tx_fifo.item_count
+            byte = self.tx_fifo.pull()
+            moved = True
+            ns = self._char_ns()
+            if ns <= 0:
+                self._tx_emit(byte)
+            else:
+                self._tx_shifting = True
+                self._tx_byte = byte
+                self._tx_alarm.schedule(ns)
+            if before > self.tx_trigger >= self.tx_fifo.item_count:
+                self._interrupt_status |= UARTTXINTR
+        return moved
+
+    def _on_tx_done(self) -> None:
+        """The character's stop bit has gone out: it reaches the line (or the loopback), and the next one starts."""
+        self._tx_shifting = False
+        self._tx_emit(self._tx_byte)
+        self._tx_pump()
+        self.check_interrupts()
+        self._update_dreq()
 
     def check_interrupts(self) -> None:
         self.rp2040.set_interrupt(self.irq, bool(self._interrupt_status & self._interrupt_mask))
@@ -183,7 +281,8 @@ class RPUART(BasePeripheral):
         """The two DMA requests. TX: the transmit FIFO never fills, so it is asking whenever the transmitter is enabled and TXDMAE is set. RX: whenever the receiver is enabled, RXDMAE is set
         and the FIFO holds a byte - unless DMAONERR is set and an error interrupt is up ("the DMA receive request outputs ... are disabled when the UART error interrupt is asserted")."""
         ready = self.enabled
-        tx = ready and self.tx_enabled and bool(self._dmacr & DMACR_TXDMAE)
+        # TX: UARTTXDMASREQ, "asserted when there is at least one empty location in the transmit FIFO"
+        tx = ready and self.tx_enabled and bool(self._dmacr & DMACR_TXDMAE) and not self.tx_full
         rx = (
             ready
             and self.rx_enabled
@@ -263,18 +362,16 @@ class RPUART(BasePeripheral):
 
     def write_uint32(self, offset: int, value: int) -> None:
         if offset == UARTDR:
-            # "TXE: Transmit enable": a disabled transmitter (or UART) sends nothing - the byte goes nowhere, as the FIFO behind it is never read
+            # "TXE: Transmit enable": a disabled transmitter (or UART) sends nothing - the byte goes nowhere
             if self.enabled and self.tx_enabled:
-                if self._ctrl_register & LBE:
-                    # "LBE: Loop back enable ... the UARTTXD path is fed back to the UARTRXD path": the byte reaches the receiver, not the device
-                    self.feed_byte(value & 0xFF)
-                elif self.on_byte:
-                    self.on_byte(value & 0xFF)
-                # The byte leaves the (never-filling) TX FIFO at once; the PL011 TX interrupt is
-                # edge-like - set by that, never while the FIFO merely stays empty - so UARTICR clears
-                # it for good instead of it being re-asserted (an IRQ storm in the guest otherwise).
-                self._interrupt_status |= UARTTXINTR
+                # A write to a full FIFO is lost, as on the chip (firmware polls UARTFR.TXFF first)
+                if not self.tx_full:
+                    self.tx_fifo.push(value & 0xFF)
+                    if self.tx_fifo.item_count > self.tx_trigger:
+                        self._interrupt_status &= ~UARTTXINTR  # "cleared by writing data to the transmit FIFO until it becomes greater than the trigger level"
+                self._tx_pump()
                 self.check_interrupts()
+                self._update_dreq()
 
         elif offset == UARTRSR:
             self._rsr = 0  # the write is UARTECR: "cleared to 0 by a write to UARTECR"
@@ -294,9 +391,12 @@ class RPUART(BasePeripheral):
 
         elif offset == UARTLCR_H:
             self._line_ctrl_register = value & LCR_H_MASK
+            self._update_dreq()  # FEN changes the TX FIFO's depth, and so whether it is full
 
         elif offset == UARTCR:
             self._ctrl_register = value & CR_MASK
+            if self._tx_pump():  # re-enabled with characters waiting
+                self.check_interrupts()
             self._update_dreq()
 
         elif offset == UARTIFLS:

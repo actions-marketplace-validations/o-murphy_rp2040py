@@ -4,6 +4,9 @@
 from libc.stdint cimport int64_t, uint32_t
 from libcpp cimport bool as cppbool
 
+from rp2040py.native._mcu_irq cimport McuIrqLine, McuDreqPair
+
+from rp2040py.native._clock cimport Alarm, Clock
 from rp2040py.native._window_map cimport WindowHandler
 
 cdef extern from "fifo.hpp" namespace "rp2040core":
@@ -25,14 +28,18 @@ cdef extern from "spi.hpp" namespace "rp2040core":
 
     ctypedef cppbool (*SpiIrqFn)(void* ctx, cppbool level)
     ctypedef cppbool (*SpiDreqFn)(void* ctx, cppbool tx, cppbool asserted)
+    ctypedef cppbool (*SpiBitFn)(void* ctx, double* nanos)
     ctypedef cppbool (*SpiTransmitFn)(void* ctx, uint32_t value)
     ctypedef void (*SpiWarnFn)(void* ctx, uint32_t kind, uint32_t offset, int64_t value)
 
     cdef cppclass SpiHost:
         SpiHost() noexcept
         SpiIrqFn irq
+        void* irq_ctx
+        void* dreq_ctx
         SpiDreqFn dreq
         SpiTransmitFn transmit
+        SpiBitFn bit_ns
         SpiWarnFn warn
         void* ctx
         const int* failed
@@ -45,10 +52,15 @@ cdef extern from "spi.hpp" namespace "rp2040core":
         uint32_t int_raw
         uint32_t int_enable
         cppbool busy
+        Alarm frame_alarm
+        cppbool frame_active
+        cppbool has_reply
+        uint32_t reply
         Fifo8 rx
         Fifo8 tx
         SpiBlock() noexcept
-        void init(const SpiHost& host) noexcept
+        void init(Clock* clock, const SpiHost& host) noexcept
+        void detach() noexcept
         int64_t raw_write_value() noexcept
         uint32_t int_status() noexcept
         cppbool enabled() noexcept
@@ -63,9 +75,14 @@ cdef extern from "spi.hpp" namespace "rp2040core":
         WindowHandler window_handler() noexcept
 
 cdef class RPSPI:
-    cdef SpiBlock _block
+    cdef public bint _from_mcu  # this is the view of the `Mcu`'s block
+    cdef McuDreqPair _dreq_pair  # the DMA request straight to the chip, when it has one (core/mcu.hpp)
+    cdef McuIrqLine _irq_line  # the line straight to the chip, when it has one (core/mcu.hpp)
+    cdef SpiBlock* _block  # the chip's (`Mcu` builds and wires it), or `_own` for a block made directly (a stand-in chip, a test)
+    cdef SpiBlock _own
     cdef public object rp2040
     cdef public object name
     cdef public object irq
     cdef public object dreq
+    cdef public object clock
     cdef object _on_transmit

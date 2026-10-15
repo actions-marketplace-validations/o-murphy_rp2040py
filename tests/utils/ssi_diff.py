@@ -13,14 +13,17 @@ docs/records/0096-cpp-mcu-core.md, the flash-path design note. The method is the
 * raw DR0 traffic with chip-select asserted, deasserted, and SSIENR clear; CS toggles with an empty command; CS released to the pad's own level;
 * ``reset()``, and pokes of the flash around the addresses used (erased, programmed, patterned) so that an erase, an AND-program and a read each have something to find.
 
-After **each** step: the register file, the RX FIFO's level *and contents*, the command state (write-enable latch, chip-select flag, the command's length and its first
-260 bytes), the flash bytes of the windows the stimulus works in, and the ordered log of warnings; an exception on one side and not the other is a difference like any
-other.
+* the **FIFO, interrupt and DMA behaviour** (datasheet 4.10.5-4.10.9, docs/records/0098 "XIP_CTRL and the XIP subsystem"): bursts of DR writes that overflow the 16-entry RX FIFO, reads
+  of an empty FIFO, the thresholds (TXFTLR, RXFTLR, DMATDLR, DMARDLR) and the interrupt mask (IMR) kept small so that they matter, the clear-on-read registers, ``CTRLR0.TMOD``,
+  DMACR; the combined interrupt (``XIP_IRQ``) and the two DMA requests are recorded as they are announced, so *when* the chip is told is compared as well.
+
+After **each** step: the register file (bar the clear-on-read ones, which are operations of their own), the RX FIFO's level *and contents*, the held interrupts and the raw and masked
+status, what the chip was last told, the command state (write-enable latch, chip-select flag, the command's length and its first 260 bytes), the flash bytes of the windows the
+stimulus works in, and the ordered log of warnings, interrupt-line and DMA-request calls; an exception on one side and not the other is a difference like any other.
 
 The one trap of the rig: both chips' SSIs listen to their own QSPI_SS, and the pure rig *replaces* ``chip.ssi`` after construction - the replaced SSI's listener is taken
 off the pin (it would apply every command to the same flash a second time).
 
-Outside the domain, on purpose: more than ``RX_BOUND`` unread RX bytes (the reference's queue is unbounded; the C++ ring is bounded and drops the oldest above 4096).
 """
 
 import random
@@ -32,7 +35,6 @@ from rp2040py.rp2040 import RP2040
 
 SSI_BASE = 0x18000000
 FLASH_WINDOWS = ((0x0, 0x40000), (0xFFE000, 0x1000000))  # the first 256 KiB and the last 8 KiB of the 16 MiB flash
-RX_BOUND = 4096
 
 # GPIOPin.ctrl: output_override (bits 9:8) 2 = low, 3 = high; output-enable override (bits 13:12) 3 = forced on - what pico-sdk's flash_cs_force() leaves in place.
 _OE_FORCE_ENABLED = 3 << 12
@@ -49,7 +51,8 @@ WRITABLE = (
     S.SSI_CTRLR0, S.SSI_CTRLR1, S.SSI_BAUDR, S.SSI_TXFLR, S.SSI_RXFLR, S.SSI_RX_SAMPLE_DLY, S.SSI_SPI_CTRL_R0, S.SSI_TXD_DRIVE_EDGE, S.SSI_SSIENR, S.SSI_MWCR, S.SSI_SER,
     S.SSI_TXFTLR, S.SSI_RXFTLR, S.SSI_IMR, S.SSI_DMACR, S.SSI_DMATDLR, S.SSI_DMARDLR, S.SSI_ISR, S.SSI_ICR,
 )  # fmt: skip
-UNIMPLEMENTED = (0x64, 0x68, 0xA0, 0xEC, 0x100, 0x200)
+UNIMPLEMENTED = (0xFC, 0x100, 0x200)
+DR_ALIASES = (0x64, 0x68, 0xA0, 0xEC)  # DR1..DR35 are the data register too
 OPCODES = (
     S.CMD_WRITE_ENABLE, S.CMD_WRITE_DISABLE, S.CMD_READ_STATUS_1, S.CMD_READ_STATUS_2, S.CMD_WRITE_STATUS, S.CMD_PAGE_PROGRAM, S.CMD_SECTOR_ERASE, S.CMD_BLOCK_ERASE,
     S.CMD_READ_DATA, S.CMD_READ_JEDEC_ID,
@@ -65,12 +68,28 @@ class Rig:
         if kind == "pure":
             self._replace_the_ssi(S.RPSSI)
         self.log: list[tuple] = []
+        self._tap()
+
+    def _tap(self) -> None:
+        chip, log = self.chip, self.log
+
+        class _Dma:
+            def set_dreq(self, channel: int) -> None:
+                log.append(("dreq", int(channel), 1))
+
+            def clear_dreq(self, channel: int) -> None:
+                log.append(("dreq", int(channel), 0))
+
+        chip.dma = _Dma()  # type: ignore[assignment]  # the SSI looks `rp2040.dma` up whenever a level moves
+        original = chip.set_interrupt
+
+        def set_interrupt(irq: int, value: bool) -> None:
+            log.append(("irq", int(irq), int(bool(value))))
+            original(irq, value)
+
+        chip.set_interrupt = set_interrupt  # type: ignore[method-assign]
         for method in ("warning", "error", "info", "debug"):
-            setattr(
-                self.chip.logger,
-                method,
-                lambda name, message, _m=method: self.log.append((_m, str(name), str(message))),
-            )
+            setattr(chip.logger, method, lambda name, message, _m=method: log.append((_m, str(name), str(message))))
 
     def _replace_the_ssi(self, factory: Callable[[Any, str], Any]) -> None:
         old = self.chip.ssi
@@ -99,9 +118,9 @@ class Rig:
         elif kind == "read":
             return int(chip.read_uint32(SSI_BASE + op[1]))
         elif kind == "dr0_write":
-            chip.write_uint32(SSI_BASE + S.SSI_DR0, op[1])
+            chip.write_uint32(SSI_BASE + (op[2] if len(op) > 2 else S.SSI_DR0), op[1])
         elif kind == "dr0_read":
-            return int(chip.read_uint32(SSI_BASE + S.SSI_DR0))
+            return int(chip.read_uint32(SSI_BASE + (op[1] if len(op) > 1 else S.SSI_DR0)))
         elif kind == "cs":
             self._cs(op[1])
         elif kind == "command":  # one whole transaction, the way the bootrom does it
@@ -128,8 +147,20 @@ class Rig:
     def snapshot(self) -> dict[str, Any]:
         chip, ssi = self.chip, self.chip.ssi
         out: dict[str, Any] = {
-            "regs": tuple(int(chip.read_uint32(SSI_BASE + offset)) for offset in REGISTERS if offset != S.SSI_DR0)
+            "regs": tuple(
+                int(chip.read_uint32(SSI_BASE + offset))
+                for offset in REGISTERS
+                if offset != S.SSI_DR0 and offset not in S.CLEAR_ON_READ
+            )
         }
+        out["ints"] = (
+            int(ssi._risr),
+            int(ssi._isr),
+            int(ssi._sticky),
+            bool(ssi._irq_level),
+            bool(ssi._dreq_tx),
+            bool(ssi._dreq_rx),
+        )
         out["rx"] = tuple(int(b) for b in ssi._rx_queue)
         tx = ssi._tx_buffer
         out["command"] = (bool(ssi._write_enabled), bool(ssi._cs_asserted), len(tx), bytes(tx[:260]))
@@ -225,7 +256,18 @@ def mutant_rig(name: str) -> Rig:
                 return
             super()._on_cs_pin_changed(value, _last_value)
 
+        def read_uint32(self, offset: int) -> int:
+            mutated = self._mutated_read(offset)
+            if mutated is not None:
+                return mutated
+            if name == "dr_aliases_unimplemented" and S.is_data_register(offset) and offset != S.SSI_DR0:
+                return super(S.RPSSI, self).read_uint32(offset)
+            return super().read_uint32(offset)
+
         def write_uint32(self, offset: int, value: int) -> None:
+            if name == "dr_aliases_unimplemented" and S.is_data_register(offset) and offset != S.SSI_DR0:
+                super(S.RPSSI, self).write_uint32(offset, value)
+                return
             if name == "deasserted_pushes_nothing" and offset == S.SSI_DR0 and self._ssienr and not self._cs_asserted:
                 return
             if name == "ctrlr0_unmasked" and offset == S.SSI_CTRLR0:
@@ -254,10 +296,131 @@ def mutant_rig(name: str) -> Rig:
             if name == "ssienr_ignored" and offset == S.SSI_DR0 and not self._ssienr:
                 self._rx_queue.append(self._shift_byte(value & 0xFF))
                 return
+            if name == "disable_keeps_the_levels" and offset == S.SSI_SSIENR:
+                self._ssienr = value & 1
+                if not self._ssienr:
+                    self._rx_queue.clear()
+                return
+            if name == "stored_write_not_announced" and offset in S.STORED_REGISTERS:
+                self._stored[offset] = value & S.STORED_REGISTERS[offset]
+                return
             super().write_uint32(offset, value)
+
+        @property
+        def _risr(self) -> int:
+            value = super()._risr
+            if name == "rxf_threshold_off_by_one":
+                value &= ~S.INT_RXF
+                value |= S.INT_RXF if len(self._rx_queue) >= self._stored[S.SSI_RXFTLR] else 0
+            if name == "txe_never":
+                value &= ~S.INT_TXE
+            if name == "txe_strict":
+                value &= ~S.INT_TXE
+                value |= S.INT_TXE if self._txflr < self._stored[S.SSI_TXFTLR] else 0
+            if name == "rxu_not_raw":
+                value &= ~S.INT_RXU
+            return value
+
+        @property
+        def _isr(self) -> int:
+            if name == "isr_unmasked":
+                return self._risr
+            return super()._isr
+
+        def _receive(self, frame: int) -> None:
+            if name == "rx_overflow_dropped_silently" and len(self._rx_queue) >= S.FIFO_DEPTH:
+                return
+            if name == "rx_overflow_replaces_oldest" and len(self._rx_queue) >= S.FIFO_DEPTH:
+                self._sticky |= S.INT_RXO
+                self._rx_queue.popleft()
+                self._rx_queue.append(frame)
+                return
+            if name == "fifo_is_17_deep" and len(self._rx_queue) == S.FIFO_DEPTH:
+                self._rx_queue.append(frame)
+                return
+            if name == "tx_only_stores":
+                if len(self._rx_queue) >= S.FIFO_DEPTH:
+                    self._sticky |= S.INT_RXO
+                else:
+                    self._rx_queue.append(frame)
+                return
+            if name == "rx_only_drops" and (self._crtlr0 >> 8) & 3 == 2:
+                return
+            if name == "tmod_bit_9_only" and (self._crtlr0 >> 8) & 2:
+                return
+            super()._receive(frame)
+
+        def _update(self) -> None:
+            if name == "irq_every_time":
+                self._irq_level = self._isr == 0  # force an announcement every time
+            if name == "dreq_channels_swapped":
+                saved = (S.DREQ_XIP_SSITX, S.DREQ_XIP_SSIRX)
+                S.DREQ_XIP_SSITX, S.DREQ_XIP_SSIRX = saved[1], saved[0]
+                try:
+                    super()._update()
+                finally:
+                    S.DREQ_XIP_SSITX, S.DREQ_XIP_SSIRX = saved
+                return
+            if name == "dreq_rx_at_dmardlr" and self.rp2040.dma is not None:
+                from rp2040py.irq import IRQ
+
+                level = self._isr != 0
+                if level != self._irq_level:
+                    self._irq_level = level
+                    self.rp2040.set_interrupt(IRQ.XIP, level)
+                request = (
+                    bool(self._stored[S.SSI_DMACR] & S.SSI_DMACR_RDMAE)
+                    and len(self._rx_queue) >= self._stored[S.SSI_DMARDLR]
+                )
+                if request != self._dreq_rx:
+                    self._dreq_rx = request
+                    (self.rp2040.dma.set_dreq if request else self.rp2040.dma.clear_dreq)(S.DREQ_XIP_SSIRX)
+                return
+            if name == "dreq_tx_ignores_dmacr":
+                saved_dmacr = self._stored[S.SSI_DMACR]
+                self._stored[S.SSI_DMACR] = saved_dmacr | S.SSI_DMACR_TDMAE
+                try:
+                    super()._update()
+                finally:
+                    self._stored[S.SSI_DMACR] = saved_dmacr
+                return
+            super()._update()
+
+        def _mutated_read(self, offset: int) -> "int | None":
+            if name == "empty_read_not_held" and offset == S.SSI_DR0 and not self._rx_queue:
+                return 0
+            if name == "txoicr_clears_rxo" and offset == S.SSI_TXOICR:
+                self._sticky &= ~S.INT_RXO
+                self._update()
+                return 0
+            if name == "icr_clears_nothing" and offset == S.SSI_ICR:
+                return 0
+            if name == "icr_clears_only_rxo" and offset == S.SSI_ICR:
+                self._sticky &= ~S.INT_RXO
+                self._update()
+                return 0
+            if name == "clear_register_returns_status" and offset == S.SSI_RXOICR:
+                value = self._sticky & S.INT_RXO
+                self._sticky &= ~S.INT_RXO
+                self._update()
+                return value
+            if name == "rff_missing" and offset == S.SSI_SR:
+                return super().read_uint32(offset) & ~S.SSI_SR_RFF_BITS
+            if name == "rff_at_15" and offset == S.SSI_SR:
+                value = super().read_uint32(offset) & ~S.SSI_SR_RFF_BITS
+                return value | (S.SSI_SR_RFF_BITS if len(self._rx_queue) >= S.FIFO_DEPTH - 1 else 0)
+            if name == "pop_not_announced" and offset == S.SSI_DR0 and self._rx_queue:
+                self._update = lambda: None  # type: ignore[method-assign]
+                try:
+                    return super().read_uint32(offset)
+                finally:
+                    del self._update
+            return None
 
         def reset(self) -> None:
             super().reset()
+            if name == "reset_keeps_sticky":
+                self._sticky = S.INT_RXO
             if name == "reset_cs_false":
                 self._cs_asserted = False
             if name == "reset_keeps_wel":
@@ -276,7 +439,11 @@ MUTANTS = (
     "status2_zero", "jedec_wrong", "read_data_offset", "unknown_reads_zero", "erase_ignores_wel", "erase_not_aligned", "program_overwrites", "program_keeps_wel",
     "program_page_257", "rx_kept_on_assert", "deasserted_pushes_nothing", "ssienr_ignored", "reset_cs_false", "reset_keeps_wel",
     "ctrlr0_unmasked", "ctrlr1_unmasked", "baudr_unmasked", "spi_ctrlr0_unmasked", "ssienr_unmasked", "txflr_writable", "imr_unmasked", "stored_not_stored", "spi_ctrlr0_reset_zero",
-    "reset_keeps_stored",
+    "reset_keeps_stored", "dr_aliases_unimplemented",
+    "rxf_threshold_off_by_one", "txe_never", "txe_strict", "rxu_not_raw", "isr_unmasked", "rx_overflow_dropped_silently", "rx_overflow_replaces_oldest", "fifo_is_17_deep",
+    "tx_only_stores", "rx_only_drops", "tmod_bit_9_only", "irq_every_time", "dreq_channels_swapped", "dreq_rx_at_dmardlr", "dreq_tx_ignores_dmacr", "empty_read_not_held",
+    "txoicr_clears_rxo", "icr_clears_nothing", "icr_clears_only_rxo", "clear_register_returns_status", "rff_missing", "rff_at_15", "pop_not_announced", "reset_keeps_sticky",
+    "disable_keeps_the_levels", "stored_write_not_announced",
 )  # fmt: skip
 
 
@@ -363,7 +530,33 @@ def generate(seed: int, steps: int) -> list[tuple]:
         elif roll < 0.58:
             ops.append(("write", S.SSI_SSIENR, r.choice((0, 1, 1, 1, 2))))
         elif roll < 0.68:
-            ops.append(("write", r.choice(WRITABLE), r.getrandbits(32)))
+            register = r.choice(WRITABLE)
+            if register in (S.SSI_TXFTLR, S.SSI_RXFTLR, S.SSI_DMATDLR, S.SSI_DMARDLR) and r.random() < 0.8:
+                value = r.randrange(0, 18)  # a threshold that matters: the FIFOs are 16 deep
+            elif register in (S.SSI_IMR, S.SSI_DMACR) and r.random() < 0.8:
+                value = r.getrandbits(6) if register == S.SSI_IMR else r.getrandbits(2)
+            elif register == S.SSI_CTRLR0 and r.random() < 0.7:
+                value = (r.randrange(4) << 8) | r.getrandbits(4)  # the transfer mode, and little else
+            else:
+                value = r.getrandbits(32)
+            ops.append(("write", register, value))
+        elif roll < 0.70:
+            if (
+                r.random() < 0.6
+            ):  # ... with a READ_DATA in flight, so the frames that are kept or lost are different bytes
+                address = _address(r)
+                ops.extend([("write", S.SSI_SSIENR, 1), ("cs", CS_LOW)])
+                ops.extend(
+                    ("dr0_write", byte)
+                    for byte in (S.CMD_READ_DATA, (address >> 16) & 0xFF, (address >> 8) & 0xFF, address & 0xFF)
+                )
+                ops.append(("read", S.SSI_RXOICR))
+            for _ in range(
+                r.randrange(8, 26)
+            ):  # a burst that overflows the 16-entry receive FIFO, then some reads and a clear
+                ops.append(("dr0_write", r.getrandbits(8)))
+            ops.extend(("dr0_read",) for _ in range(r.randrange(0, 20)))
+            ops.append(("read", r.choice(tuple(S.CLEAR_ON_READ))))
         elif roll < 0.74:
             ops.append(("read", r.choice(REGISTERS + UNIMPLEMENTED)))
         elif roll < 0.78:
@@ -372,13 +565,13 @@ def generate(seed: int, steps: int) -> list[tuple]:
             for _ in range(
                 r.randrange(1, 6)
             ):  # raw DR0 traffic: with whatever chip-select state and SSIENR the stream left
-                ops.append(("dr0_write", r.getrandbits(8)))
+                ops.append(("dr0_write", r.getrandbits(8), r.choice((S.SSI_DR0, S.SSI_DR0, *DR_ALIASES))))
                 if r.random() < 0.5:
-                    ops.append(("dr0_read",))
+                    ops.append(("dr0_read", r.choice((S.SSI_DR0, S.SSI_DR0, *DR_ALIASES))))
         elif roll < 0.93:
             ops.append(("cs", r.choice((CS_LOW, CS_HIGH, CS_HIGH, CS_RELEASED))))
         elif roll < 0.96:
-            ops.append(("dr0_read",))
+            ops.append(("dr0_read", r.choice((S.SSI_DR0, *DR_ALIASES))))
         elif roll < 0.985:
             ops.append(("reset",))
         else:
@@ -438,8 +631,6 @@ def run_pair(
     a, b = reference(), candidate()
     log_a = log_b = 0
     for step, op in enumerate(ops):
-        if op[0] == "dr0_write" and len(a.chip.ssi._rx_queue) >= RX_BOUND:
-            continue  # out of the domain (see the module docstring)
         result_a, error_a = _step(a, op)
         result_b, error_b = _step(b, op)
         if perturb is not None:
@@ -512,7 +703,9 @@ def coverage(ops: list[tuple]) -> dict[str, int]:
         original_cs(self, value, last)
 
     def write(self: Any, offset: int, value: int) -> None:
-        if offset == S.SSI_DR0:
+        if S.is_data_register(offset):
+            if offset != S.SSI_DR0:
+                count("dr.alias")
             count(
                 "dr0.cs_asserted"
                 if self._ssienr and self._cs_asserted
@@ -524,16 +717,28 @@ def coverage(ops: list[tuple]) -> dict[str, int]:
     try:
         rig = Rig("pure")
         for op in ops:
-            if op[0] == "dr0_write" and len(rig.chip.ssi._rx_queue) >= RX_BOUND:
-                continue
             if op[0] == "reset":
                 count("reset.mid_command" if rig.chip.ssi._tx_buffer else "reset")
             _, error = _step(rig, op)
             if error:
                 count("exception")
-            for _event in rig.log:
-                count("warning")
+            for event in rig.log:
+                count(event[0] if event[0] in ("irq", "dreq") else "warning")
             rig.log.clear()
+            ssi = rig.chip.ssi
+            for held, label in ((S.INT_RXO, "rxo"), (S.INT_RXU, "rxu")):
+                if ssi._sticky & held:
+                    count(f"held.{label}")
+            if len(ssi._rx_queue) >= S.FIFO_DEPTH:
+                count("rx.full")
+            if (ssi._crtlr0 >> S.SSI_CTRLR0_TMOD_SHIFT) & 3 == S.TMOD_TX_ONLY:
+                count("tmod.tx_only")
+            if ssi._isr:
+                count("isr.pending")
+            if ssi._dreq_rx:
+                count("dreq.rx_high")
+            if ssi._dreq_tx:
+                count("dreq.tx_high")
     finally:
         cls._shift_byte, cls._apply_command, cls._on_cs_pin_changed, cls.write_uint32 = (
             original_shift,

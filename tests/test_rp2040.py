@@ -17,6 +17,12 @@ NVIC_ISPR = 0xE000E200
 NVIC_ICPR = 0xE000E280
 
 
+def poke(rp2040: RP2040, address: int, value: int, size: int) -> None:
+    """Put code or a vector into the flash image: the XIP window itself is read-only to the bus (2.6.3), so a test writes the image."""
+    offset = address & 0x00FFFFFF
+    rp2040.flash[offset : offset + size] = value.to_bytes(size, "little")
+
+
 def test_initializes_pc_and_sp_according_to_bootroms_vector_table(rp2040_factory):
     rp2040 = rp2040_factory()
     rp2040.load_bootrom([0x20041F00, 0xEE])
@@ -68,9 +74,9 @@ class TestExceptionEntryAndReturn:
         rp2040.core.enabled_interrupts = int1
         rp2040.core.interrupts_updated = True
         rp2040.write_uint32(VTOR, 0x10000000)
-        rp2040.write_uint32(0x10000000 + exc_int1 * 4, int1_handler)
-        rp2040.write_uint16(int1_handler, opcode_movs(r0, 0x55))
-        rp2040.write_uint16(int1_handler + 2, opcode_bx(lr))
+        poke(rp2040, 0x10000000 + exc_int1 * 4, int1_handler, 4)
+        poke(rp2040, int1_handler, opcode_movs(r0, 0x55), 2)
+        poke(rp2040, int1_handler + 2, opcode_bx(lr), 2)
         # Exception handler should start at this point.
         rp2040.step()  # MOVS r0, 0x55
         assert rp2040.core.ipsr == exc_int1
@@ -94,10 +100,10 @@ class TestExceptionEntryAndReturn:
         rp2040.core.enabled_interrupts = int1
         rp2040.core.interrupts_updated = True
         rp2040.write_uint32(VTOR, 0x10000000)
-        rp2040.write_uint32(0x10000000 + exc_int1 * 4, int1_handler)
-        rp2040.write_uint16(int1_handler, opcode_push(True, 0b01110000))
-        rp2040.write_uint16(int1_handler + 2, opcode_movs(r4, 42))
-        rp2040.write_uint16(int1_handler + 4, opcode_pop(True, 0b01110000))
+        poke(rp2040, 0x10000000 + exc_int1 * 4, int1_handler, 4)
+        poke(rp2040, int1_handler, opcode_push(True, 0b01110000), 2)
+        poke(rp2040, int1_handler + 2, opcode_movs(r4, 42), 2)
+        poke(rp2040, int1_handler + 4, opcode_pop(True, 0b01110000), 2)
         # Exception handler should start at this point.
         rp2040.step()  # push {r4, r5, r6, lr}
         assert rp2040.core.ipsr == exc_int1
@@ -121,8 +127,8 @@ class TestExceptionEntryAndReturn:
         rp2040.core.enabled_interrupts = int31
         rp2040.core.interrupts_updated = True
         rp2040.write_uint32(VTOR, 0x10000000)
-        rp2040.write_uint32(0x10000000 + exc_int31 * 4, int31_handler)
-        rp2040.write_uint16(int31_handler, opcode_nop())
+        poke(rp2040, 0x10000000 + exc_int31 * 4, int31_handler, 4)
+        poke(rp2040, int31_handler, opcode_nop(), 2)
         assert rp2040.core.pending_interrupts == int31
         # Exception handler should start at this point.
         rp2040.step()  # nop

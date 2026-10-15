@@ -35,10 +35,26 @@ cdef class RPReset:
         cdef ResetsHost host
         self.rp2040 = rp2040
         self.name = name
-        host.warn = _warn_trampoline
-        host.ctx = <void*> self
-        host.failed = pending_flag()
-        self._block.init(host)
+        address = getattr(rp2040, "_native_resets_address", None)
+        self._from_mcu = address is not None
+        if address is not None:
+            # the chip's C++ `Mcu` has built the block already - with its window on the bus - and this object is the Python view of it
+            self._block = <ResetsBlock*> <size_t> address()
+        else:
+            host.warn = _warn_trampoline
+            host.ctx = <void*> self
+            host.failed = pending_flag()
+            self._block = &self._own
+            self._own.init(host)
+
+    def _warn_kind(self, kind, offset, value):
+        """A register access the block does not implement, as the logger's message (the chip's host calls this for the block it built)."""
+        if kind == kResetsWarnRead:
+            self.warn(f"Unimplemented peripheral read from 0x{offset:x}")
+        elif kind == kResetsWarnReadAtomicArea:
+            self.warn("Unimplemented read from peripheral in the atomic operation region")
+        else:
+            self.warn(f"Unimplemented peripheral write to 0x{offset:x}: 0x{value:x}")
 
     @property
     def raw_write_value(self):

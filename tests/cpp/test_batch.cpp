@@ -72,6 +72,30 @@ int main() {
     CHECK(run_batch(cpu, clock, host, params) == 0 && cpu.cycles == at_stop);
     stopped = 0;
 
+    // `clk_changed` raised: the clock tree moved clk_sys, the period in `params` is stale, so the batch ends before another instruction (the caller starts the next one at the new period);
+    // lowered (or absent), it changes nothing.
+    uint8_t clk_changed = 1;
+    host.clk_changed = &clk_changed;
+    CHECK(run_batch(cpu, clock, host, params) == 0 && cpu.cycles == at_stop);
+    clk_changed = 0;
+    CHECK(run_batch(cpu, clock, host, params) == 0 && cpu.cycles > at_stop);
+    host.clk_changed = nullptr;
+
+    // The time an instruction costs is the period the caller passes: at 250 MHz (4 ns) the same instructions take half the simulated time they take at 125 MHz (8 ns).
+    {
+        Cpu fast, slow;
+        fast.init(&bus, {}, 25);
+        slow.init(&bus, {}, 25);
+        fast.registers[15] = slow.registers[15] = 0x20000000;
+        Clock fast_clock, slow_clock;
+        BatchParams fast_params = params, slow_params = params;
+        fast_params.cycle_nanos = 1e9 / 250e6;
+        slow_params.cycle_nanos = 1e9 / 125e6;
+        fast_params.instruction_ceiling = slow_params.instruction_ceiling = 100;
+        CHECK(run_batch(fast, fast_clock, host, fast_params) == 0 && run_batch(slow, slow_clock, host, slow_params) == 0);
+        CHECK(fast.cycles == slow.cycles && fast_clock.nanos() * 2 == slow_clock.nanos() && fast_clock.nanos() > 0);
+    }
+
     // Batched ticking reaches the same simulated time, and an alarm due mid-batch fires at the same point.
     Cpu cpu2;
     cpu2.init(&bus, {}, 25);

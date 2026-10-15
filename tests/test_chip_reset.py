@@ -48,7 +48,7 @@ def test_a_driven_pad_stops_driving(rp2040_factory):
 
     assert rp2040.gpio[15].ctrl & 0x1F == 0x1F
     assert rp2040.sio.gpio_output_enable == 0
-    assert rp2040.gpio[15].pad_value == 0b0110110
+    assert rp2040.gpio[15].pad_value == 0x56
 
 
 def test_qspi_pads_go_back_to_their_own_reset_values_not_bank0s(rp2040_factory):

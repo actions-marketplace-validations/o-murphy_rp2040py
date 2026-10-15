@@ -15,9 +15,12 @@ cdef extern from "ppb.hpp" namespace "rp2040core":
 
     ctypedef void (*PpbWarnFn)(void* ctx, uint32_t kind, uint32_t offset, int64_t value)
 
+    ctypedef void (*PpbSystemResetFn)(void* ctx)
+
     cdef cppclass PpbHost:
         PpbHost() noexcept
         PpbWarnFn warn
+        PpbSystemResetFn system_reset_request
         void* ctx
 
     cdef cppclass PpbBlock:
@@ -28,6 +31,11 @@ cdef extern from "ppb.hpp" namespace "rp2040core":
         cppbool int_enable
         cppbool systick_enable
         uint32_t reload
+        uint32_t scr
+        uint32_t mpu_ctrl
+        uint32_t mpu_rnr
+        uint32_t mpu_rbar[8]
+        uint32_t mpu_rasr[8]
         PpbBlock() noexcept
         void init(Cpu* cpu, Clock* clock, const PpbHost& host, double clk_sys, uint32_t max_hardware_irq) noexcept
         void detach() noexcept
@@ -43,10 +51,13 @@ cdef extern from "ppb.hpp" namespace "rp2040core":
         WindowHandler window_handler() noexcept
 
 cdef class RPPPB:
-    cdef PpbBlock _block
+    cdef PpbBlock* _block  # the chip's (`Mcu` builds and wires it), or `_own` for a block made directly (a stand-in chip, a test)
+    cdef PpbBlock _own
+    cdef public bint _from_mcu  # this is the view of the `Mcu`'s block (the watchdog's tick reaches it in C++)
     cdef public object rp2040
     cdef public object name
     cdef public object clock
     cdef public object systick_timer
     cdef public object systick_alarm
+    cdef public object on_system_reset_request
     cdef object _core  # keeps the core (and so the `Cpu` the block points into) alive

@@ -31,6 +31,7 @@
 #ifndef RP2040PY_CORE_DMA_HPP
 #define RP2040PY_CORE_DMA_HPP
 
+#include <cmath>
 #include <cstdint>
 
 #include "bus.hpp"
@@ -48,7 +49,9 @@ using DmaWarnFn = RegWarnFn;
 
 struct DmaHost {
     DmaIrqFn irq = nullptr;
+    void* irq_ctx = nullptr;  // the context of `irq` alone, when it is not `ctx` (a line bound straight to the chip, core/mcu.hpp)
     DmaClockFn clk_sys = nullptr;
+    void* clk_ctx = nullptr;           // the context `clk_sys` is called with; null: `ctx` (a host that answers it itself), non-null: the clock tree in C++ (`bind_clock`)
     DmaWarnFn warn = nullptr;
     void* ctx = nullptr;
     const int* failed = nullptr;       // the shared parked-failure flag (see _pending.pyx)
@@ -89,6 +92,7 @@ public:
     uint32_t treq = 0, data_size = 1, chain_to = 0, ring_mask = 0;
     bool swap = false;  // BSWAP, which only 16/32-bit transfers honour
     Alarm alarm;
+    double cycle_remainder = 0.0;  // the fraction of a tick a clk_sys cycle that is not a whole number of ticks leaves (133 MHz: 120.30), carried to the next transfer
 
     bool active() const noexcept { return (ctrl & dma_regs::EN) != 0 && (ctrl & dma_regs::BUSY) != 0; }
 
@@ -97,7 +101,10 @@ public:
     inline void abort() noexcept;
     inline uint32_t read(uint32_t offset) const noexcept;
     inline bool write(uint32_t offset, int64_t value) noexcept;
-    inline bool reset() noexcept { return write(dma_regs::CTRL_TRIG, static_cast<int64_t>(index) << 11); }
+    inline bool reset() noexcept {
+        cycle_remainder = 0.0;
+        return write(dma_regs::CTRL_TRIG, static_cast<int64_t>(index) << 11);
+    }
 
 private:
     friend class DmaBlock;
@@ -119,6 +126,20 @@ public:
     uint32_t int_raw = 0;
 
     // Binds the block to its bus, clock and host. Must be called once, before anything else.
+    // One clk_sys cycle in nanoseconds: "The DMA can perform one read access and one write access, up to 32 bits in size, every clock cycle" (datasheet 2.5). The host keeps it
+    // current (1e9 / clk_sys) when clk_sys changes, so a transfer never asks Python for the clock.
+    double transfer_ns = 8.0;
+
+    // The clock tree takes over `clk_sys` (core/clock_sinks.hpp): the pacing timers read it from the tree instead of asking the host, and the tree keeps the cycle time current
+    // through `clk_sys_changed()`. Called by whoever wires the tree to the block; a block never bound keeps asking its host.
+    void bind_clock(DmaClockFn fn, void* ctx, double clk_sys_hz) noexcept {
+        host_.clk_sys = fn;
+        host_.clk_ctx = ctx;
+        clk_sys_changed(clk_sys_hz);
+    }
+    // clk_sys is now `hz`: one clk_sys cycle is 1e9 / hz nanoseconds.
+    void clk_sys_changed(double hz) noexcept { transfer_ns = 1e9 / hz; }
+
     void init(Bus* bus, Clock* clock, const DmaHost& host) noexcept {
         bus_ = bus;
         clock_ = clock;
@@ -168,7 +189,7 @@ public:
             // every non-timer TREQ is a period of 0 whatever clk_sys is, so the host is not asked: a channel stalled on a DREQ is rescheduled after every transfer, and that must not cross into Python.
             return 0.0;
         }
-        const double clk = host_.clk_sys(host_.ctx);
+        const double clk = host_.clk_sys(host_.clk_ctx != nullptr ? host_.clk_ctx : host_.ctx);
         if (failed()) {
             *ok = false;
             return 0.0;
@@ -195,8 +216,8 @@ public:
 
     // Re-announces both lines, in order, whatever changed - the reference's call pattern.
     bool check_interrupts() noexcept {
-        if (!host_.irq(host_.ctx, host_.lines[0], int_status0() != 0)) return false;
-        return host_.irq(host_.ctx, host_.lines[1], int_status1() != 0);
+        if (!raise_irq(host_.lines[0], int_status0() != 0)) return false;
+        return raise_irq(host_.lines[1], int_status1() != 0);
     }
 
     // Channels back to power-on and the registers cleared; the asserted DREQs are deliberately untouched (see the
@@ -291,6 +312,7 @@ private:
 
     Bus* bus_ = nullptr;
     Clock* clock_ = nullptr;
+    bool raise_irq(uint32_t line, bool level) noexcept { return host_.irq(host_.irq_ctx != nullptr ? host_.irq_ctx : host_.ctx, line, level); }
     DmaHost host_;
     uint32_t int_enable_[2] = {0, 0}, int_force_[2] = {0, 0};
     uint32_t timers_[4] = {0, 0, 0, 0};
@@ -312,7 +334,11 @@ inline bool DmaChannel::start() noexcept {
 inline bool DmaChannel::schedule_transfer() noexcept {
     Clock* clock = dma_->clock_;
     if (dma_->dreq(treq) || treq == dma_regs::TREQ_PERMANENT) {
-        clock->schedule(&alarm, 0.0);
+        // a transfer that is ready takes one clk_sys cycle (datasheet 2.5), in ticks with the fraction carried so that a clock that is not a whole number of ticks per cycle does not run fast
+        const double exact = cycle_remainder + dma_->transfer_ns * static_cast<double>(kTicksPerNano);
+        const double whole = std::floor(exact);
+        cycle_remainder = exact - whole;
+        clock->schedule_ticks(&alarm, whole >= static_cast<double>(kMaxTicks) ? kMaxTicks : static_cast<int64_t>(whole));
         return true;
     }
     bool ok;

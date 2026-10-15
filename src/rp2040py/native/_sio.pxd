@@ -8,7 +8,7 @@ from rp2040py.native._window_map cimport WindowHandler
 
 cdef extern from "sio.hpp" namespace "rp2040core":
     ctypedef uint32_t (*SioInputFn)(void* ctx)
-    ctypedef bool (*SioUpdatePinsFn)(void* ctx, uint32_t pin_mask)
+    ctypedef bool (*SioUpdatePinsFn)(void* ctx, uint32_t pin_mask, bool qspi)
     ctypedef void (*SioCyclesFn)(void* ctx, uint32_t cycles)
     ctypedef void (*SioWarnFn)(void* ctx, uint32_t kind, uint32_t offset, int64_t value)
 
@@ -55,7 +55,9 @@ cdef class _InterpolatorView:
 
 
 cdef class RPSIO:
-    cdef SioBlock _block
+    cdef public bint _from_mcu  # this is the view of the `Mcu`'s block
+    cdef SioBlock* _block  # the chip's (`Mcu` builds it), or `_own` for a block made directly (a stand-in chip, a test)
+    cdef SioBlock _own
     cdef public object rp2040
     cdef public object name
     cdef object _interp0

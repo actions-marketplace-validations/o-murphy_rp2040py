@@ -115,6 +115,18 @@ static void test_fifo_is_the_python_ring() {
     CHECK(f.empty() && f.start == 2);
     f.push(9);
     CHECK(f.buffer[2] == 9 && f.pull() == 9);
+    PioFifo h;  // resize() is "a new FIFO": empty, start 0, storage zero, the size as asked (0 stores nothing, 8 stores eight)
+    for (uint32_t i = 1; i <= 4; ++i) h.push(0xA0 + i);
+    h.pull();
+    h.resize(8);
+    CHECK(h.size == 8 && h.empty() && h.start == 0);
+    for (uint32_t i = 0; i < 8; ++i) CHECK(h.buffer[i] == 0);
+    for (uint32_t i = 1; i <= 9; ++i) h.push(i);
+    CHECK(h.full() && h.used == 8 && h.pull() == 1);
+    h.resize(0);
+    CHECK(h.size == 0 && h.empty() && h.full());
+    h.push(1);
+    CHECK(h.used == 0 && h.pull() == 0);
     PioFifo g;  // draining a FIFO completely does not move the start back to 0
     g.push(1);
     CHECK(g.pull() == 1 && g.start == 1 && g.empty());
@@ -434,6 +446,13 @@ static void test_registers_aliases_and_warnings() {
     // IRQ is write-1-to-clear through the raw value; IRQ_FORCE sets
     CHECK(r.pio.write_atomic(IRQ_FORCE, 0b101, kAtomicNormal) && r.pio.irq == 0b101);
     CHECK(r.pio.write_atomic(IRQ, 0b001, kAtomicNormal) && r.pio.irq == 0b100);
+    CHECK(r.pio.write_atomic(IRQ_FORCE, 0xFFFFFFFFu, kAtomicNormal) && r.pio.irq == 0xFF);  // eight flags: 31:8 are reserved
+    CHECK(r.pio.write_atomic(IRQ, 0xFFFFFFFFu, kAtomicNormal) && r.pio.irq == 0);
+    // the read-only registers (tables 371-387) ignore a write, silently
+    r.host.count = 0;
+    const uint32_t read_only[] = {FSTAT, FLEVEL, RXF0, RXF0 + 4, RXF0 + 8, RXF0 + 12, DBG_PADOUT, DBG_PADOE, DBG_CFGINFO, INTR, IRQ0_INTS, IRQ1_INTS};
+    for (uint32_t offset : read_only) CHECK(r.pio.write_atomic(offset, 0xFFFFFFFFu, kAtomicNormal));
+    CHECK(r.host.count == 0 && r.pio.read(DBG_CFGINFO) == 0x200404);
     // FDEBUG is write-1-to-clear too, but the stall bits come straight back
     r.pio.fdebug = 0xFFFFFFFF;
     r.pio.tx_stall = 1u << 24;
@@ -495,6 +514,86 @@ static void test_fifo_registers_dreq_and_interrupts() {
     CHECK(r.pio.read(INTR) == (0x10u << 0 | 0x20 | 0x40 | 0x80) - 0x10);  // TX0 full, RX empty: only the other TX flags
 }
 
+static const uint32_t kFjoinTx = 1u << 30, kFjoinRx = 1u << 31;
+
+// SHIFTCTRL.FJOIN (datasheet 3.5.3): one FIFO takes the other's storage (8 deep), the other reads as both full and empty; changing the bits flushes both.
+static void test_fjoin_tx_makes_the_tx_fifo_eight_deep_and_the_rx_fifo_unavailable() {
+    Rig r;
+    CHECK(r.pio.write_atomic(SM0_SHIFTCTRL, kFjoinTx, kAtomicNormal));
+    CHECK(r.sm().tx.size == 8 && r.sm().rx.size == 0);
+    const uint32_t fstat = r.pio.read(FSTAT);
+    CHECK((fstat & (1u << 8)) && (fstat & 1u));  // RXEMPTY and RXFULL
+    CHECK((fstat & (1u << 24)) && !(fstat & (1u << 16)));  // TX empty, not full
+    for (uint32_t i = 0; i < 8; ++i) CHECK(r.pio.write_atomic(TXF0, 0x100 + i, kAtomicNormal));
+    CHECK(r.sm().tx.used == 8 && (r.pio.read(FSTAT) & (1u << 16)) && !(r.pio.fdebug & (1u << 16)));
+    CHECK((r.pio.read(FLEVEL) & 0xF) == 8);
+    r.host.count = 0;
+    CHECK(r.pio.write_atomic(TXF0, 0x999, kAtomicNormal));  // the ninth: TXOVER
+    CHECK(r.sm().tx.used == 8 && (r.pio.fdebug & (1u << 16)));
+    CHECK(r.pio.read(RXF0) == 0 && (r.pio.fdebug & (1u << 8)) && (r.pio.read(FLEVEL) & 0xF0) == 0);  // RXUNDER, always
+    r.exec(op(PUSHPULL, 0x00));                                  // PUSH NOBLOCK: nowhere to go
+    CHECK(r.sm().rx.used == 0 && !r.sm().waiting);
+    r.exec(op(PUSHPULL, 0x20));                                  // PUSH BLOCK: stalls for good
+    CHECK(r.sm().waiting);
+    for (uint32_t i = 0; i < 8; ++i) CHECK(r.pio.read(RXF0) == 0);
+    CHECK(r.sm().waiting);
+}
+
+static void test_fjoin_rx_makes_the_rx_fifo_eight_deep_and_the_tx_fifo_unavailable() {
+    Rig r;
+    CHECK(r.pio.write_atomic(SM0_SHIFTCTRL, kFjoinRx, kAtomicNormal));
+    CHECK(r.sm().rx.size == 8 && r.sm().tx.size == 0);
+    const uint32_t fstat = r.pio.read(FSTAT);
+    CHECK((fstat & (1u << 24)) && (fstat & (1u << 16)));  // TXEMPTY and TXFULL
+    CHECK((fstat & (1u << 8)) && !(fstat & 1u));          // RX empty, not full
+    CHECK(r.pio.write_atomic(TXF0, 0x55, kAtomicNormal) && r.sm().tx.used == 0 && (r.pio.fdebug & (1u << 16)));  // TXOVER: the FIFO is "full"
+    for (uint32_t i = 0; i < 8; ++i) r.exec(op(PUSHPULL, 0x00));
+    CHECK(r.sm().rx.used == 8 && (r.pio.read(FSTAT) & 1u) && ((r.pio.read(FLEVEL) >> 4) & 0xF) == 8);
+    r.exec(op(PUSHPULL, 0xA0));                                  // PULL BLOCK: the TX FIFO is empty for good
+    CHECK(r.sm().waiting);
+}
+
+static void test_fjoin_both_leaves_neither_fifo() {
+    Rig r;
+    CHECK(r.pio.write_atomic(SM0_SHIFTCTRL, kFjoinTx | kFjoinRx, kAtomicNormal));
+    CHECK(r.sm().tx.size == 0 && r.sm().rx.size == 0);
+    const uint32_t fstat = r.pio.read(FSTAT);
+    CHECK((fstat & 0x01010101u) == 0x01010101u);  // TXEMPTY | TXFULL | RXEMPTY | RXFULL of SM0
+}
+
+static void test_changing_fjoin_flushes_the_fifos_and_republishes_what_follows_from_them() {
+    Rig r;
+    r.pio.irq0_int_enable = 0xFFF;
+    for (uint32_t i = 0; i < 3; ++i) CHECK(r.pio.write_atomic(TXF0, i + 1, kAtomicNormal));
+    r.sm().rx.push(7);
+    r.host.count = 0;
+    CHECK(r.pio.write_atomic(SM0_SHIFTCTRL, kFjoinTx, kAtomicNormal));
+    CHECK(r.sm().tx.used == 0 && r.sm().rx.used == 0);          // both flushed
+    CHECK(r.host.has(kDreq, 0, 1) && r.host.has(kDreq, 4, 0));  // TX not full, the RX request down
+    CHECK(r.host.count_of(kIrq) >= 1);
+    CHECK(r.pio.write_atomic(TXF0, 9, kAtomicNormal));
+    CHECK(r.pio.write_atomic(SM0_SHIFTCTRL, kFjoinTx | (1u << 16), kAtomicNormal));  // the same FJOIN bits (AUTOPUSH changed): not a change, nothing flushed
+    CHECK(r.sm().tx.used == 1 && r.sm().tx.size == 8);
+    CHECK(r.pio.write_atomic(SM0_SHIFTCTRL, 0, kAtomicNormal));  // un-join: 4 deep again, flushed
+    CHECK(r.sm().tx.size == 4 && r.sm().rx.size == 4 && r.sm().tx.used == 0);
+}
+
+static void test_a_stalled_push_goes_on_when_its_fifo_appears() {
+    Rig r;
+    CHECK(r.pio.write_atomic(SM0_SHIFTCTRL, kFjoinTx, kAtomicNormal));
+    r.exec(op(PUSHPULL, 0x20));  // PUSH BLOCK on the unavailable RX FIFO
+    CHECK(r.sm().waiting);
+    CHECK(r.pio.write_atomic(SM0_SHIFTCTRL, kFjoinRx, kAtomicNormal));  // RX takes the storage: the push finds room
+    CHECK(!r.sm().waiting && r.sm().rx.used == 1);
+}
+
+static void test_reset_puts_the_fifos_back_to_four_deep() {
+    Rig r;
+    CHECK(r.pio.write_atomic(SM0_SHIFTCTRL, kFjoinRx, kAtomicNormal));
+    CHECK(r.sm().reset());
+    CHECK(r.sm().rx.size == 4 && r.sm().tx.size == 4 && r.sm().shift_ctrl == (0b11u << 18));
+}
+
 static void test_failures_stop_at_once_and_leave_the_state_updated() {
     Rig r;
     r.host.fail_on_dreq_call = r.host.dreq_calls;  // the next DREQ call fails
@@ -537,6 +636,170 @@ static void test_a_sideset_count_above_five_is_clamped_not_undefined() {
     CHECK(r.pio.pin_values == (0x1Fu << 4));  // as a count of 5: all five side-set bits, no delay
 }
 
+// --- pin-write arbitration (datasheet 3.5.6.1, EXECCTRL.OUT_STICKY / INLINE_OUT_EN / OUT_EN_SEL) -----------------------------------------------------
+
+static const uint32_t kOutSticky = 1u << 17, kInlineOutEn = 1u << 18;
+
+// A rig whose machines write GPIO 5 with SET PINS: machine `i` runs the program word `i` (SET PINS, level) at address `i` in a one-instruction loop.
+static void config_set_pin(Rig& r, uint32_t machine, uint32_t level, uint32_t execctrl = 0) {
+    r.pio.instructions[machine] = op(SET, level);  // SET PINS, level
+    r.sm(machine).pin_ctrl = (1u << 26) | (5u << 5);
+    r.sm(machine).exec_ctrl = execctrl | (machine << 12) | (machine << 7);  // wrap top = bottom = machine
+    r.sm(machine).pc = machine;
+    r.sm(machine).enabled = false;
+}
+
+static void enable(Rig& r, uint32_t mask) {
+    for (uint32_t i = 0; i < 4; ++i) {
+        r.sm(i).enabled = (mask >> i) & 1u;
+        r.sm(i).next_due_fp = r.pio.cycle_fp;
+    }
+    r.pio.stopped = 0;
+    r.pio.recompute_due();
+}
+
+static uint32_t level5(Rig& r) { return (r.pio.pin_values >> 5) & 1u; }
+
+static void test_the_highest_numbered_machine_wins_a_cycle() {
+    Rig r;
+    config_set_pin(r, 0, 1);
+    config_set_pin(r, 1, 0);
+    enable(r, 0b11);
+    CHECK(r.pio.advance(1));
+    CHECK(level5(r) == 0);  // machine 1 is the higher
+    CHECK(r.pio.advance(1));
+    CHECK(level5(r) == 0);
+}
+
+static void test_a_sticky_write_comes_back_after_a_higher_machine_overwrote_it() {
+    Rig r;
+    config_set_pin(r, 0, 1, kOutSticky);
+    config_set_pin(r, 1, 0);
+    r.pio.instructions[1] = op(JMP, 1);  // machine 1 first does nothing: a jump to itself
+    enable(r, 0b1);
+    CHECK(r.pio.advance(1) && r.pio.advance(1));
+    CHECK(level5(r) == 1 && r.sm(0).held_write.valid);
+    r.pio.instructions[1] = op(SET, 0);  // now machine 1 writes 0 - once (it then wraps on the same word, so keep it to one cycle)
+    r.sm(1).pc = 1;
+    enable(r, 0b11);
+    CHECK(r.pio.advance(1));
+    CHECK(level5(r) == 0 && r.pio.resolve_due_fp != kPioNeverDue);  // the higher machine's write holds the cycle
+    r.sm(1).enabled = false;
+    CHECK(r.pio.advance(1));
+    CHECK(level5(r) == 1 && r.pio.resolve_due_fp == kPioNeverDue);  // the held write is on the pin again
+}
+
+static void test_the_resolve_is_a_due_time_and_the_pins_hear_both_edges() {
+    Rig r;
+    config_set_pin(r, 0, 1, kOutSticky);
+    enable(r, 0b1);
+    CHECK(r.pio.advance(1));
+    r.sm(0).enabled = false;
+    r.host.count = 0;
+    r.pio.pin_values &= ~(1u << 5);  // something took the pin to 0 under machine 0's held write
+    r.pio.old_pin_values = r.pio.pin_values;
+    r.pio.resolve_due_fp = r.pio.cycle_fp + (int64_t{1} << 8);
+    r.pio.recompute_due();
+    CHECK(r.pio.next_due_fp == r.pio.resolve_due_fp);
+    CHECK(r.pio.advance(1));
+    CHECK(level5(r) == 1 && r.host.has(kPinUpdate, 5, 0));  // the fall back to the held write is announced
+}
+
+static void test_restart_and_turning_sticky_off_drop_the_held_write() {
+    Rig r;
+    config_set_pin(r, 0, 1, kOutSticky);
+    enable(r, 0b1);
+    CHECK(r.pio.advance(1) && r.sm(0).held_write.valid);
+    CHECK(r.sm(0).restart() && !r.sm(0).held_write.valid);
+    CHECK(r.pio.advance(1) && r.sm(0).held_write.valid);
+    CHECK(r.sm(0).write32(SM0_EXECCTRL - SM0_CLKDIV, 0) && !r.sm(0).held_write.valid);
+    CHECK(r.sm(0).reset() && !r.sm(0).held_write.valid);
+}
+
+static void test_inline_out_enable_gates_an_out_write_and_replaces_the_held_one() {
+    Rig r;
+    r.sm().pin_ctrl = (1u << 20) | 5u;  // OUT_COUNT 1, OUT_BASE 5
+    r.sm().exec_ctrl = kInlineOutEn | kOutSticky | (1u << 19) | (0x1Fu << 12);  // OUT_EN_SEL = 1
+    r.sm().output_shift_reg = 0b11;
+    r.sm().shift_ctrl = (1u << 19) | (0b11u << 18);  // shift right
+    r.exec(op(OUT, 2));  // OUT PINS, 2: data 0b11, enable bit 1 is 1 -> bit 0 (1) is written
+    CHECK(level5(r) == 1 && r.sm().held_write.valid && r.sm().held_write.mask == (1u << 5));
+    r.sm().output_shift_reg = 0b01;
+    r.exec(op(OUT, 2));  // enable bit 0: no write, the held write is replaced by an empty one
+    CHECK(level5(r) == 1 && r.sm().held_write.valid && r.sm().held_write.mask == 0);
+    r.sm().output_shift_reg = 0b10;
+    r.exec(op(OUT, 2));  // enable 1, data 0: written
+    CHECK(level5(r) == 0 && r.sm().held_write.mask == (1u << 5));
+    r.sm().exec_ctrl &= ~kInlineOutEn;  // without the option every OUT writes
+    r.sm().output_shift_reg = 0b01;
+    r.exec(op(OUT, 2));
+    CHECK(level5(r) == 1);
+}
+
+static void test_levels_and_directions_are_collated_separately_and_a_forced_write_is_its_own_cycle() {
+    Rig r;
+    r.pio.instructions[0] = op(SET, 1);
+    r.sm(0).pin_ctrl = (1u << 26) | (5u << 5);
+    r.sm(0).exec_ctrl = kOutSticky | (0x1Fu << 12);
+    r.exec(op(SET, 1), 0);  // SET PINS 1 on machine 0 (sticky)
+    r.sm(1).pin_ctrl = (1u << 26) | (5u << 5);
+    r.exec(op(SET, (4 << 5) | 1), 1);  // SET PINDIRS 1 on machine 1: its own write, a different channel of the image
+    CHECK(level5(r) == 1 && ((r.pio.pin_directions >> 5) & 1u) == 1u);
+    r.exec(op(SET, 0), 1);  // a higher machine's SET PINS 0 outside a stepped cycle: it is its own cycle, and a resolve is due
+    CHECK(level5(r) == 0 && r.pio.resolve_due_fp != kPioNeverDue && r.pio.next_due_fp == r.pio.resolve_due_fp);
+}
+
+static void test_side_set_and_mov_pins_and_directions_take_part_in_the_arbitration() {
+    Rig r;
+    // machine 0: sticky; MOV PINS, X holds a level; a side-set of its own comes on top in the overlap and is not held
+    r.sm(0).pin_ctrl = (1u << 20) | 5u | (1u << 29) | (5u << 10);  // OUT_COUNT 1 at 5; SIDESET_COUNT 1 at 5
+    r.sm(0).exec_ctrl = kOutSticky | (0x1Fu << 12);
+    r.sm(0).x = 1;
+    r.exec(op(MOV, (0 << 5) | 1, 0x10));  // MOV PINS, X, with a side-set of 1 (the side-set field is the top bit of the five)
+    CHECK(level5(r) == 1 && r.sm(0).held_write.valid && r.sm(0).held_write.mask == (1u << 5) && !r.sm(0).held_write.directions);
+    r.exec(op(SET, (1 << 5) | 0, 0x10), 0);  // SET X, 0 with a side-set of 1 on pin 5 (SIDESET_COUNT 1, no enable bit)
+    CHECK(level5(r) == 1 && r.sm(0).held_write.valid);
+    // a side-set of 0 on top of the held 1
+    r.exec(op(SET, (1 << 5) | 0, 0x00), 0);
+    CHECK(level5(r) == 0 && r.sm(0).held_write.mask == (1u << 5) && r.sm(0).held_write.data == (1u << 5));  // the held write is still the MOV's
+    CHECK(r.pio.resolve_due_fp != kPioNeverDue);  // ... and comes back one cycle later
+    CHECK(r.pio.advance(1));
+    CHECK(level5(r) == 1);
+    // directions: a held PINDIRS write, re-asserted separately from the level
+    r.sm(1).pin_ctrl = (1u << 26) | (5u << 5);
+    r.sm(1).exec_ctrl = kOutSticky | (0x1Fu << 12);
+    r.exec(op(SET, (4 << 5) | 1), 1);  // SET PINDIRS 1
+    CHECK(((r.pio.pin_directions >> 5) & 1u) == 1u && r.sm(1).held_write.directions);
+    r.pio.pin_directions = 0;
+    uint32_t v, d;
+    r.pio.held_image(&v, &d);
+    CHECK(((d >> 5) & 1u) == 1u && ((v >> 5) & 1u) == 1u);  // both held writes: machine 0's level and machine 1's direction
+}
+
+static void test_the_unarbitrated_wrappers_and_the_mapping() {
+    Rig r;
+    r.pio.pin_values_changed(0b101, 3, 3);
+    r.pio.pin_directions_changed(0b11, 30, 2);  // wraps after GPIO31: pins 30 and 31 - outside the 30-bit image
+    CHECK(r.pio.pin_values == (0b101u << 3) && r.pio.pin_directions == 0);
+    r.pio.pin_directions_changed(0b011, 28, 3);  // GPIO28, GPIO29, GPIO30
+    CHECK(r.pio.pin_directions == (0b11u << 28));
+    uint32_t mask, data;
+    PioBlock::pin_mapping(0b11, 31, 2, &mask, &data);  // GPIO31 and GPIO0
+    CHECK(mask == 0x80000001u && data == 0x80000001u);
+    PioBlock::pin_mapping(0xFFFFFFFFu, 4, 32, &mask, &data);
+    CHECK(mask == 0xFFFFFFFFu);
+}
+
+static void test_a_failing_step_leaves_no_cycle_open() {
+    Rig r;
+    config_set_pin(r, 0, 1, kOutSticky);
+    r.pio.instructions[0] = op(IRQ_OP, 0b0000);  // IRQ set 0: the host's interrupt call can fail
+    enable(r, 0b1);
+    r.host.fail_on_irq_call = r.host.irq_calls;
+    CHECK(!r.pio.advance(1));
+    CHECK(!r.pio.in_cycle);
+}
+
 int main() {
     test_fifo_is_the_python_ring();
     test_construction_publishes_the_dreq_levels_rx_then_tx();
@@ -550,9 +813,24 @@ int main() {
     test_pacing_enable_restart_arrears();
     test_registers_aliases_and_warnings();
     test_fifo_registers_dreq_and_interrupts();
+    test_fjoin_tx_makes_the_tx_fifo_eight_deep_and_the_rx_fifo_unavailable();
+    test_fjoin_rx_makes_the_rx_fifo_eight_deep_and_the_tx_fifo_unavailable();
+    test_fjoin_both_leaves_neither_fifo();
+    test_changing_fjoin_flushes_the_fifos_and_republishes_what_follows_from_them();
+    test_a_stalled_push_goes_on_when_its_fifo_appears();
+    test_reset_puts_the_fifos_back_to_four_deep();
     test_failures_stop_at_once_and_leave_the_state_updated();
     test_reset_and_stop();
     test_a_sideset_count_above_five_is_clamped_not_undefined();
+    test_the_highest_numbered_machine_wins_a_cycle();
+    test_a_sticky_write_comes_back_after_a_higher_machine_overwrote_it();
+    test_the_resolve_is_a_due_time_and_the_pins_hear_both_edges();
+    test_restart_and_turning_sticky_off_drop_the_held_write();
+    test_inline_out_enable_gates_an_out_write_and_replaces_the_held_one();
+    test_levels_and_directions_are_collated_separately_and_a_forced_write_is_its_own_cycle();
+    test_side_set_and_mov_pins_and_directions_take_part_in_the_arbitration();
+    test_the_unarbitrated_wrappers_and_the_mapping();
+    test_a_failing_step_leaves_no_cycle_open();
     if (failures == 0) std::printf("test_pio: all checks passed\n");
     return failures == 0 ? 0 : 1;
 }

@@ -37,6 +37,8 @@ cdef extern from "syscfg.hpp" namespace "rp2040core":
         WindowHandler window_handler() noexcept
 
 cdef class RP2040SysCfg:
-    cdef SyscfgBlock _block
+    cdef public bint _from_mcu  # this is the view of the `Mcu`'s block
+    cdef SyscfgBlock* _block  # the chip's (`Mcu` builds and wires it), or `_own` for a stand-in chip that has no `Mcu`
+    cdef SyscfgBlock _own
     cdef public object rp2040
     cdef public object name

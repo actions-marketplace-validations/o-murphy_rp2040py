@@ -4,6 +4,9 @@
 from libc.stdint cimport int64_t, uint32_t
 from libcpp cimport bool as cppbool
 
+from rp2040py.native._mcu_irq cimport McuIrqLine, McuDreqPair
+
+from rp2040py.native._clock cimport Alarm, Clock
 from rp2040py.native._window_map cimport WindowHandler
 
 cdef extern from "uart.hpp" namespace "rp2040core":
@@ -15,14 +18,18 @@ cdef extern from "uart.hpp" namespace "rp2040core":
     ctypedef cppbool (*UartDreqFn)(void* ctx, cppbool rx, cppbool asserted)
     ctypedef cppbool (*UartByteFn)(void* ctx, uint32_t byte)
     ctypedef cppbool (*UartBaudFn)(void* ctx)
+    ctypedef cppbool (*UartBitFn)(void* ctx, double* nanos)
     ctypedef void (*UartWarnFn)(void* ctx, uint32_t kind, uint32_t offset, int64_t value)
 
     cdef cppclass UartHost:
         UartHost() noexcept
         UartIrqFn irq
+        void* irq_ctx
+        void* dreq_ctx
         UartDreqFn dreq
         UartByteFn on_byte
         UartBaudFn baud_changed
+        UartBitFn bit_ns
         UartWarnFn warn
         void* ctx
         const int* failed
@@ -38,8 +45,10 @@ cdef extern from "uart.hpp" namespace "rp2040core":
         uint32_t ilpr
         uint32_t dmacr
         uint32_t rsr
+        Alarm tx_alarm
         UartBlock() noexcept
-        void init(const UartHost& host) noexcept
+        void init(Clock* clock, const UartHost& host) noexcept
+        void detach() noexcept
         int64_t raw_write_value() noexcept
         uint32_t rx_count() noexcept
         cppbool rx_empty() noexcept
@@ -49,6 +58,16 @@ cdef extern from "uart.hpp" namespace "rp2040core":
         uint32_t rx_pull() noexcept
         uint32_t rx_peek() noexcept
         void rx_reset() noexcept
+        uint32_t tx_count() noexcept
+        cppbool tx_empty() noexcept
+        uint32_t tx_capacity() noexcept
+        cppbool tx_full() noexcept
+        uint32_t tx_at(uint32_t index) noexcept
+        uint32_t tx_trigger() noexcept
+        cppbool tx_shifting() noexcept
+        void tx_push(uint32_t value) noexcept
+        uint32_t tx_pull() noexcept
+        void tx_reset() noexcept
         uint32_t flags() noexcept
         cppbool enabled() noexcept
         cppbool update_dreq() noexcept
@@ -61,8 +80,13 @@ cdef extern from "uart.hpp" namespace "rp2040core":
         WindowHandler window_handler() noexcept
 
 cdef class RPUART:
-    cdef UartBlock _block
+    cdef public bint _from_mcu  # this is the view of the `Mcu`'s block
+    cdef UartBlock* _block  # the chip's (`Mcu` builds and wires it), or `_own` for a block made directly (a stand-in chip, a test)
+    cdef UartBlock _own
+    cdef McuDreqPair _dreq_pair  # the DMA request straight to the chip, when it has one (core/mcu.hpp)
+    cdef McuIrqLine _irq_line  # the line straight to the chip, when it has one (core/mcu.hpp)
     cdef public object rp2040
+    cdef public object clock
     cdef public object name
     cdef public object irq
     cdef public object dreq

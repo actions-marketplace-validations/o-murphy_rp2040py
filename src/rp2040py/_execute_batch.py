@@ -8,8 +8,11 @@ single, unambiguous reference to be measured against and kept in sync with by ha
 reason peripherals/_state_machine.py exists alongside peripherals/state_machine.py.
 """
 
+import math
 import time
 from typing import TYPE_CHECKING
+
+from rp2040py.clock._simulation_clock import TICKS_PER_NANO, nanos_to_ticks
 
 if TYPE_CHECKING:
     from rp2040py.simulator import Simulator
@@ -38,6 +41,18 @@ _PACED_IDLE_NANOS = 1_000_000.0
 
 
 def execute_batch(simulator: "Simulator", tick_batch: int) -> None:
+    """One batch (see `_run_batch`), ended early by a change of `clk_sys`: the CPU's time per instruction is `1 / clk_sys` (docs/tasks/clocks-port.md, decision 2), the batch fixes it at its start,
+    and a firmware that sets the clock tree mid-batch must see the new rate on the very next instruction - a clock listener raises the flag the loop checks, and the next batch starts at the new rate."""
+    rp2040 = simulator.rp2040
+    changed = [False]
+    unsubscribe = rp2040.add_clock_listener(lambda _new, _old: changed.__setitem__(0, True))
+    try:
+        _run_batch(simulator, tick_batch, changed)
+    finally:
+        unsubscribe()
+
+
+def _run_batch(simulator: "Simulator", tick_batch: int, changed: list[bool]) -> None:
     """Runs up to 1,000,000 instructions/idle-jumps, or until `simulator.stopped` is set, or until
     the batch itself has eaten its own real-time budget (_BATCH_YIELD_BUDGET_SECONDS) - whichever
     comes first. Synchronous and self-contained (no `await` anywhere in here) so it can be driven
@@ -92,24 +107,28 @@ def execute_batch(simulator: "Simulator", tick_batch: int) -> None:
     # stalled). A stalled machine is now simply excluded from `RPPIO.next_due_fp` instead, and
     # `check_wait()` lowers it again the moment the stall ends.
     pios = rp2040.pio
-    cycle_nanos = 1e9 / 125_000_000  # 125 MHz
+    cycle_nanos = 1e9 / rp2040.clk_sys  # one system clock: 125 MHz until firmware configures the clock tree
+    # One system clock in ticks of 1/16 ns: not a whole number in general (133 MHz is 120.30), so time advances in CYCLES with the fraction carried by the clock (docs/records/0100).
+    ticks_per_cycle = cycle_nanos * TICKS_PER_NANO
+    # The common case (125 MHz: 128 ticks) is a whole number of ticks per cycle: plain integer arithmetic, no remainder to carry.
+    cycle_ticks = int(ticks_per_cycle) if ticks_per_cycle == int(ticks_per_cycle) else 0
     i: float = 0
     batch_start = time.monotonic()
     ticks_since_check = 0
     # RP2040PY_CLOCK_TICK_BATCH (default 1 - see _clock_batch_gate.py's own module docstring
     # for why this stays opt-in): >1 lets the busy branch below accumulate several
-    # instructions' worth of simulated nanoseconds into pending_nanos instead of calling the
+    # instructions' worth of simulated cycles into pending_cycles instead of calling the
     # real clock.tick() after every single one, flushing (the real tick(), firing any due
-    # alarm exactly as it would have anyway) whenever nanos_budget would go non-positive or
+    # alarm exactly as it would have anyway) whenever tick_budget would go non-positive or
     # tick_batch instructions have accumulated - whichever comes first - so a scheduled alarm
     # never fires later than it does today, only the (typically far more common, per a real
     # measured boot - see the same module docstring) no-alarm-imminent case skips repeated
     # full tick() calls. tick_batch==1 (the default) takes the exact same one-call-per-
     # instruction path as always, just with the redundant branch below.
-    pending_nanos = 0.0
+    pending_cycles = 0
     pending_count = 0
-    nanos_budget = clock.nanos_to_next_alarm if clock.has_scheduled_alarm else float("inf")
-    while i < 1000000 and not simulator.stopped:
+    tick_budget = clock.ticks_to_next_alarm if clock.has_scheduled_alarm else None
+    while i < 1000000 and not simulator.stopped and not changed[0]:
         # Checked every _TIME_CHECK_INTERVAL iterations regardless of idle/busy - not just
         # during an uninterrupted idle run. A real device idling at the REPL isn't purely
         # WFI'd end to end: a periodic timer interrupt (SysTick, watchdog, ...) briefly flips
@@ -133,12 +152,16 @@ def execute_batch(simulator: "Simulator", tick_batch: int) -> None:
                 break
         paced = False
         if rp2040.core.waiting:
-            if pending_nanos:
+            if pending_cycles:
                 # Flush whatever the busy branch below had accumulated first - the idle jump
                 # right after must be relative to the real, ticked-forward clock, not stale by
                 # however much was still pending.
-                clock.tick(pending_nanos)
-                pending_nanos = 0.0
+                (
+                    clock.tick_ticks(pending_cycles * cycle_ticks)
+                    if cycle_ticks
+                    else clock.advance_cycles(pending_cycles, ticks_per_cycle)
+                )
+                pending_cycles = 0
                 pending_count = 0
             # Jumping straight to the next alarm costs ~nothing in real time no matter how far
             # away it is (no instructions execute), so it must not be weighted by the simulated
@@ -150,11 +173,11 @@ def execute_batch(simulator: "Simulator", tick_batch: int) -> None:
             # avoidable yields - each one exposed to real scheduler jitter - which is what
             # actually produced the wildly variable wall-clock times noted in
             # docs/BACKLOG.md's CDC investigation, not anything USB-specific.
-            idle_nanos = clock.nanos_to_next_alarm
+            idle_ticks = clock.ticks_to_next_alarm
             if real_io is not None and real_io[0]:
-                idle_nanos = min(idle_nanos, _PACED_IDLE_NANOS)
+                idle_ticks = min(idle_ticks, nanos_to_ticks(_PACED_IDLE_NANOS))
                 paced = True
-            clock.tick(idle_nanos)
+            clock.tick_ticks(idle_ticks)
             # Real PIO keeps running while the CPU sleeps, so the jump has to be handed to it as
             # the system clocks it actually covers - not as the single step this used to give it
             # regardless of how far the jump went. `MAX_CATCHUP_STEPS` bounds what that can cost.
@@ -163,32 +186,45 @@ def execute_batch(simulator: "Simulator", tick_batch: int) -> None:
             # frozen solid whenever the CPU parks in WFI with an empty alarm queue could never
             # make the progress that would let the CPU wake up again - which is exactly how a
             # DMA-fed state machine is driven with no ARM program loaded (tests/test_pio.py).
-            cycles = int(idle_nanos / cycle_nanos) or 1
+            cycles = int(idle_ticks / ticks_per_cycle) or 1
             if tick_batch > 1:
-                nanos_budget = clock.nanos_to_next_alarm if clock.has_scheduled_alarm else float("inf")
+                tick_budget = clock.ticks_to_next_alarm if clock.has_scheduled_alarm else None
         else:
             cycles = rp2040.core.execute_instruction()
-            delta_nanos = cycles * cycle_nanos
             if tick_batch <= 1:
-                clock.tick(delta_nanos)
+                (
+                    clock.tick_ticks(cycles * cycle_ticks)
+                    if cycle_ticks
+                    else clock.advance_cycles(cycles, ticks_per_cycle)
+                )
             else:
-                pending_nanos += delta_nanos
+                pending_cycles += cycles
                 pending_count += 1
-                nanos_budget -= delta_nanos
-                if nanos_budget <= 0 or pending_count >= tick_batch:
-                    clock.tick(pending_nanos)
-                    pending_nanos = 0.0
+                if tick_budget is not None:
+                    # rounded UP: an alarm is never flushed later than it is due, only (by under a tick) earlier
+                    tick_budget -= math.ceil(cycles * ticks_per_cycle)
+                if (tick_budget is not None and tick_budget <= 0) or pending_count >= tick_batch:
+                    (
+                        clock.tick_ticks(pending_cycles * cycle_ticks)
+                        if cycle_ticks
+                        else clock.advance_cycles(pending_cycles, ticks_per_cycle)
+                    )
+                    pending_cycles = 0
                     pending_count = 0
-                    nanos_budget = clock.nanos_to_next_alarm if clock.has_scheduled_alarm else float("inf")
+                    tick_budget = clock.ticks_to_next_alarm if clock.has_scheduled_alarm else None
         for pio in pios:
             if not pio.stopped:
                 pio.advance(cycles)
         i += 1
         if paced:
             break  # one capped idle jump per batch: the caller sleeps for the simulated time it covered
-    if pending_nanos:
+    if pending_cycles:
         # End of batch (stopped, iteration ceiling, or the real-time yield budget above) with
         # something still un-flushed - must not leave simulated time silently behind by up to
         # a whole batch's worth of nanoseconds, e.g. for a caller reading clock.nanos right
         # after execute() yields.
-        clock.tick(pending_nanos)
+        (
+            clock.tick_ticks(pending_cycles * cycle_ticks)
+            if cycle_ticks
+            else clock.advance_cycles(pending_cycles, ticks_per_cycle)
+        )

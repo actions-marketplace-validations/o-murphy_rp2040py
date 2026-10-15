@@ -68,6 +68,7 @@ jobs:
         with:
           python-version: ${{ matrix.python_runtime }}
           github-token: ${{ github.token }}
+          enable-cache: true
 
       # CortexM0Core.execute_instruction() is a pure-Python instruction interpreter; CPython is
       # much slower here than V8 JIT-compiling the equivalent JS in rp2040js, hence the generous

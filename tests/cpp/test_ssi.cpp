@@ -34,6 +34,9 @@ struct Env {
     bool cs_low_answer = false;
     bool cs_low_fail = false;
     int cs_low_calls = 0;
+    int irq_calls = 0, tx_dreq_calls = 0, rx_dreq_calls = 0;
+    bool irq_level = false, tx_dreq = false, rx_dreq = false;
+    bool fail_irq = false, fail_dreq = false;
 };
 static Env env;
 
@@ -49,6 +52,17 @@ static bool on_cs_low(void*, bool* low) {
     ++env.cs_low_calls;
     *low = env.cs_low_answer;
     return !env.cs_low_fail;
+}
+
+static bool on_irq(void*, bool level) {
+    ++env.irq_calls;
+    env.irq_level = level;
+    return !env.fail_irq;
+}
+static bool on_dreq(void*, bool tx, bool asserted) {
+    (tx ? env.tx_dreq_calls : env.rx_dreq_calls)++;
+    (tx ? env.tx_dreq : env.rx_dreq) = asserted;
+    return !env.fail_dreq;
 }
 
 static PinBank cs_pin;
@@ -97,6 +111,237 @@ static void fresh() {
     env.warns = 0;
 }
 
+static void test_dr1_to_dr35_are_the_data_register_too() {
+    // datasheet 4.10.12: writing to any of the 36 locations pushes into the TX FIFO and reading from any pops the RX FIFO
+    fresh();
+    wr(SSIENR, 1);
+    cs(kCsLow);
+    wr(0x64, CMD_READ_STATUS_1);  // DR1
+    wr(0xEC, 0);                  // DR35
+    CHECK(rd(RXFLR) == 2 && rd(0x68) == 0xFF && rd(0xA0) == 0 && rd(RXFLR) == 0);  // popped through DR2 and DR16
+    CHECK(env.warns == 0);
+    CHECK(rd(0x66) == 0xFFFFFFFFu && env.warns == 1);  // not word aligned: no register
+    wr(0xF0, 0x77);                                    // RX_SAMPLE_DLY, not a data register
+    CHECK(rd(0xF0) == 0x77 && rd(RXFLR) == 0);
+    wr(0x60, CMD_READ_STATUS_1);
+    CHECK(rd(0xEC) == 0);  // pushed through DR0 (a third byte of the status command: WEL clear), popped through DR35
+    cs(kCsHigh);
+}
+
+// A burst of frames written to DR with the chip-select asserted and no command: each is answered 0xFF (an unknown opcode).
+static void burst(uint32_t count) {
+    for (uint32_t i = 0; i < count; ++i) wr(DR0, 0x11 + i);
+}
+
+static void test_the_fifos_and_the_interrupts() {
+    fresh();
+    env = Env();
+    wr(SSIENR, 1);
+    cs(kCsLow);
+    // power-on: TXE is raw-set (the transmit FIFO is empty and TXFTLR is 0), masked out, so nothing is announced
+    CHECK(rd(RISR) == INT_TXE && rd(ISR) == 0 && !env.irq_level && env.irq_calls == 0);
+    wr(IMR, INT_TXE);
+    CHECK(rd(ISR) == INT_TXE && env.irq_level && env.irq_calls == 1);
+    wr(IMR, INT_TXE);  // same level: not announced again
+    CHECK(env.irq_calls == 1);
+    wr(TXFTLR, 0);
+    wr(IMR, 0);
+    CHECK(!env.irq_level && env.irq_calls == 2);
+
+    // the receive FIFO is 16 deep; a frame that finds it full is discarded and held as RXO
+    burst(16);
+    CHECK(rd(RXFLR) == 16 && (rd(SR) & SR_RFF) && (rd(RISR) & INT_RXF) && !(rd(RISR) & INT_RXO));
+    burst(1);
+    CHECK(rd(RXFLR) == 16 && (rd(RISR) & INT_RXO));
+    wr(IMR, INT_RXO | INT_RXF);
+    CHECK(env.irq_level && rd(ISR) == (INT_RXO | INT_RXF));
+    CHECK(rd(RXOICR) == 0 && !(rd(RISR) & INT_RXO));  // reading the clear register returns 0 and clears it
+    CHECK(rd(ISR) == INT_RXF && env.irq_level);       // RXF still follows the level
+    for (int i = 0; i < 16; ++i) CHECK(rd(DR0) == 0xFF);
+    CHECK(rd(RXFLR) == 0 && !(rd(SR) & SR_RFNE) && !(rd(SR) & SR_RFF) && !env.irq_level);
+
+    // reading an empty FIFO returns 0 and holds RXU until RXUICR (or ICR) is read
+    CHECK(rd(DR0) == 0 && (rd(RISR) & INT_RXU));
+    wr(IMR, INT_RXU);
+    CHECK(env.irq_level);
+    CHECK(rd(ICR) == 0 && !(rd(RISR) & INT_RXU) && !env.irq_level);
+    CHECK(rd(DR0) == 0);
+    CHECK(rd(RXUICR) == 0 && !(rd(RISR) & INT_RXU));
+    CHECK(rd(TXOICR) == 0 && rd(MSTICR) == 0);  // never raised, and harmless to clear
+
+    // RXF: RXFTLR + 1 or more entries
+    wr(IMR, INT_RXF);
+    wr(RXFTLR, 3);
+    burst(3);
+    CHECK(!(rd(RISR) & INT_RXF) && !env.irq_level);
+    burst(1);
+    CHECK((rd(RISR) & INT_RXF) && env.irq_level);
+    (void)rd(DR0);
+    CHECK(!env.irq_level);
+    wr(RXFTLR, 15);  // 15 means 16 entries
+    burst(12);
+    CHECK(rd(RXFLR) == 15 && !env.irq_level);
+    burst(1);
+    CHECK(rd(RXFLR) == 16 && env.irq_level);
+    // TXE with a threshold: the transmit FIFO (always empty) is at or below any TXFTLR
+    wr(IMR, INT_TXE);
+    CHECK(env.irq_level);
+    // disabling the SSI clears the FIFOs and the level follows
+    wr(IMR, INT_RXF);
+    CHECK(env.irq_level);
+    wr(SSIENR, 0);
+    CHECK(rd(RXFLR) == 0 && !env.irq_level);
+
+    // a ISR/RISR write is a no-op; the mask is 6 bits
+    wr(ISR, 0xFF);
+    wr(RISR, 0xFF);
+    wr(IMR, 0xFFFFFFFFu);
+    CHECK(rd(IMR) == 0x3F);
+
+    // transfer mode 01, transmit only: the frames are shifted and not stored, so nothing overflows
+    fresh();
+    env = Env();
+    wr(SSIENR, 1);
+    cs(kCsLow);
+    wr(CTRLR0, 1u << 8);
+    burst(20);
+    CHECK(rd(RXFLR) == 0 && !(rd(RISR) & INT_RXO));
+    CHECK(ssi.tx_length() == 20);  // the flash did see them
+    wr(CTRLR0, 2u << 8);           // receive only and EEPROM read are not told apart from transmit and receive
+    burst(2);
+    CHECK(rd(RXFLR) == 2);
+    wr(CTRLR0, 3u << 8);
+    burst(2);
+    CHECK(rd(RXFLR) == 4);
+
+    // reset: everything back, the held interrupts too, and the host is told
+    fresh();
+    env = Env();
+    wr(SSIENR, 1);
+    cs(kCsLow);
+    burst(17);
+    wr(IMR, INT_RXO);
+    CHECK(env.irq_level);
+    CHECK(ssi.reset());
+    CHECK(!env.irq_level && ssi.sticky() == 0 && rd(RXFLR) == 0 && rd(IMR) == 0);
+
+    // the host failing stops the update where a raise would: the interrupt first, the requests after it
+    fresh();
+    env = Env();
+    wr(SSIENR, 1);
+    wr(DMACR, DMACR_TDMAE);
+    env.fail_irq = true;
+    env.tx_dreq_calls = 0;
+    wr(IMR, INT_TXE);  // the interrupt call fails ...
+    CHECK(env.irq_calls == 1);
+    wr(DMACR, DMACR_TDMAE | DMACR_RDMAE);
+    CHECK(env.irq_calls == 1);  // ... the level is already recorded as announced
+    env.fail_irq = false;
+    env.fail_dreq = true;
+    wr(DMATDLR, 5);
+    wr(DMACR, 0);  // the request falls: the call fails
+    CHECK(!ssi.dreq_tx());
+    env.fail_dreq = false;
+}
+
+static void test_the_bit_positions_and_the_held_interrupts() {
+    fresh();
+    env = Env();
+    // the bit positions are the datasheet's, whatever the names say (4.10.13: TXEIR 0, TXOIR 1, RXUIR 2, RXOIR 3, RXFIR 4)
+    CHECK(INT_TXE == 0x01 && INT_TXO == 0x02 && INT_RXU == 0x04 && INT_RXO == 0x08 && INT_RXF == 0x10 && INT_MST == 0x20 && SR_RFF == 0x10);
+    // the clear registers name their own interrupt, and ICR all of the held ones
+    fresh();
+    env = Env();
+    wr(SSIENR, 1);
+    cs(kCsLow);
+    burst(17);
+    (void)rd(DR0);
+    CHECK(rd(RISR) == (INT_TXE | INT_RXF | INT_RXO) && !(rd(SR) & SR_RFF));  // 16 entries, 17th discarded, one read: 15 left
+    CHECK((rd(RISR) & INT_RXO) && rd(TXOICR) == 0 && (rd(RISR) & INT_RXO));  // TXOICR does not clear RXO
+    CHECK(rd(RXUICR) == 0 && (rd(RISR) & INT_RXO) && rd(MSTICR) == 0 && (rd(RISR) & INT_RXO));
+    CHECK(rd(ICR) == 0 && !(rd(RISR) & INT_RXO));  // ICR clears RXO too
+    while (rd(RXFLR) != 0) (void)rd(DR0);
+    (void)rd(DR0);
+    CHECK(rd(RISR) == (INT_TXE | INT_RXU));
+    CHECK(rd(RXOICR) == 0 && (rd(RISR) & INT_RXU));  // RXOICR does not clear RXU
+    CHECK(rd(ICR) == 0 && rd(RISR) == INT_TXE);
+    ssi.set_sticky(0xFF);
+    CHECK(ssi.sticky() == (INT_TXO | INT_RXU | INT_RXO | INT_MST));
+    // RFF is full (16), not nearly full
+    fresh();
+    wr(SSIENR, 1);
+    cs(kCsLow);
+    burst(15);
+    CHECK(!(rd(SR) & SR_RFF) && (rd(SR) & SR_RFNE));
+    burst(1);
+    CHECK(rd(SR) & SR_RFF);
+    // DMACR: RDMAE is bit 0, TDMAE bit 1
+    fresh();
+    env = Env();
+    wr(SSIENR, 1);
+    cs(kCsLow);
+    wr(DMACR, 1);
+    CHECK(!env.tx_dreq);
+    burst(1);
+    CHECK(env.rx_dreq);
+    wr(DMACR, 2);
+    CHECK(env.tx_dreq && !env.rx_dreq);
+    // a failing host call is reported by reset(), the interrupt before the requests
+    fresh();
+    env = Env();
+    wr(SSIENR, 1);
+    wr(IMR, INT_TXE);
+    CHECK(env.irq_level);
+    env.fail_irq = true;
+    CHECK(!ssi.reset());
+    env.fail_irq = false;
+    fresh();
+    env = Env();
+    wr(DMACR, DMACR_TDMAE);
+    CHECK(env.tx_dreq);
+    env.fail_dreq = true;
+    CHECK(!ssi.reset());
+    env.fail_dreq = false;
+    wr(DMACR, DMACR_RDMAE);
+
+}
+
+static void test_the_dma_requests() {
+    fresh();
+    env = Env();
+    wr(SSIENR, 1);
+    cs(kCsLow);
+    // transmit: DMATDLR or fewer entries - the FIFO is always empty, so whenever TDMAE is set
+    CHECK(!env.tx_dreq && env.tx_dreq_calls == 0);
+    wr(DMACR, DMACR_TDMAE);
+    CHECK(env.tx_dreq && env.tx_dreq_calls == 1);
+    wr(DMACR, DMACR_TDMAE);
+    CHECK(env.tx_dreq_calls == 1);
+    wr(DMACR, 0);
+    CHECK(!env.tx_dreq && env.tx_dreq_calls == 2);
+    // receive: DMARDLR + 1 or more entries, and RDMAE
+    wr(DMARDLR, 3);
+    wr(DMACR, DMACR_RDMAE);
+    burst(3);
+    CHECK(!env.rx_dreq && env.rx_dreq_calls == 0);
+    burst(1);
+    CHECK(env.rx_dreq && env.rx_dreq_calls == 1);
+    (void)rd(DR0);
+    CHECK(!env.rx_dreq);
+    wr(DMARDLR, 15);  // 16 entries
+    burst(12);
+    CHECK(rd(RXFLR) == 15 && !env.rx_dreq);
+    burst(1);
+    CHECK(env.rx_dreq);
+    wr(DMACR, 0);
+    CHECK(!env.rx_dreq);
+    wr(DMACR, 0xFF);
+    CHECK(rd(DMACR) == 3 && env.rx_dreq && env.tx_dreq);
+    cs(kCsHigh);
+    cs(kCsLow);  // an asserting chip-select empties the FIFO
+    CHECK(!env.rx_dreq && env.tx_dreq);
+}
+
 int main() {
     PinHost host;
     const bool always_output_enabled = true;  // QSPI_SS is
@@ -104,8 +349,15 @@ int main() {
     cs(kCsHigh);
     SsiHost ssi_host;
     ssi_host.warn = on_warn;
+    ssi_host.irq = on_irq;
+    ssi_host.dreq = on_dreq;
     ssi.init(flash, kFlashSize, ssi_host);
     CHECK(ssi.bind_cs(&cs_pin));
+    fresh();
+    test_dr1_to_dr35_are_the_data_register_too();
+    test_the_fifos_and_the_interrupts();
+    test_the_bit_positions_and_the_held_interrupts();
+    test_the_dma_requests();
     fresh();
 
     // ---- the register file ----------------------------------------------------------------------------------------------
@@ -133,16 +385,16 @@ int main() {
     wr(MWCR, 0xFFFFFFFFu); wr(SER, 0xFFFFFFFFu); wr(TXFTLR, 0xFFFFFFFFu); wr(RXFTLR, 0xFFFFFFFFu); wr(IMR, 0xFFFFFFFFu); wr(DMACR, 0xFFFFFFFFu); wr(DMATDLR, 0xFFFFFFFFu); wr(DMARDLR, 0xFFFFFFFFu);
     CHECK(rd(MWCR) == 7 && rd(SER) == 1 && rd(TXFTLR) == 0xFF && rd(RXFTLR) == 0xFF && rd(IMR) == 0x3F && rd(DMACR) == 3 && rd(DMATDLR) == 0xFF && rd(DMARDLR) == 0xFF);
     wr(ISR, 0xFFFFFFFFu); wr(ICR, 0xFFFFFFFFu);
-    CHECK(rd(ISR) == 0 && rd(RISR) == 0 && rd(ICR) == 0 && rd(TXOICR) == 0 && rd(RXOICR) == 0 && rd(RXUICR) == 0 && rd(MSTICR) == 0);   // read-only, nothing is raised
+    CHECK(rd(ISR) == INT_TXE && rd(RISR) == INT_TXE && rd(ICR) == 0 && rd(TXOICR) == 0 && rd(RXOICR) == 0 && rd(RXUICR) == 0 && rd(MSTICR) == 0);   // read-only; only TXE (the transmit FIFO is empty) is raised
     CHECK(ssi.reset());
     CHECK(rd(SPI_CTRL_R0) == 0x03000000u && rd(IMR) == 0 && rd(SER) == 0 && rd(CTRLR0) == 0);
     fresh();
-    CHECK(rd(0x64) == 0xFFFFFFFFu && env.warns == 1 && env.warn_kind[0] == kSsiWarnRead && env.warn_offset[0] == 0x64);
+    CHECK(rd(0xFC) == 0xFFFFFFFFu && env.warns == 1 && env.warn_kind[0] == kSsiWarnRead && env.warn_offset[0] == 0xFC);
     env.warns = 0;
-    CHECK(rd(0x1064) == 0xFFFFFFFFu && env.warns == 2 && env.warn_kind[0] == kSsiWarnRead && env.warn_kind[1] == kSsiWarnReadAtomicArea);
+    CHECK(rd(0x10FC) == 0xFFFFFFFFu && env.warns == 2 && env.warn_kind[0] == kSsiWarnRead && env.warn_kind[1] == kSsiWarnReadAtomicArea);
     env.warns = 0;
-    wr(0x68, 0x1234);
-    CHECK(env.warns == 1 && env.warn_kind[0] == kSsiWarnWrite && env.warn_offset[0] == 0x68 && env.warn_value[0] == 0x1234);
+    wr(0xFC, 0x1234);
+    CHECK(env.warns == 1 && env.warn_kind[0] == kSsiWarnWrite && env.warn_offset[0] == 0xFC && env.warn_value[0] == 0x1234);
     env.warns = 0;
     // the atomic aliases decode against a read of the register
     wr(CTRLR0, 0x0F, kAtomicNormal);
@@ -294,10 +546,10 @@ int main() {
     cs(kCsLow);
     cs(kCsHigh);  // an empty command applies nothing
     CHECK(rd(RXFLR) == 0 && !ssi.cs_asserted());
-    // the ring is bounded: above its capacity the oldest byte is dropped (undefined in the reference)
+    // the test hook onto a full FIFO has nowhere to put the byte (a real frame is discarded and held as RXO, see test_the_fifos_and_the_interrupts)
     fresh();
     for (uint32_t i = 0; i < SsiBlock::kRxCapacity + 5; ++i) ssi.rx_push(static_cast<uint8_t>(i));
-    CHECK(rd(RXFLR) == SsiBlock::kRxCapacity && rd(DR0) == 5);
+    CHECK(rd(RXFLR) == SsiBlock::kRxCapacity && rd(DR0) == 0);
     // a DR0 alias read pops, whatever it is decoded for
     fresh();
     ssi.rx_push(0x11);

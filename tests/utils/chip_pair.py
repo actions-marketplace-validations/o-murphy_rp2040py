@@ -9,8 +9,6 @@ import pytest
 
 pytest.importorskip("rp2040py.native._rp2040", reason="the native extension is not built")
 
-import rp2040py._cortex_m0_core as pure_core
-import rp2040py._rp2040 as pure_rp2040
 from rp2040py._rp2040 import RP2040 as PurePython
 from rp2040py.native._rp2040 import RP2040 as Native
 
@@ -25,17 +23,7 @@ class _Quiet:
 
 
 def make_chip(cls, bootrom_words=None):
-    if cls is PurePython:
-        # The pure chip builds its CPU through the facade, which hands back the *native* core whenever
-        # the extension is installed - and a native core only accepts a native chip. Give this one the
-        # pure core, as the RP2040PY_SKIP_CYTHON=1 build would.
-        saved, pure_rp2040.CortexM0Core = pure_rp2040.CortexM0Core, pure_core.CortexM0Core
-        try:
-            chip = cls()
-        finally:
-            pure_rp2040.CortexM0Core = saved
-    else:
-        chip = cls()
+    chip = cls()
     chip.logger = _Quiet()
     if bootrom_words is not None:
         chip.load_bootrom(bootrom_words)

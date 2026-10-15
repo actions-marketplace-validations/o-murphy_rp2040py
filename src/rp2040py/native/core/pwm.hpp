@@ -39,7 +39,9 @@ using PwmWarnFn = RegWarnFn;
 
 struct PwmHost {
     PwmIrqFn irq = nullptr;
+    void* irq_ctx = nullptr;  // the context of `irq` alone, when it is not `ctx` (a line bound straight to the chip, core/mcu.hpp)
     PwmDreqFn dreq = nullptr;
+    void* dreq_ctx = nullptr;  // the context of `dreq` alone, when it is not `ctx` (a request bound straight to the chip, core/mcu.hpp)
     PwmPinChangedFn pin_changed = nullptr;
     PwmPinReadFn pin_read = nullptr;
     PwmWarnFn warn = nullptr;
@@ -103,6 +105,7 @@ public:
     }
 
     void detach() noexcept {
+        timer.detach();
         alarm_a.detach();
         alarm_b.detach();
         alarm_a_rise.detach();
@@ -230,12 +233,12 @@ public:
 
     uint32_t int_status() const noexcept { return (int_raw & int_enable) | int_force; }
 
-    bool check_interrupts() noexcept { return host_.irq(host_.ctx, int_status() != 0); }
+    bool check_interrupts() noexcept { return raise_irq(int_status() != 0); }
 
     bool channel_interrupt(uint32_t index) noexcept {
         int_raw |= 1u << index;
         if (!check_interrupts()) return false;
-        return host_.dreq(host_.ctx, index);  // also the DMA request of the channel
+        return raise_dreq(index);  // also the DMA request of the channel
     }
 
     bool gpio_set(int64_t index, bool value) noexcept {
@@ -341,6 +344,8 @@ public:
     WindowHandler window_handler() noexcept { return BlockWindow<PwmBlock>::handler(this); }
 
 private:
+    bool raise_dreq(uint32_t channel) noexcept { return host_.dreq(host_.dreq_ctx != nullptr ? host_.dreq_ctx : host_.ctx, channel); }
+    bool raise_irq(bool level) noexcept { return host_.irq(host_.irq_ctx != nullptr ? host_.irq_ctx : host_.ctx, level); }
     PwmHost host_;
     Clock* clock_ = nullptr;
     double clock_freq_ = 0.0;

@@ -8,6 +8,19 @@ cdef extern from "memory_map.hpp" namespace "rp2040core":
     cdef const uint32_t kWordIndexed
     cdef const uint32_t kSubWord
     cdef const uint32_t kNotifyOnWrite
+    cdef const uint32_t kXip
+
+    ctypedef void (*XipAccessFn)(void* ctx, uint32_t address) noexcept
+    ctypedef uint32_t (*XipSramReadFn)(void* ctx, uint32_t address) noexcept
+    ctypedef void (*XipSramWriteFn)(void* ctx, uint32_t address, uint32_t value) noexcept
+
+    cdef cppclass XipHooks:
+        XipHooks() noexcept
+        XipAccessFn read_access
+        XipAccessFn write_access
+        XipSramReadFn sram_read
+        XipSramWriteFn sram_write
+        void* ctx
 
     cdef cppclass Region:
         uint32_t base
@@ -21,6 +34,7 @@ cdef extern from "memory_map.hpp" namespace "rp2040core":
         MemoryMap() noexcept
         int attach(const Region&) noexcept
         void clear() noexcept
+        void set_xip(const XipHooks&) noexcept
         int count() noexcept
         const Region& region(int) noexcept
         int read32(uint32_t, uint32_t*) noexcept

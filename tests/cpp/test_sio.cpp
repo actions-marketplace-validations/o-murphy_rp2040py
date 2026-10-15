@@ -20,6 +20,8 @@ struct Env {
     uint32_t gpio_in = 0, qspi_in = 0;
     uint32_t updates[64];
     int update_count = 0;
+    uint32_t qspi_updates[64];
+    int qspi_update_count = 0;
     uint32_t cycles = 0;
     uint32_t warn_kind[32], warn_offset[32];
     int64_t warn_value[32];
@@ -29,9 +31,13 @@ struct Env {
 
 static uint32_t host_gpio_in(void* c) { return static_cast<Env*>(c)->gpio_in; }
 static uint32_t host_qspi_in(void* c) { return static_cast<Env*>(c)->qspi_in; }
-static bool host_update_pins(void* c, uint32_t mask) {
+static bool host_update_pins(void* c, uint32_t mask, bool qspi) {
     Env* e = static_cast<Env*>(c);
-    if (e->update_count < 64) e->updates[e->update_count++] = mask;
+    if (qspi) {
+        if (e->qspi_update_count < 64) e->qspi_updates[e->qspi_update_count++] = mask;
+    } else if (e->update_count < 64) {
+        e->updates[e->update_count++] = mask;
+    }
     return !e->fail_updates;
 }
 static void host_add_cycles(void* c, uint32_t n) { static_cast<Env*>(c)->cycles += n; }
@@ -82,9 +88,17 @@ int main() {
     env.update_count = 0;
     sio.write32(GPIO_OUT, 0);  // unchanged: no re-evaluation
     CHECK(env.update_count == 0);
-    sio.write32(GPIO_HI_OUT, 0x3F);  // QSPI pins never trigger one
+    sio.write32(GPIO_HI_OUT, 0x3F);  // the QSPI pins are re-evaluated too, as their own bank
     sio.write32(GPIO_HI_OE_SET, 0x2);
     CHECK(sio.read32(GPIO_HI_OUT) == 0x3Fu && sio.read32(GPIO_HI_OE) == 0x2u && env.update_count == 0);
+    CHECK(env.qspi_update_count == 2 && env.qspi_updates[0] == 0x3Fu && env.qspi_updates[1] == 0x2u);
+    sio.write32(GPIO_HI_OUT, 0x3F);  // unchanged: nothing to tell
+    sio.write32(GPIO_HI_OE_XOR, 0x3);
+    sio.write32(GPIO_HI_OE_CLR, 0x1);
+    CHECK(env.qspi_update_count == 4 && env.qspi_updates[2] == 0x3u && env.qspi_updates[3] == 0x1u);
+    sio.write32(GPIO_HI_OE, 0);
+    sio.write32(GPIO_HI_OUT, 0);
+    env.qspi_update_count = 0;
     CHECK(sio.read32(GPIO_OUT_SET) == 0 && sio.read32(GPIO_HI_OE_XOR) == 0);  // the write-only aliases read as 0
     sio.write32(GPIO_OUT_CLR, -1);  // a "clear everything" mask given as a negative number
     sio.write32(GPIO_OUT_SET, 0x3FFFFFFFFLL);  // a set mask wider than 30 bits is masked

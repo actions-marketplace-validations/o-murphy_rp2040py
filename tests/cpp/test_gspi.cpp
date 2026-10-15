@@ -113,6 +113,7 @@ struct Rig {
     // `input_changed` runs on every set_input_value the shifter makes on the data pin: record the level driven.
     static bool data_input_changed(void* ctx, uint32_t, bool) {
         Rig* r = static_cast<Rig*>(ctx);
+        if (!r->data.pin(0).driven) return true;  // the chip's own drive of the line moved the pad (the input reads it): not one of the shifter's drives
         r->drives[r->drive_count++ % (kLog * 4)] = r->data.pin(0).raw_input_value ? 1 : 0;
         return r->data_inputs++ != r->fail_drive_on_call;
     }

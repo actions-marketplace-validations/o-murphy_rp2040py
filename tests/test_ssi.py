@@ -304,3 +304,111 @@ def test_disabling_the_ssi_clears_the_receive_fifo(rp2040_factory):
     chip.write_uint32(base + 0x08, 0)
     assert chip.read_uint32(base + 0x24) == 0
     assert not chip.read_uint32(base + 0x28) & 0x8  # SR.RFNE
+
+
+def test_dr1_to_dr35_are_the_data_register_too(rp2040_factory):
+    """Datasheet 4.10.12 ("Writing to any of these address locations has the same effect as pushing the data ... into the transmit FIFO. Reading from any of these locations has the same effect as popping data
+    from the receive FIFO") and the register list ("Data Register 0 (of 36)", 0x60 to 0xEC; RX_SAMPLE_DLY follows at 0xF0)."""
+    chip = rp2040_factory()
+    base = 0x18000000
+    chip.write_uint32(base + 0x08, 1)  # SSIENR
+    for offset in range(0x60, 0xF0, 4):
+        chip.write_uint32(base + offset, 0xAB)  # pushes one byte, whichever DR it is
+        assert chip.read_uint32(base + 0x24) == 1, hex(offset)  # RXFLR
+        chip.read_uint32(base + 0xEC if offset == 0x60 else base + 0x64)  # pops it through another DR
+        assert chip.read_uint32(base + 0x24) == 0, hex(offset)
+    chip.write_uint32(base + 0xF0, 0x55)  # RX_SAMPLE_DLY is a register of its own
+    assert chip.read_uint32(base + 0xF0) == 0x55 and chip.read_uint32(base + 0x24) == 0
+
+
+# --- the FIFOs, the interrupt and the DMA requests (datasheet 4.10.5-4.10.9; docs/records/0098) -------------------------------------
+
+
+def _watch(rp2040):
+    """Records what the SSI tells the chip: the interrupt lines and the DMA requests."""
+    events = []
+
+    class _Dma:
+        def set_dreq(self, channel):
+            events.append(("dreq", int(channel), 1))
+
+        def clear_dreq(self, channel):
+            events.append(("dreq", int(channel), 0))
+
+    rp2040.dma = _Dma()
+    original = rp2040.set_interrupt
+
+    def set_interrupt(irq, value):
+        events.append(("irq", int(irq), int(bool(value))))
+        original(irq, value)
+
+    rp2040.set_interrupt = set_interrupt
+    return events
+
+
+def _selected(rp2040, ssi):
+    ssi.write_uint32(ssi_mod.SSI_SSIENR, 1)
+    rp2040.qspi[1].ctrl = _CS_FORCE_LOW
+    rp2040.qspi[1].check_for_updates()
+
+
+def test_the_receive_fifo_is_16_deep_and_a_full_one_holds_rxo(rp2040_factory):
+    rp2040, ssi = _ssi(rp2040_factory)
+    _selected(rp2040, ssi)
+    for byte in range(17):
+        ssi.write_uint32(ssi_mod.SSI_DR0, byte)
+    assert ssi.read_uint32(ssi_mod.SSI_RXFLR) == 16
+    assert ssi.read_uint32(ssi_mod.SSI_SR) & 0x10  # RFF
+    assert ssi.read_uint32(ssi_mod.SSI_RISR) & 0x8  # RXOIR: the 17th frame was discarded
+    assert ssi.read_uint32(ssi_mod.SSI_RXOICR) == 0
+    assert not ssi.read_uint32(ssi_mod.SSI_RISR) & 0x8
+
+
+def test_reading_an_empty_fifo_returns_zero_and_holds_rxu(rp2040_factory):
+    _, ssi = _ssi(rp2040_factory)
+    assert ssi.read_uint32(ssi_mod.SSI_DR0) == 0
+    assert ssi.read_uint32(ssi_mod.SSI_RISR) & 0x4  # RXUIR
+    ssi.read_uint32(ssi_mod.SSI_ICR)
+    assert not ssi.read_uint32(ssi_mod.SSI_RISR) & 0x4
+
+
+def test_xip_irq_is_the_combined_masked_interrupt_and_follows_the_levels(rp2040_factory):
+    rp2040, ssi = _ssi(rp2040_factory)
+    events = _watch(rp2040)
+    _selected(rp2040, ssi)
+    assert ssi.read_uint32(ssi_mod.SSI_RISR) == 0x1  # TXEIR: the transmit FIFO is empty
+    assert ssi.read_uint32(ssi_mod.SSI_ISR) == 0
+    ssi.write_uint32(ssi_mod.SSI_IMR, 0x10)  # RXFIM
+    ssi.write_uint32(ssi_mod.SSI_RXFTLR, 1)  # RXF at two or more entries
+    assert events == []
+    ssi.write_uint32(ssi_mod.SSI_DR0, 0)
+    assert events == []
+    ssi.write_uint32(ssi_mod.SSI_DR0, 0)
+    assert events == [("irq", 6, 1)]
+    ssi.read_uint32(ssi_mod.SSI_DR0)
+    assert events == [("irq", 6, 1), ("irq", 6, 0)]
+
+
+def test_the_dma_requests_follow_the_thresholds_and_dmacr(rp2040_factory):
+    rp2040, ssi = _ssi(rp2040_factory)
+    events = _watch(rp2040)
+    _selected(rp2040, ssi)
+    ssi.write_uint32(ssi_mod.SSI_DMACR, 0x3)
+    assert ("dreq", 38, 1) in events and ("dreq", 39, 1) not in events  # the transmit FIFO is empty; nothing received
+    ssi.write_uint32(ssi_mod.SSI_DMARDLR, 1)  # DMARDLR + 1 = 2 entries
+    ssi.write_uint32(ssi_mod.SSI_DR0, 0)
+    assert ("dreq", 39, 1) not in events
+    ssi.write_uint32(ssi_mod.SSI_DR0, 0)
+    assert events[-1] == ("dreq", 39, 1)
+    ssi.write_uint32(ssi_mod.SSI_DMACR, 0)
+    assert events[-2:] == [("dreq", 38, 0), ("dreq", 39, 0)] or {("dreq", 38, 0), ("dreq", 39, 0)} <= set(events)
+
+
+def test_transmit_only_mode_stores_no_received_frame(rp2040_factory):
+    rp2040, ssi = _ssi(rp2040_factory)
+    _selected(rp2040, ssi)
+    ssi.write_uint32(ssi_mod.SSI_CTRLR0, 1 << 8)  # TMOD = 01
+    for _ in range(20):
+        ssi.write_uint32(ssi_mod.SSI_DR0, 0)
+    assert ssi.read_uint32(ssi_mod.SSI_RXFLR) == 0
+    assert not ssi.read_uint32(ssi_mod.SSI_RISR) & 0x8

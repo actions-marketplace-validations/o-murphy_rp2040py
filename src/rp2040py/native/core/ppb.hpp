@@ -2,7 +2,7 @@
 // pure-Python reference and the oracle (tests/test_ppb_diff.py).
 //
 // What it is: the registers the processor itself owns, at 0xE000E000 + offset - SysTick (SYST_CSR / RVR / CVR / CALIB), the NVIC (set/clear enable and pending words, the eight
-// priority words), and the SCB registers the RP2040 firmware touches (CPUID, ICSR, VTOR, SHPR2/3). Almost all of it is a *view of the CPU's own state*: the pending and enabled
+// priority words), and the SCB registers the RP2040 firmware touches (CPUID, ICSR, VTOR, AIRCR, SCR, CCR, SHPR2/3, SHCSR) and the MPU (stored, not enforced). Almost all of it is a *view of the CPU's own state*: the pending and enabled
 // words, the priority bitmaps, the exception flags and VTOR live in `Cpu` (core/cpu.hpp), which already reads them to take an exception - the block reads and writes those fields,
 // it owns none of them. What it does own is SysTick: a 24-bit down-counter on a `Timer32` (core/timer32.hpp) clocked from clk_sys whose TOP is RELOAD (a cycle of RELOAD + 1 ticks - the datasheet's "RELOAD = N-1" - which is also
 // how the counter comes round to RELOAD), and one compare alarm at 0 that sets COUNTFLAG and pends the SysTick exception when TICKINT is set.
@@ -43,13 +43,23 @@ namespace rp2040core {
 constexpr uint32_t kPpbWarnRead = kRegWarnRead, kPpbWarnWrite = kRegWarnWrite;
 using PpbWarnFn = RegWarnFn;
 
+// AIRCR.SYSRESETREQ with a valid VECTKEY: the host resets the core (datasheet 2.4.2.9: "Reset the core only"). Called from inside the register write.
+using PpbSystemResetFn = void (*)(void* ctx);
+
 struct PpbHost {
     PpbWarnFn warn = nullptr;
+    PpbSystemResetFn system_reset_request = nullptr;
     void* ctx = nullptr;
 };
 
 namespace ppb_regs {
-constexpr uint32_t CPUID = 0xD00, ICSR = 0xD04, VTOR = 0xD08, SHPR2 = 0xD1C, SHPR3 = 0xD20;
+constexpr uint32_t CPUID = 0xD00, ICSR = 0xD04, VTOR = 0xD08, AIRCR = 0xD0C, SCR = 0xD10, CCR = 0xD14, SHPR2 = 0xD1C, SHPR3 = 0xD20, SHCSR = 0xD24;
+constexpr uint32_t MPU_TYPE = 0xD90, MPU_CTRL = 0xD94, MPU_RNR = 0xD98, MPU_RBAR = 0xD9C, MPU_RASR = 0xDA0;
+constexpr uint32_t kVtorMask = 0xFFFFFF00u, kShpr2Mask = 0xC0000000u, kShpr3Mask = 0xC0C00000u;
+constexpr uint32_t kAircrVectKey = 0x05FA, kAircrReadValue = 0xFA050000u, kAircrSysResetReq = 1u << 2;
+constexpr uint32_t kScrMask = 0x16u, kCcrValue = 0x208u, kShcsrSvcallPended = 1u << 15;
+constexpr uint32_t kMpuTypeValue = 0x800u, kMpuCtrlMask = 0x7u, kMpuRnrMask = 0xFu, kMpuRbarAddrMask = 0xFFFFFF00u, kMpuRbarValid = 1u << 4, kMpuRasrMask = 0x1707FF3Fu;
+constexpr uint32_t kMpuRegions = 8;
 constexpr uint32_t SYST_CSR = 0x010, SYST_RVR = 0x014, SYST_CVR = 0x018, SYST_CALIB = 0x01C;
 constexpr uint32_t NVIC_ISER = 0x100, NVIC_ICER = 0x180, NVIC_ISPR = 0x200, NVIC_ICPR = 0x280;
 constexpr uint32_t NVIC_IPR0 = 0x400, NVIC_IPR_END = 0x420;  // eight words, 0x400..0x41C
@@ -71,6 +81,9 @@ public:
     bool count_flag = false, clk_source = false, int_enable = false;
     bool systick_enable = false;  // SYST_CSR.ENABLE as written; the counter also needs a running clock (the tick, or clk_sys)
     uint32_t reload = 0;
+    // System control state the PPB itself owns (the MPU is stored and read back, never enforced): SCR, MPU_CTRL, MPU_RNR and the eight RBAR / RASR pairs.
+    uint32_t scr = 0, mpu_ctrl = 0, mpu_rnr = 0;
+    uint32_t mpu_rbar[ppb_regs::kMpuRegions] = {}, mpu_rasr[ppb_regs::kMpuRegions] = {};
 
     // Binds the block to the CPU whose private bus it is, the chip's clock and its clk_sys, and runs the reference's constructor: TOP, mode and alarm target, then reset().
     // `max_hardware_irq` is the CPU's (the highest IRQ a chip raises): ICPR cannot clear a pending bit at or below it.
@@ -94,6 +107,10 @@ public:
     // `RESETS`-less: the PPB is part of the processor, a chip reset puts SysTick back to stopped, reload 0xFFFFFF, counter 0xFFFFFF (the reference writes through its own registers).
     void reset() noexcept {
         using namespace ppb_regs;
+        scr = 0;
+        mpu_ctrl = 0;
+        mpu_rnr = 0;
+        for (uint32_t i = 0; i < kMpuRegions; ++i) mpu_rbar[i] = mpu_rasr[i] = 0;
         write(SYST_CSR, 0);
         write(SYST_RVR, 0xFFFFFFu);
         timer.set(kSysTickTop);
@@ -123,6 +140,15 @@ public:
                        (pending_interrupts ? ISRPENDING : 0u) | (core.vect_pending() << VECTPENDING_SHIFT) | (core.ipsr & VECTACTIVE_MASK);
             }
             case VTOR: return core.vtor;
+            case AIRCR: return kAircrReadValue;
+            case SCR: return scr;
+            case CCR: return kCcrValue;
+            case SHCSR: return core.pending_svcall ? kShcsrSvcallPended : 0u;
+            case MPU_TYPE: return kMpuTypeValue;
+            case MPU_CTRL: return mpu_ctrl;
+            case MPU_RNR: return mpu_rnr;
+            case MPU_RBAR: return mpu_rnr < kMpuRegions ? (mpu_rbar[mpu_rnr] | mpu_rnr) : 0u;
+            case MPU_RASR: return mpu_rnr < kMpuRegions ? mpu_rasr[mpu_rnr] : 0u;
             case NVIC_ISPR:
             case NVIC_ICPR: return core.pending_interrupts;
             case NVIC_ISER:
@@ -176,7 +202,27 @@ public:
                 }
                 if (word & PENDSTCLR) core.pending_systick = false;
                 return true;
-            case VTOR: core.vtor = word; return true;
+            case VTOR: core.vtor = word & kVtorMask; return true;
+            case AIRCR:
+                // Only a write with VECTKEY 0x05FA is taken; SYSRESETREQ resets the core, VECTCLRACTIVE (a debug bit) is ignored.
+                if (((word >> 16) & 0xFFFFu) == kAircrVectKey && (word & kAircrSysResetReq) && host_.system_reset_request) host_.system_reset_request(host_.ctx);
+                return true;
+            case SCR: scr = word & kScrMask; return true;
+            case CCR:
+            case MPU_TYPE: return true;  // read-only
+            case SHCSR:
+                core.pending_svcall = (word & kShcsrSvcallPended) != 0;
+                if (core.pending_svcall) core.interrupts_updated = true;
+                return true;
+            case MPU_CTRL: mpu_ctrl = word & kMpuCtrlMask; return true;
+            case MPU_RNR: mpu_rnr = word & kMpuRnrMask; return true;
+            case MPU_RBAR:
+                if (word & kMpuRbarValid) mpu_rnr = word & kMpuRnrMask;
+                if (mpu_rnr < kMpuRegions) mpu_rbar[mpu_rnr] = word & kMpuRbarAddrMask;
+                return true;
+            case MPU_RASR:
+                if (mpu_rnr < kMpuRegions) mpu_rasr[mpu_rnr] = word & kMpuRasrMask;
+                return true;
             case NVIC_ISPR:
                 core.pending_interrupts |= word;
                 core.interrupts_updated = true;
@@ -187,8 +233,8 @@ public:
                 core.interrupts_updated = true;
                 return true;
             case NVIC_ICER: core.enabled_interrupts &= ~word; return true;
-            case SHPR2: core.shpr2 = word; return true;
-            case SHPR3: core.shpr3 = word; return true;
+            case SHPR2: core.shpr2 = word & kShpr2Mask; return true;
+            case SHPR3: core.shpr3 = word & kShpr3Mask; return true;
             case SYST_CSR:
                 clk_source = (word & (1u << 2)) != 0;
                 int_enable = (word & (1u << 1)) != 0;

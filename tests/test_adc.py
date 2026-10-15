@@ -123,3 +123,31 @@ def test_div_has_no_bits_above_the_integer_part():
     chip = RP2040()
     chip.write_uint32(ADC_BASE + DIV, 0xFFFFFFFF)
     assert chip.read_uint32(ADC_BASE + DIV) == 0xFFFFFF
+
+
+def test_draining_the_fifo_below_the_threshold_takes_the_irq_line_down():
+    """RP2040 datasheet, 4.9.2.6: "The interrupt is cleared by draining the FIFO to a level lower than FCS.THRESH"."""
+    chip = RP2040()
+    adc = chip.adc
+    levels = []
+    real = chip.set_interrupt
+    chip.set_interrupt = lambda irq, level: (levels.append(level), real(irq, level))[1]  # type: ignore[method-assign]
+    chip.write_uint32(ADC_BASE + FCS, 1 | (2 << 24))  # FIFO enabled, THRESH 2
+    chip.write_uint32(ADC_BASE + 0x18, 1)  # INTE
+    adc.complete_adc_read(1, False)
+    adc.complete_adc_read(2, False)
+    assert levels[-1] is True
+    chip.read_uint32(ADC_BASE + FIFO_REG)
+    assert levels[-1] is False
+
+
+def test_clearing_en_halts_the_free_running_capture():
+    """RP2040 datasheet, 4.9.2: "The ADC can be disabled again at any time by clearing CS.EN"; the conversion in flight finishes and no new one starts."""
+    chip = RP2040()
+    started = []
+    chip.adc.on_adc_read = lambda channel: started.append(channel)
+    chip.write_uint32(ADC_BASE + CS, 1 | (1 << 3))  # EN | START_MANY
+    assert len(started) == 1
+    chip.write_uint32(ADC_BASE + CS, 1 << 3)  # EN cleared, START_MANY left
+    chip.adc.complete_adc_read(5, False)
+    assert len(started) == 1

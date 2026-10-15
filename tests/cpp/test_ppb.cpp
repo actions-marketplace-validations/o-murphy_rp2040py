@@ -23,7 +23,9 @@ struct Warn {
     uint32_t kind[8], offset[8];
     int64_t value[8];
     int n = 0;
+    int resets = 0;  // AIRCR.SYSRESETREQ requests
 };
+static void on_system_reset(void* ctx) { ++static_cast<Warn*>(ctx)->resets; }
 static void on_warn(void* ctx, uint32_t kind, uint32_t offset, int64_t value) {
     Warn* w = static_cast<Warn*>(ctx);
     if (w->n < 8) {
@@ -46,6 +48,7 @@ struct Rig {
     Rig() {
         PpbHost host;
         host.warn = on_warn;
+        host.system_reset_request = on_system_reset;
         host.ctx = &warns;
         ppb.init(&cpu, &clk, host, kHz, kIrqMax);
         ppb.tick_changed(kSysTickRefClk);  // the watchdog's tick is running
@@ -284,14 +287,98 @@ static void check_scb_registers() {
     r.ppb.write(SHPR2, 0x40000000u);
     r.ppb.write(SHPR3, 0xC0400000u);
     CHECK(r.cpu.shpr2 == 0x40000000u && r.ppb.read(SHPR3) == 0xC0400000u && r.cpu.shpr3 == 0xC0400000u);
+    // reserved bits do not stick: VTOR[7:0], everything in SHPR2 but PRI_11, everything in SHPR3 but PRI_15 / PRI_14
+    r.ppb.write(VTOR, 0xFFFFFFFFu);
+    r.ppb.write(SHPR2, 0xFFFFFFFFu);
+    r.ppb.write(SHPR3, 0xFFFFFFFFu);
+    CHECK(r.ppb.read(VTOR) == 0xFFFFFF00u && r.ppb.read(SHPR2) == 0xC0000000u && r.ppb.read(SHPR3) == 0xC0C00000u);
+}
+
+static void check_aircr() {
+    Rig r;
+    CHECK(r.ppb.read(AIRCR) == 0xFA050000u);
+    r.ppb.write(AIRCR, 0x05FA0004u);  // VECTKEY + SYSRESETREQ
+    CHECK(r.warns.resets == 1);
+    r.ppb.write(AIRCR, 0x00000004u);  // no key: ignored
+    r.ppb.write(AIRCR, 0x05FB0004u);
+    r.ppb.write(AIRCR, 0xFA050004u);  // the read-back key is not the write key
+    r.ppb.write(AIRCR, 0x15FA0004u);  // all sixteen bits of the key count
+    r.ppb.write(AIRCR, 0x05FA0002u);  // VECTCLRACTIVE: ignored
+    r.ppb.write(AIRCR, 0x05FA0000u);
+    CHECK(r.warns.resets == 1 && r.warns.n == 0);
+    r.ppb.write(AIRCR, 0x05FA0004u);
+    CHECK(r.warns.resets == 2);
+    PpbBlock bare;  // no host hook installed: the request is dropped, nothing crashes
+    Clock clk;
+    Cpu cpu;
+    PpbHost host;
+    bare.init(&cpu, &clk, host, kHz, kIrqMax);
+    bare.write(AIRCR, 0x05FA0004u);
+    bare.detach();
+}
+
+static void check_scr_ccr_shcsr() {
+    Rig r;
+    r.ppb.write(SCR, 0xFFFFFFFFu);
+    CHECK(r.ppb.read(SCR) == 0x16u);
+    CHECK(r.ppb.read(CCR) == 0x208u);
+    r.ppb.write(CCR, 0);
+    CHECK(r.ppb.read(CCR) == 0x208u);
+    CHECK(r.ppb.read(SHCSR) == 0);
+    r.cpu.interrupts_updated = false;
+    r.ppb.write(SHCSR, 0xFFFFFFFFu);
+    CHECK(r.cpu.pending_svcall && r.ppb.read(SHCSR) == (1u << 15) && r.cpu.interrupts_updated);
+    r.ppb.write(SHCSR, 0);
+    CHECK(!r.cpu.pending_svcall && r.ppb.read(SHCSR) == 0);
+    r.ppb.reset();
+    CHECK(r.ppb.read(SCR) == 0);
+    CHECK(r.warns.n == 0);
+}
+
+static void check_mpu() {
+    Rig r;
+    CHECK(r.ppb.read(MPU_TYPE) == 0x800u);
+    r.ppb.write(MPU_TYPE, 0);
+    CHECK(r.ppb.read(MPU_TYPE) == 0x800u);
+    r.ppb.write(MPU_CTRL, 0xFFFFFFFFu);
+    CHECK(r.ppb.read(MPU_CTRL) == 7u);
+    r.ppb.write(MPU_RNR, 0xFFFFFFFFu);
+    CHECK(r.ppb.read(MPU_RNR) == 0xFu);
+    CHECK(r.ppb.read(MPU_RBAR) == 0 && r.ppb.read(MPU_RASR) == 0);  // region 15 does not exist: reads 0
+    r.ppb.write(MPU_RBAR, 0xFFFFFFFFu);
+    r.ppb.write(MPU_RASR, 0xFFFFFFFFu);
+    CHECK(r.ppb.read(MPU_RBAR) == 0 && r.ppb.read(MPU_RASR) == 0);
+    for (uint32_t region = 0; region < 8; ++region) {
+        r.ppb.write(MPU_RNR, region);
+        r.ppb.write(MPU_RBAR, 0x20000000u + region * 0x100u + 0xF);  // ADDR 31:8; VALID is bit 4, the low bits are not stored
+        r.ppb.write(MPU_RASR, 0xFFFFFFFFu);
+    }
+    for (uint32_t region = 0; region < 8; ++region) {
+        r.ppb.write(MPU_RNR, region);
+        CHECK(r.ppb.read(MPU_RBAR) == 0x20000000u + region * 0x100u + region);  // REGION reads back RNR
+        CHECK(r.ppb.read(MPU_RASR) == 0x1707FF3Fu);
+    }
+    r.ppb.write(MPU_RNR, 8);  // the first number past the last region: reads 0, writes are dropped (and never reach the neighbouring array)
+    r.ppb.write(MPU_RBAR, 0x40000000u);
+    r.ppb.write(MPU_RASR, 0x1u);
+    CHECK(r.ppb.read(MPU_RBAR) == 0 && r.ppb.read(MPU_RASR) == 0);
+    r.ppb.write(MPU_RNR, 0);
+    CHECK(r.ppb.read(MPU_RASR) == 0x1707FF3Fu);
+    r.ppb.write(MPU_RBAR, 0x30000013u);  // VALID set: the region number in the write selects the region
+    CHECK(r.ppb.read(MPU_RNR) == 3u && r.ppb.read(MPU_RBAR) == 0x30000003u);
+    r.ppb.reset();
+    CHECK(r.ppb.read(MPU_CTRL) == 0 && r.ppb.read(MPU_RNR) == 0 && r.ppb.read(MPU_RBAR) == 0 && r.ppb.read(MPU_RASR) == 0);
+    r.ppb.write(MPU_RNR, 3);
+    CHECK(r.ppb.read(MPU_RBAR) == 3u && r.ppb.read(MPU_RASR) == 0);
+    CHECK(r.warns.n == 0);
 }
 
 static void check_warnings() {
     Rig r;
     CHECK(r.ppb.read(0x004) == 0xFFFFFFFFu);
     CHECK(r.warns.n == 1 && r.warns.kind[0] == kPpbWarnRead && r.warns.offset[0] == 0x004);
-    r.ppb.write(0xD0C, 0x5FA0004u);
-    CHECK(r.warns.n == 2 && r.warns.kind[1] == kPpbWarnWrite && r.warns.offset[1] == 0xD0C && r.warns.value[1] == 0x5FA0004);
+    r.ppb.write(0xD18, 0x5FA0004u);
+    CHECK(r.warns.n == 2 && r.warns.kind[1] == kPpbWarnWrite && r.warns.offset[1] == 0xD18 && r.warns.value[1] == 0x5FA0004);
 }
 
 static void check_reset_restores_systick() {
@@ -346,6 +433,9 @@ int main() {
     check_nvic_words();
     check_priorities();
     check_scb_registers();
+    check_aircr();
+    check_scr_ccr_shcsr();
+    check_mpu();
     check_warnings();
     check_reset_restores_systick();
     check_window_and_atomic();

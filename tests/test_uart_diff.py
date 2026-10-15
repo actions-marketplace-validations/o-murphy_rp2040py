@@ -7,7 +7,7 @@ divider, a reset with bytes queued) - a green differential that never overflowed
 """
 
 import pytest
-from utils.uart_diff import MUTANTS, UART0_BASE, Rig, coverage, generate, mutant_rig, run_pair
+from utils.uart_diff import MUTANTS, UART0_BASE, Rig, coverage, generate, generate_tx, mutant_rig, run_pair
 
 STEPS = 6000
 DIFF_STEPS = 4000
@@ -17,6 +17,12 @@ SEEDS = range(1, 9)
 @pytest.mark.parametrize("seed", SEEDS)
 def test_the_pure_python_uart_and_the_default_uart_agree(seed):
     divergence = run_pair(generate(seed, DIFF_STEPS))
+    assert divergence is None, f"seed {seed}: {divergence}"
+
+
+@pytest.mark.parametrize("seed", SEEDS)
+def test_the_two_agree_on_the_transmit_microscope(seed):
+    divergence = run_pair(generate_tx(seed, DIFF_STEPS))
     assert divergence is None, f"seed {seed}: {divergence}"
 
 
@@ -61,7 +67,10 @@ def test_a_damaged_candidate_is_caught_where_it_was_damaged(perturb):
 @pytest.mark.parametrize("mutant", MUTANTS)
 def test_a_change_of_the_reference_logic_is_caught(mutant):
     caught = [run_pair(generate(seed, 3000), candidate=lambda: mutant_rig(mutant)) for seed in (1, 2, 3)]
-    assert any(caught), f"{mutant}: three seeds of 3000 steps did not see it"
+    caught += [
+        run_pair(generate_tx(seed, 2500), candidate=lambda: mutant_rig(mutant)) for seed in (1, 2, 3)
+    ]  # the transmit microscope
+    assert any(caught), f"{mutant}: three seeds of 3000 steps (and of the transmit microscope) did not see it"
 
 
 def test_the_runs_exercise_what_they_claim_to():
@@ -69,6 +78,8 @@ def test_the_runs_exercise_what_they_claim_to():
     for seed in (1, 2, 3, 4):
         for name, count in coverage(generate(seed, STEPS)).items():
             total[name] = total.get(name, 0) + count
+    for name in ("tx.full_drop", "tick.mid_frame", "tick.byte", "tick.txintr_up", "tx.busy_queue"):
+        assert total.get(name, 0) >= 20, (name, total)
     for name in ("rx.full_drop", "dr.read.empty", "dr.read.data", "icr.alias", "icr.plain", "imsc", "dr.write.byte"):
         assert total.get(name, 0) >= 50, (name, total)
     for name in ("log.irq.1", "log.irq.0", "log.dreq.1", "log.dreq.0", "log.byte", "log.baud", "log.log"):

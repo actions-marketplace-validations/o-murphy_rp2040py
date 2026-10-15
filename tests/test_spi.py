@@ -105,3 +105,62 @@ def test_dma_requests_need_the_ssp_enabled_and_the_dma_enable(rp2040_factory):
     assert asked() == (False, True)
     chip.write_uint32(SPI0_BASE + SSPCR1, 0)
     assert asked() == (False, False)
+
+
+SSPDR, SSPSR, SSPCPSR = 0x008, 0x00C, 0x010
+BSY, RNE = 1 << 4, 1 << 2
+
+
+def _configured(rp2040_factory, *, clk_peri=125e6, cpsdvsr=2, scr=0, dss=7):
+    chip = rp2040_factory()
+    chip.clk_peri = clk_peri
+    chip.write_uint32(SPI0_BASE + SSPCPSR, cpsdvsr)
+    chip.write_uint32(SPI0_BASE + SSPCR0, (scr << 8) | dss)
+    chip.write_uint32(SPI0_BASE + SSPCR1, 1 << 1)  # SSE
+    return chip
+
+
+def test_a_word_is_busy_for_data_bits_times_the_bit_clock_period(rp2040_factory):
+    # "SSPCLKOUT = SSPCLK / (CPSDVSR * (1 + SCR))" (datasheet 4.4.3.6): 125 MHz / (2 * (1 + 1)) = 31.25 MHz, 32 ns a bit, 8 bits = 256 ns
+    chip = _configured(rp2040_factory, scr=1)
+    chip.write_uint32(SPI0_BASE + SSPDR, 0xA5)
+    assert chip.read_uint32(SPI0_BASE + SSPSR) & BSY
+    assert not chip.read_uint32(SPI0_BASE + SSPSR) & RNE  # the answer is not there before the last bit
+    chip.clock.tick(255)
+    assert chip.read_uint32(SPI0_BASE + SSPSR) & BSY
+    chip.clock.tick(1)
+    status = chip.read_uint32(SPI0_BASE + SSPSR)
+    assert not status & BSY and status & RNE
+    assert chip.read_uint32(SPI0_BASE + SSPDR) == 0  # the default device answers 0
+
+
+def test_a_burst_takes_the_sum_of_its_words(rp2040_factory):
+    chip = _configured(rp2040_factory, cpsdvsr=4, dss=15)  # 125 MHz / 4: 32 ns a bit, 16 bits = 512 ns a word
+    for value in range(4):
+        chip.write_uint32(SPI0_BASE + SSPDR, value)
+    chip.clock.tick(4 * 512 - 1)
+    assert chip.read_uint32(SPI0_BASE + SSPSR) & BSY
+    chip.clock.tick(1)
+    assert not chip.read_uint32(SPI0_BASE + SSPSR) & BSY
+
+
+def test_a_slow_device_holds_the_transfer_after_the_frame(rp2040_factory):
+    chip = _configured(rp2040_factory)
+    spi = chip.spi[0]
+    spi.on_transmit = lambda value: None  # answers whenever the test says
+    chip.write_uint32(SPI0_BASE + SSPDR, 1)
+    chip.clock.tick(10_000)  # far past the frame
+    assert chip.read_uint32(SPI0_BASE + SSPSR) & BSY
+    spi.complete_transmit(0x42)
+    assert not chip.read_uint32(SPI0_BASE + SSPSR) & BSY
+    assert chip.read_uint32(SPI0_BASE + SSPDR) == 0x42
+
+
+def test_a_fast_device_is_held_until_the_frame_ends(rp2040_factory):
+    chip = _configured(rp2040_factory)
+    spi = chip.spi[0]
+    spi.on_transmit = lambda value: spi.complete_transmit(0x99)  # answers from inside the callback
+    chip.write_uint32(SPI0_BASE + SSPDR, 1)
+    assert not chip.read_uint32(SPI0_BASE + SSPSR) & RNE
+    chip.clock.tick(10_000)
+    assert chip.read_uint32(SPI0_BASE + SSPDR) == 0x99

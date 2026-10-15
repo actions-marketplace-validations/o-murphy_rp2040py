@@ -78,7 +78,8 @@ cdef void _log_trampoline(void* ctx, uint32_t kind, uint32_t a, uint32_t b, uint
 
 cdef class CortexM0Core:
     def __cinit__(self, *args, **kwargs):
-        # The views are over the C++ arrays inside this very object: no allocation, no copy, valid as long as it lives.
+        # The CPU is the chip's (core/mcu.hpp), and so are the arrays the views are over: no allocation, no copy, valid as long as the chip lives - and this object holds it.
+        self._cpu = &(<RP2040?> args[0])._mcu.cpu
         self.registers = <unsigned int[:16]> self._cpu.registers
         self.interrupt_priorities = <unsigned int[:4]> self._cpu.interrupt_priorities
 
@@ -92,7 +93,7 @@ cdef class CortexM0Core:
         host.log = _log_trampoline
         host.failed = pending_flag()
         host.ctx = <void*> self
-        self._cpu.init(&self.rp2040._bus, host, MAX_HW_IRQ)
+        self._cpu.init(&self.rp2040._mcu.bus, host, MAX_HW_IRQ)
         self._cpu.registers[13] = 0xFFFFFFFCU
         self._cpu.banked_sp = 0xFFFFFFFCU
 
@@ -167,7 +168,7 @@ cdef class CortexM0Core:
     def _native_cpu_address(self):
         """The address of this core's C++ `Cpu`, for a native block that works on its state directly (the PPB: the pending/enabled
         words, the priorities, VTOR). The core owns the `Cpu` and must outlive the block: the block keeps a reference to this object."""
-        return <size_t> &self._cpu
+        return <size_t> self._cpu
 
     @property
     def vtor(self):

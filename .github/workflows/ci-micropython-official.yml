@@ -1,0 +1,107 @@
+name: MicroPython official tests (report only)
+
+# Runs MicroPython's own test files against the emulated board and LOGS what passes and what does not. Most groups only report: continue-on-error on the job, and the script
+# exits 0 - read the job summary / artifact. The PERIPHERALS group (ports/rp2, machine) is `strict: true`: it passes completely (record 0100: rp2_dma, after the integer clock)
+# so a FAIL, an ERROR or a HANG in it fails the job. A SKIP (a file that needs core 1, or skips itself) never does.
+
+on:
+  push:
+    paths-ignore: &non-code-paths
+      - "**.md"
+      - "docs/**"
+      - "LICENSE"
+  pull_request:
+    branches: [main]
+    paths-ignore: *non-code-paths
+
+concurrency:
+  group: ci-micropython-official-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  official-tests:
+    name: MicroPython ${{ matrix.micropython_tag }} official tests - ${{ matrix.group.name }} (${{ matrix.group.strict && 'gating' || 'report only' }})
+    runs-on: ubuntu-latest
+    continue-on-error: ${{ !matrix.group.strict }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        micropython_tag: ["1.29.0"]
+        # Groups of MicroPython's own test files (globs relative to its tests/). The CPU groups run the interpreter itself on the emulated Cortex-M0+ (Thumb inline assembly,
+        # soft-float, the language tests); the peripheral group is ports/rp2 and the machine module. basics is split in two to stay well inside the job limit.
+        group:
+          - name: peripherals (ports/rp2, machine)
+            globs: "ports/rp2/*.py extmod/machine_*.py"
+            strict: true
+          - name: micropython/ (interpreter internals)
+            globs: "micropython/*.py"
+            strict: true
+          - name: extmod (modules beyond machine)
+            globs: "extmod/[a-l]*.py extmod/[n-z]*.py"
+            strict: true
+          - name: unicode, stress, misc
+            globs: "unicode/*.py stress/*.py misc/*.py"
+            strict: true
+          # The tests below open files or import modules that sit next to them on the host: `push` copies them onto the board (see run_suite.sh). `exclude` lists the tests that cannot
+          # pass on a board whatever the emulator does (record 0098): the littlefs the board mounts does not check a file's open mode (its LFS_ASSERT is compiled out, so a write to a file
+          # opened for reading succeeds and the test, which expects OSError, then corrupts the data file for the ones after it), `sys.argv` and `fileno()` are unix-port features,
+          # and `__file__` is the host path in the expected output.
+          - name: io (files on the board)
+            globs: "io/*.py"
+            push: "io/data:"
+            exclude: "io/file1.py io/file_readinto.py io/file_readline.py io/file_stdio.py io/file_stdio2.py io/argv.py"
+            strict: true
+          - name: import (modules on the board)
+            globs: "import/*.py"
+            push: "import/*:"
+            exclude: "import/import_file.py"
+            strict: true
+          - name: CPU - float, inline assembly
+            globs: "float/*.py inlineasm/thumb/*.py"
+          - name: CPU - basics a-l
+            globs: "basics/[a-l]*.py"
+          - name: CPU - basics m-z
+            globs: "basics/[m-z]*.py"
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          python-version: "3.10"
+          github-token: ${{ github.token }}
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync
+
+      - name: Fetch the MicroPython firmware
+        run: uv run rp2040py micropython --image ${{ matrix.micropython_tag }} --fetch-fw-only
+
+      - name: Clone MicroPython at the same tag (its tests are the suite)
+        run: git clone --depth 1 --branch v${{ matrix.micropython_tag }} https://github.com/micropython/micropython.git "$RUNNER_TEMP/micropython"
+
+      - name: Run the suite (${{ matrix.group.strict && 'gating' || 'report only' }})
+        continue-on-error: ${{ !matrix.group.strict }}
+        env:
+          STRICT: ${{ matrix.group.strict && '1' || '0' }}
+          PUSH: ${{ matrix.group.push }}
+          EXCLUDE: ${{ matrix.group.exclude }}
+          PER_TEST_TIMEOUT: "90"  # a CI runner is slower than a workstation: the stochastic basics/class_setname_hazard_rand.py took longer than 45 s there
+        run: |
+          source .venv/bin/activate
+          set -f  # the group's globs are for the script (relative to MicroPython's tests/), not for this shell
+          GROUP_TITLE="${{ matrix.group.name }}" bash tests/micropython_official/run_suite.sh "$RUNNER_TEMP/micropython" ${{ matrix.micropython_tag }} "$RUNNER_TEMP/official-tests.md" ${{ matrix.group.globs }}
+
+      - name: Upload the report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: micropython-official-${{ matrix.micropython_tag }}-${{ strategy.job-index }}
+          path: |
+            ${{ runner.temp }}/official-tests.md
+            ${{ runner.temp }}/official-tests-full.md
+          if-no-files-found: ignore
+          retention-days: 14

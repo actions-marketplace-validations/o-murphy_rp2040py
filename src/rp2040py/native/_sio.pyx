@@ -51,10 +51,10 @@ cdef uint32_t _qspi_in_trampoline(void* ctx) noexcept:
     return result
 
 
-cdef bool _update_pins_trampoline(void* ctx, uint32_t pin_mask) noexcept:
+cdef bool _update_pins_trampoline(void* ctx, uint32_t pin_mask, bool qspi) noexcept:
     cdef RPSIO sio = <RPSIO> ctx
     try:
-        gpio = sio.rp2040.gpio
+        gpio = sio.rp2040.qspi if qspi else sio.rp2040.gpio
         for index in range(len(gpio)):
             if index < 32 and pin_mask & ((<uint32_t> 1) << index):
                 gpio[index].check_for_updates()
@@ -75,18 +75,7 @@ cdef void _cycles_trampoline(void* ctx, uint32_t cycles) noexcept:
 cdef void _warn_trampoline(void* ctx, uint32_t kind, uint32_t offset, int64_t value) noexcept:
     cdef RPSIO sio = <RPSIO> ctx
     try:
-        if kind == kSioWarnFifo:
-            sio.rp2040.logger.warning(
-                "SIO",
-                "Inter-core FIFO (0x50-0x58) is not implemented. core1/_thread is unsupported "
-                "(see docs/records/0053-core1-and-inter-core-fifo.md)",
-            )
-        elif kind == kSioWarnReadInvalid:
-            sio.rp2040.logger.warning("SIO", f"Read from invalid SIO address: {offset:x}")
-        elif kind == kSioWarnWriteInvalid:
-            sio.rp2040.logger.warning("SIO", f"Write to invalid SIO address: {offset:x}, value={value:x}")
-        else:  # kSioFailDivideByZero: what `dividend / divisor` raises in the pure block for a divisor that is 0 as 32 bits
-            park_error(ZeroDivisionError("division by zero"))
+        sio._warn_kind(kind, offset, value)
     except BaseException as error:
         park_error(error)
 
@@ -188,19 +177,40 @@ cdef class _InterpolatorView:
 
 
 cdef class RPSIO:
-    def __init__(self, rp2040):
+    def __init__(self, rp2040, mcu_index=-1):
         cdef SioHost host
         self.rp2040 = rp2040
         self.name = "SIO"
-        host.gpio_in = _gpio_in_trampoline
-        host.qspi_in = _qspi_in_trampoline
-        host.update_pins = _update_pins_trampoline
-        host.add_cycles = _cycles_trampoline
-        host.warn = _warn_trampoline
-        host.ctx = <void*> self
-        self._block.init(host)
+        self._from_mcu = mcu_index >= 0
+        if mcu_index >= 0:
+            # the chip's C++ `Mcu` holds this block (the pins' sources and the bus are already bound to it): this object is the Python view of it
+            self._block = <SioBlock*> <size_t> rp2040._native_sio_address()
+        else:
+            self._block = &self._own
+            host.gpio_in = _gpio_in_trampoline
+            host.qspi_in = _qspi_in_trampoline
+            host.update_pins = _update_pins_trampoline
+            host.add_cycles = _cycles_trampoline
+            host.warn = _warn_trampoline
+            host.ctx = <void*> self
+            self._own.init(host)
         self._interp0 = _InterpolatorView(self, 0)
         self._interp1 = _InterpolatorView(self, 1)
+
+    def _warn_kind(self, kind, offset, value):
+        """What the block reports (a warning, or the failure of a division by zero), worded for the logger or raised (the chip's host calls this for the block it built)."""
+        if kind == kSioWarnFifo:
+            self.rp2040.logger.warning(
+                "SIO",
+                "Inter-core FIFO (0x50-0x58) is not implemented. core1/_thread is unsupported "
+                "(see docs/records/0053-core1-and-inter-core-fifo.md)",
+            )
+        elif kind == kSioWarnReadInvalid:
+            self.rp2040.logger.warning("SIO", f"Read from invalid SIO address: {offset:x}")
+        elif kind == kSioWarnWriteInvalid:
+            self.rp2040.logger.warning("SIO", f"Write to invalid SIO address: {offset:x}, value={value:x}")
+        else:  # kSioFailDivideByZero: what `dividend / divisor` raises in the pure block for a divisor that is 0 as 32 bits
+            raise ZeroDivisionError("division by zero")
 
     # --- the pure block's attributes --------------------------------------------------------------
 

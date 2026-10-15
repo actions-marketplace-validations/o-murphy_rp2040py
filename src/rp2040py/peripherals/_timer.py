@@ -1,6 +1,7 @@
 import math
 from typing import TYPE_CHECKING
 
+from rp2040py.clock._simulation_clock import TICKS_PER_NANO
 from rp2040py.clock.clock import IAlarm, IClock
 from rp2040py.irq import IRQ
 from rp2040py.peripherals.peripheral import BasePeripheral
@@ -69,13 +70,21 @@ class RPTimer(BasePeripheral):
         # Simulated-time origin for this block's own count, so `reset()` can restart it from zero
         # the way real silicon does - `clock.nanos` is the *simulation's* time base and is never
         # reset (USB SOF, every other peripheral's alarms and the engine room all share it).
-        self._epoch_nanos: float = 0.0
+        self._epoch_ticks: int = 0  # in ticks of 1/16 ns, so that a difference with the clock stays exact however far into the run (docs/records/0100)
+        self._base_micros = 0.0  # the count at the epoch: the epoch is folded into it whenever the clock's origin moves, so neither grows without bound
+        self.clock.add_rebase_listener(self._rebased)  # ... and follows the clock when its origin moves
         self.alarms = [
             RPTimerAlarm(ALARM_0, self.clock.create_alarm(lambda: self._fire_alarm(0))),
             RPTimerAlarm(ALARM_1, self.clock.create_alarm(lambda: self._fire_alarm(1))),
             RPTimerAlarm(ALARM_2, self.clock.create_alarm(lambda: self._fire_alarm(2))),
             RPTimerAlarm(ALARM_3, self.clock.create_alarm(lambda: self._fire_alarm(3))),
         ]
+
+    def _rebased(self, delta: int) -> None:
+        self._epoch_ticks -= delta  # (the epoch is always near the clock's time, so this cannot run away)
+        if not self._frozen():
+            self._base_micros = self._micros()
+        self._epoch_ticks = self.clock.ticks
 
     def reset(self) -> None:
         """Registers and all four alarms, back to power-on (0089 Phase 5).
@@ -85,12 +94,13 @@ class RPTimer(BasePeripheral):
         reset - the emulated equivalent of a timer that kept counting through a power cut. The
         `RPTimerAlarm` objects themselves stay, since the clock holds them.
 
-        The count restarts from zero, as a real `TIMER` does: `_epoch_nanos` moves to now rather
+        The count restarts from zero, as a real `TIMER` does: `_epoch_ticks` moves to now rather
         than the simulation clock being rewound. Guest code therefore sees `time.ticks_ms()` /
         `time.monotonic()` start over after a reset, which is the observable that made this a
         fidelity gap rather than a detail.
         """
-        self._epoch_nanos = self.clock.nanos
+        self._epoch_ticks = self.clock.ticks
+        self._base_micros = 0.0
         self._latched_time_high = 0
         self._int_raw = 0
         self._int_enable = 0
@@ -131,7 +141,7 @@ class RPTimer(BasePeripheral):
         what "now" is (an alarm is armed as `target - now`, relative). Frozen while PAUSE is set or the tick is stopped."""
         if self._frozen():
             return self._frozen_micros
-        return (self.clock.nanos - self._epoch_nanos) / 1000 * self._scale()
+        return self._base_micros + (self.clock.ticks - self._epoch_ticks) / (1000 * TICKS_PER_NANO) * self._scale()
 
     def _nanos_for(self, counts: float) -> float:
         """Simulated nanoseconds until the count has advanced by `counts` (at the current tick)."""
@@ -254,7 +264,7 @@ class RPTimer(BasePeripheral):
                 for alarm in self.alarms:
                     alarm.clock_alarm.cancel()
         else:
-            self._epoch_nanos = self.clock.nanos - self._nanos_for(micros)
+            self._base_micros, self._epoch_ticks = micros, self.clock.ticks
             self._reschedule_armed_alarms()
 
     def _set_time(self, micros: float) -> None:
@@ -262,7 +272,7 @@ class RPTimer(BasePeripheral):
         if self._frozen():
             self._frozen_micros = micros
             return
-        self._epoch_nanos = self.clock.nanos - self._nanos_for(micros)
+        self._base_micros, self._epoch_ticks = micros, self.clock.ticks
         self._reschedule_armed_alarms()
 
     def _reschedule_armed_alarms(self) -> None:

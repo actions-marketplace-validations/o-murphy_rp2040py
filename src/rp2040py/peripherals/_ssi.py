@@ -1,7 +1,8 @@
 from collections import deque
 from typing import TYPE_CHECKING
 
-from rp2040py.gpio_pin import GPIOPinState
+from rp2040py._gpio_pin import GPIOPinState
+from rp2040py.irq import IRQ
 from rp2040py.peripherals.peripheral import BasePeripheral
 
 if TYPE_CHECKING:
@@ -39,6 +40,7 @@ SSI_DMARDLR = 0x00000054
 SSI_IDR = 0x00000058
 SSI_VERSION_ID = 0x0000005C
 SSI_DR0 = 0x00000060
+SSI_DR_LAST = 0x000000EC  # DR0..DR35: 36 word locations that all are the one data register (datasheet 4.10.13: "Data Register 0 (of 36)" and the note under 4.10.12)
 SSI_RX_SAMPLE_DLY = 0x000000F0
 SSI_SPI_CTRL_R0 = 0x000000F4
 SSI_TXD_DRIVE_EDGE = 0x000000F8
@@ -50,7 +52,7 @@ SSIENR_MASK = 0x1
 BAUDR_MASK = 0xFFFF
 SPI_CTRLR0_MASK = 0xFF07FB3F
 SPI_CTRLR0_RESET = 0x03000000
-# Registers that are stored and not acted on (the SSI is a flash-command model, with no FIFOs of its own, no interrupts and no DMA): offset -> writable mask. Every reset value is 0.
+# Registers that hold a programmed value (the thresholds, the interrupt mask, the DMA enables and levels act through `_update()`; MWCR and SER are stored only): offset -> writable mask. Every reset value is 0.
 STORED_REGISTERS = {
     SSI_MWCR: 0x7,
     SSI_SER: 0x1,
@@ -61,8 +63,31 @@ STORED_REGISTERS = {
     SSI_DMATDLR: 0xFF,
     SSI_DMARDLR: 0xFF,
 }
-# Read-only status that is always 0 here: the raw and masked interrupt status and the clear-on-read registers (nothing is ever raised).
-ZERO_REGISTERS = (SSI_ISR, SSI_RISR, SSI_TXOICR, SSI_RXOICR, SSI_RXUICR, SSI_MSTICR, SSI_ICR)
+# The clear-on-read registers (a read returns 0 and clears the sticky interrupt it names; ICR clears all of them) and the read-only interrupt status.
+CLEAR_ON_READ = (SSI_TXOICR, SSI_RXOICR, SSI_RXUICR, SSI_MSTICR, SSI_ICR)
+ZERO_REGISTERS = (SSI_ISR, SSI_RISR, *CLEAR_ON_READ)  # offsets whose write is a no-op
+
+# RISR / ISR / IMR bits (4.10.13): transmit FIFO empty, transmit FIFO overflow, receive FIFO underflow, receive FIFO overflow, receive FIFO full, multi-master contention
+INT_TXE, INT_TXO, INT_RXU, INT_RXO, INT_RXF, INT_MST = 1 << 0, 1 << 1, 1 << 2, 1 << 3, 1 << 4, 1 << 5
+STICKY_INTERRUPTS = (
+    INT_TXO | INT_RXU | INT_RXO | INT_MST
+)  # held until their clear register is read; TXE and RXF follow the FIFO levels
+CLEARS = {
+    SSI_TXOICR: INT_TXO,
+    SSI_RXOICR: INT_RXO,
+    SSI_RXUICR: INT_RXU,
+    SSI_MSTICR: INT_MST,
+    SSI_ICR: STICKY_INTERRUPTS,
+}
+SSI_SR_BUSY_BITS = 0x00000001
+SSI_SR_RFF_BITS = 0x00000010
+SSI_DMACR_RDMAE = 0x1
+SSI_DMACR_TDMAE = 0x2
+SSI_CTRLR0_TMOD_SHIFT = 8
+TMOD_TX_ONLY = 1  # "Transmit only": the received frames are not stored
+FIFO_DEPTH = 16
+DREQ_XIP_SSITX = 38
+DREQ_XIP_SSIRX = 39
 
 # JEDEC-standard SPI NOR flash commands - the subset the RP2040 bootrom's ROM_FUNC_FLASH_*
 # helpers (called by the Pico SDK's flash_range_erase()/flash_range_program(), themselves called
@@ -97,10 +122,16 @@ STATUS2_QE_BIT = 0x02  # quad-enable (status register 2) - reported permanently 
 JEDEC_ID = (0xEF, 0x40, 0x15)
 
 
+def is_data_register(offset: int) -> bool:
+    """Any of the 36 locations DR0..DR35: "Writing to any of these address locations has the same effect as pushing the data ... into the transmit FIFO. Reading from any of these locations has the same effect
+    as popping data from the receive FIFO" (4.10.12). The text says sixty-four locations and the register list 36; RX_SAMPLE_DLY sits at 0xF0, so 36 is what fits, and the list is followed."""
+    return SSI_DR0 <= offset <= SSI_DR_LAST and offset & 3 == 0
+
+
 class RPSSI(BasePeripheral):
     def __init__(self, rp2040: "RP2040", name: str):
         super().__init__(rp2040, name)
-        self._txflr = 0
+        self._txflr = 0  # the transmit FIFO is always empty: a frame written to DR is shifted at once (see the module notes in the record)
         self._baudr = 0
         self._crtlr0 = 0
         self._crtlr1 = 0
@@ -109,6 +140,12 @@ class RPSSI(BasePeripheral):
         self._rxsampldly = 0
         self._txddriveedge = 0
         self._stored = dict.fromkeys(STORED_REGISTERS, 0)
+        self._sticky = 0  # the held interrupts: TXO, RXU, RXO, MST
+        self._irq_level = (
+            False  # what the chip was last told: the combined, masked interrupt (XIP_IRQ) and the two DMA requests
+        )
+        self._dreq_tx = False
+        self._dreq_rx = False
 
         # Software-driven SPI NOR flash command state (see the module docstring above): `_tx_buffer`
         # accumulates the bytes shifted out via DR0 since chip-select was last asserted - real
@@ -164,10 +201,57 @@ class RPSSI(BasePeripheral):
         self._rxsampldly = 0
         self._txddriveedge = 0
         self._stored = dict.fromkeys(STORED_REGISTERS, 0)
+        self._sticky = 0
         self._write_enabled = False
         self._cs_asserted = self.rp2040.qspi[1].value == GPIOPinState.LOW
         self._tx_buffer = bytearray()
         self._rx_queue.clear()
+        self._update()
+
+    @property
+    def _risr(self) -> int:
+        """The raw interrupt status: TXE while the transmit FIFO holds `TXFTLR` entries or fewer (it is always empty here), RXF while the receive FIFO holds `RXFTLR + 1` or more, the rest held."""
+        txe = INT_TXE if self._txflr <= self._stored[SSI_TXFTLR] else 0
+        rxf = INT_RXF if len(self._rx_queue) >= self._stored[SSI_RXFTLR] + 1 else 0
+        return txe | rxf | self._sticky
+
+    @property
+    def _isr(self) -> int:
+        return self._risr & self._stored[SSI_IMR]
+
+    def _update(self) -> None:
+        """Tells the chip what changed: the combined interrupt (`XIP_IRQ`, NVIC 6 - "only the combined request goes to the interrupt controller", 4.10.7) and the DMA requests (transmit: the FIFO holds
+        `DMATDLR` entries or fewer; receive: `DMARDLR + 1` or more - 4.10.9), each only when its level moved."""
+        level = self._isr != 0
+        if level != self._irq_level:
+            self._irq_level = level
+            self.rp2040.set_interrupt(IRQ.XIP, level)
+        dma = self.rp2040.dma
+        for attribute, request, channel in (
+            (
+                "_dreq_tx",
+                bool(self._stored[SSI_DMACR] & SSI_DMACR_TDMAE) and self._txflr <= self._stored[SSI_DMATDLR],
+                DREQ_XIP_SSITX,
+            ),
+            (
+                "_dreq_rx",
+                bool(self._stored[SSI_DMACR] & SSI_DMACR_RDMAE)
+                and len(self._rx_queue) >= self._stored[SSI_DMARDLR] + 1,
+                DREQ_XIP_SSIRX,
+            ),
+        ):
+            if request != getattr(self, attribute):
+                setattr(self, attribute, request)
+                (dma.set_dreq if request else dma.clear_dreq)(channel)
+
+    def _receive(self, frame: int) -> None:
+        """A frame shifted in: stored unless the transfer mode is transmit only; a full FIFO discards it and holds RXO."""
+        if (self._crtlr0 >> SSI_CTRLR0_TMOD_SHIFT) & 3 == TMOD_TX_ONLY:
+            return
+        if len(self._rx_queue) >= FIFO_DEPTH:
+            self._sticky |= INT_RXO
+        else:
+            self._rx_queue.append(frame)
 
     def read_uint32(self, offset: int) -> int:
         if offset == SSI_TXFLR:
@@ -176,7 +260,13 @@ class RPSSI(BasePeripheral):
             return len(self._rx_queue)
         if offset in STORED_REGISTERS:
             return self._stored[offset]
-        if offset in ZERO_REGISTERS:
+        if offset == SSI_RISR:
+            return self._risr
+        if offset == SSI_ISR:
+            return self._isr
+        if offset in CLEAR_ON_READ:
+            self._sticky &= ~CLEARS[offset]
+            self._update()
             return 0
         if offset == SSI_CTRLR0:
             return self._crtlr0
@@ -188,7 +278,8 @@ class RPSSI(BasePeripheral):
             return self._baudr
         if offset == SSI_SR:
             rfne = SSI_SR_RFNE_BITS if self._rx_queue else 0
-            return SSI_SR_TFE_BITS | SSI_SR_TFNF_BITS | rfne
+            rff = SSI_SR_RFF_BITS if len(self._rx_queue) >= FIFO_DEPTH else 0
+            return SSI_SR_TFE_BITS | SSI_SR_TFNF_BITS | rfne | rff
         if offset == SSI_IDR:
             return 0x51535049
         if offset == SSI_VERSION_ID:
@@ -199,8 +290,14 @@ class RPSSI(BasePeripheral):
             return self._txddriveedge
         if offset == SSI_SPI_CTRL_R0:
             return self._spictlr0
-        if offset == SSI_DR0:
-            return self._rx_queue.popleft() if self._rx_queue else 0
+        if is_data_register(offset):
+            if self._rx_queue:
+                frame = self._rx_queue.popleft()
+            else:
+                frame = 0  # "0s are read back from the receive FIFO" (4.10.7); the underflow is held
+                self._sticky |= INT_RXU
+            self._update()
+            return frame
         return super().read_uint32(offset)
 
     def write_uint32(self, offset: int, value: int) -> None:
@@ -208,6 +305,7 @@ class RPSSI(BasePeripheral):
             pass  # read-only status: a write is a no-op
         elif offset in STORED_REGISTERS:
             self._stored[offset] = value & STORED_REGISTERS[offset]
+            self._update()
         elif offset == SSI_CTRLR0:
             self._crtlr0 = value & CTRLR0_MASK
         elif offset == SSI_CTRLR1:
@@ -216,6 +314,7 @@ class RPSSI(BasePeripheral):
             self._ssienr = value & SSIENR_MASK
             if not self._ssienr:
                 self._rx_queue.clear()  # "The transmit and receive FIFO buffers are cleared when the DW_apb_ssi is disabled (SSI_EN = 0)" (datasheet 4.10.5)
+                self._update()
         elif offset == SSI_BAUDR:
             self._baudr = value & BAUDR_MASK
         elif offset == SSI_RX_SAMPLE_DLY:
@@ -224,10 +323,10 @@ class RPSSI(BasePeripheral):
             self._txddriveedge = value & 0xFF
         elif offset == SSI_SPI_CTRL_R0:
             self._spictlr0 = value & SPI_CTRLR0_MASK
-        elif offset == SSI_DR0:
+        elif is_data_register(offset):
             if self._ssienr:
                 if self._cs_asserted:
-                    self._rx_queue.append(self._shift_byte(value & 0xFF))
+                    self._receive(self._shift_byte(value & 0xFF))
                 else:
                     # SSI's shift register/FIFOs are wired independently of the QSPI_SS GPIO pin -
                     # real hardware keeps shifting bytes through DR0 even while software has forced
@@ -238,7 +337,8 @@ class RPSSI(BasePeripheral):
                     # unrecognized opcode - but the RX FIFO must still gain an entry, or firmware's
                     # TXFLR/RXFLR-driven flow-control loop (bootrom's flash_put_get()) spins forever
                     # waiting for bytes that will never arrive.
-                    self._rx_queue.append(0xFF)
+                    self._receive(0xFF)
+                self._update()
         else:
             super().write_uint32(offset, value)
 
@@ -249,6 +349,7 @@ class RPSSI(BasePeripheral):
             # Chip-select asserting: start a fresh command.
             self._tx_buffer = bytearray()
             self._rx_queue = deque()
+            self._update()
         elif self._cs_asserted and not now_asserted:
             # Chip-select deasserting: the command (and, for PAGE_PROGRAM, however many data bytes
             # were shifted - not knowable in advance, only by where chip-select ends up deasserted)

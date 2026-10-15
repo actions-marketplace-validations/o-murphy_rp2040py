@@ -1,3 +1,4 @@
+from collections.abc import Callable
 from typing import TYPE_CHECKING
 
 from rp2040py.irq import MAX_HARDWARE_IRQ
@@ -9,9 +10,18 @@ if TYPE_CHECKING:
     from rp2040py.rp2040 import RP2040
 
 __all__ = (
+    "AIRCR",
+    "CCR",
     "CPUID",
     "ICSR",
+    "MPU_CTRL",
+    "MPU_RASR",
+    "MPU_RBAR",
+    "MPU_RNR",
+    "MPU_TYPE",
     "RPPPB",
+    "SCR",
+    "SHCSR",
     "SHPR2",
     "SHPR3",
     "VTOR",
@@ -20,8 +30,35 @@ __all__ = (
 CPUID = 0xD00
 ICSR = 0xD04
 VTOR = 0xD08
+AIRCR = 0xD0C
+SCR = 0xD10
+CCR = 0xD14
 SHPR2 = 0xD1C
 SHPR3 = 0xD20
+SHCSR = 0xD24
+MPU_TYPE = 0xD90
+MPU_CTRL = 0xD94
+MPU_RNR = 0xD98
+MPU_RBAR = 0xD9C
+MPU_RASR = 0xDA0
+
+# Reserved bits do not stick (RP2040 datasheet 2.4.4): VTOR[7:0] are reserved, SHPR2 keeps PRI_11 (31:30), SHPR3 keeps PRI_15 (31:30) and PRI_14 (23:22).
+VTOR_MASK = 0xFFFFFF00
+SHPR2_MASK = 0xC0000000
+SHPR3_MASK = 0xC0C00000
+AIRCR_VECTKEY = 0x05FA
+AIRCR_READ_VALUE = 0xFA050000  # "Reads as Unknown" in the datasheet, but VECTKEYSTAT reads 0xFA05
+AIRCR_SYSRESETREQ = 1 << 2
+SCR_MASK = 0x16  # SEVONPEND (4), SLEEPDEEP (2), SLEEPONEXIT (1)
+CCR_VALUE = 0x208  # STKALIGN and UNALIGN_TRP read as 1, writes ignored
+SHCSR_SVCALLPENDED = 1 << 15
+MPU_TYPE_VALUE = 0x800  # 8 unified regions (DREGION = 8), no separate instruction regions
+MPU_REGIONS = 8
+MPU_CTRL_MASK = 0x7
+MPU_RNR_MASK = 0xF
+MPU_RBAR_ADDR_MASK = 0xFFFFFF00
+MPU_RBAR_VALID = 1 << 4
+MPU_RASR_MASK = 0x1707FF3F
 
 SYST_CSR = 0x010  # SysTick Control and Status Register
 SYST_RVR = 0x014  # SysTick Reload Value Register
@@ -91,6 +128,8 @@ class RPPPB(BasePeripheral):
         )
         self.systick_reload = 0
         self.tick_hz = 0.0  # the watchdog's tick: SysTick's reference clock
+        # SYSRESETREQ (AIRCR bit 2): "Reset the core only" (datasheet 2.4.2.9) - the default handler resets the core and the PPB, not the chip.
+        self.on_system_reset_request: Callable[[], None] = self._default_system_reset_request
         self.clk_sys = self.rp2040.clk_sys
         self.systick_timer = Timer32(self.rp2040.clock, self.clk_sys)
 
@@ -125,7 +164,17 @@ class RPPPB(BasePeripheral):
             self.systick_timer.frequency = frequency
         self.systick_timer.enable = self.systick_enable and frequency > 0  # a stopped reference clock stops the counter
 
+    def _default_system_reset_request(self) -> None:
+        self.rp2040.core.reset()
+        self.reset()
+        self.rp2040.leave_reset()
+
     def reset(self) -> None:
+        self.scr = 0
+        self.mpu_ctrl = 0
+        self.mpu_rnr = 0
+        self.mpu_rbar = [0] * MPU_REGIONS
+        self.mpu_rasr = [0] * MPU_REGIONS
         self.write_uint32(SYST_CSR, 0)
         self.write_uint32(SYST_RVR, 0xFFFFFF)
         self.systick_timer.set(0xFFFFFF)
@@ -152,6 +201,28 @@ class RPPPB(BasePeripheral):
 
         if offset == VTOR:
             return core.vtor
+        if offset == AIRCR:
+            return AIRCR_READ_VALUE
+        if offset == SCR:
+            return self.scr
+        if offset == CCR:
+            return CCR_VALUE
+        if offset == SHCSR:
+            return SHCSR_SVCALLPENDED if core.pending_svcall else 0
+        if offset == MPU_TYPE:
+            return MPU_TYPE_VALUE
+        if offset == MPU_CTRL:
+            return self.mpu_ctrl
+        if offset == MPU_RNR:
+            return self.mpu_rnr
+        if offset == MPU_RBAR:
+            region = self.mpu_rnr
+            if region >= MPU_REGIONS:
+                return 0
+            return self.mpu_rbar[region] | region
+        if offset == MPU_RASR:
+            region = self.mpu_rnr
+            return self.mpu_rasr[region] if region < MPU_REGIONS else 0
 
         # NVIC
         if offset == NVIC_ISPR:
@@ -217,7 +288,40 @@ class RPPPB(BasePeripheral):
             return
 
         if offset == VTOR:
-            core.vtor = value
+            core.vtor = value & VTOR_MASK
+            return
+        if offset == AIRCR:
+            # Only a write with VECTKEY 0x05FA is taken; SYSRESETREQ resets the core, VECTCLRACTIVE (the debug bit) is ignored
+            if (value >> 16) & 0xFFFF == AIRCR_VECTKEY and value & AIRCR_SYSRESETREQ:
+                self.on_system_reset_request()
+            return
+        if offset == SCR:
+            self.scr = value & SCR_MASK
+            return
+        if offset == CCR or offset == MPU_TYPE:
+            return  # read-only
+        if offset == SHCSR:
+            if value & SHCSR_SVCALLPENDED:
+                core.pending_svcall = True
+                core.interrupts_updated = True
+            else:
+                core.pending_svcall = False
+            return
+        if offset == MPU_CTRL:
+            self.mpu_ctrl = value & MPU_CTRL_MASK
+            return
+        if offset == MPU_RNR:
+            self.mpu_rnr = value & MPU_RNR_MASK
+            return
+        if offset == MPU_RBAR:
+            if value & MPU_RBAR_VALID:
+                self.mpu_rnr = value & MPU_RNR_MASK
+            if self.mpu_rnr < MPU_REGIONS:
+                self.mpu_rbar[self.mpu_rnr] = value & MPU_RBAR_ADDR_MASK
+            return
+        if offset == MPU_RASR:
+            if self.mpu_rnr < MPU_REGIONS:
+                self.mpu_rasr[self.mpu_rnr] = value & MPU_RASR_MASK
             return
 
         # NVIC
@@ -248,10 +352,10 @@ class RPPPB(BasePeripheral):
             return
 
         if offset == SHPR2:
-            core.shpr2 = value
+            core.shpr2 = value & SHPR2_MASK
             return
         if offset == SHPR3:
-            core.shpr3 = value
+            core.shpr3 = value & SHPR3_MASK
             return
 
         # SysTick

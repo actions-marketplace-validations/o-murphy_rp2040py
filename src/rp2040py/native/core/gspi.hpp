@@ -44,17 +44,20 @@ public:
     GspiShifter(const GspiShifter&) = delete;  // the pins hold a pointer to this object
     GspiShifter& operator=(const GspiShifter&) = delete;
 
-    // Binds the shifter to its pins (each pin is position 0 of its own bank, one `GPIOPin` each) and registers it as a direct listener of CLK
+    // Binds the shifter to its pins (each pin at its slot of a bank, by default position 0 of a bank of one) and registers it as a direct listener of CLK
     // and CS. `data` is the pin it samples (the level the host drives) and drives (the chip's side).
-    bool attach(PinBank* clk, PinBank* data, PinBank* cs, const GspiHost& host) noexcept {
+    bool attach(PinBank* clk, PinBank* data, PinBank* cs, const GspiHost& host, uint32_t clk_slot = 0, uint32_t data_slot = 0, uint32_t cs_slot = 0) noexcept {
         clk_ = clk;
         data_ = data;
         cs_ = cs;
+        clk_slot_ = clk_slot;
+        data_slot_ = data_slot;
+        cs_slot_ = cs_slot;
         host_ = host;
         clear();
-        if (!clk_->add_direct_listener(0, &GspiShifter::clk_listener, this)) return false;
-        if (!cs_->add_direct_listener(0, &GspiShifter::cs_listener, this)) {
-            clk_->remove_direct_listener(0, &GspiShifter::clk_listener, this);
+        if (!clk_->add_direct_listener(clk_slot_, &GspiShifter::clk_listener, this)) return false;
+        if (!cs_->add_direct_listener(cs_slot_, &GspiShifter::cs_listener, this)) {
+            clk_->remove_direct_listener(clk_slot_, &GspiShifter::clk_listener, this);
             return false;
         }
         return true;
@@ -62,8 +65,8 @@ public:
 
     // Unregisters from the pins; the owner calls it before the shifter (or a pin) goes away.
     void detach() noexcept {
-        if (clk_ != nullptr) clk_->remove_direct_listener(0, &GspiShifter::clk_listener, this);
-        if (cs_ != nullptr) cs_->remove_direct_listener(0, &GspiShifter::cs_listener, this);
+        if (clk_ != nullptr) clk_->remove_direct_listener(clk_slot_, &GspiShifter::clk_listener, this);
+        if (cs_ != nullptr) cs_->remove_direct_listener(cs_slot_, &GspiShifter::cs_listener, this);
         clk_ = data_ = cs_ = nullptr;
     }
 
@@ -138,12 +141,12 @@ private:
         GspiShifter* self = static_cast<GspiShifter*>(ctx);
         if (new_state == kPinHigh && old_state != kPinHigh) {
             int level = 0;
-            if (!self->data_->state_code(0, &level)) return false;
+            if (!self->data_->state_code(self->data_slot_, &level)) return false;
             return self->on_clock_rising(level == kPinHigh);
         }
         if (new_state != kPinHigh && old_state == kPinHigh) {
             bool bit = false;
-            if (self->next_response_bit(&bit)) return self->data_->set_input_value(0, bit);
+            if (self->next_response_bit(&bit)) return self->data_->set_input_value(self->data_slot_, bit);
         }
         return true;
     }
@@ -151,6 +154,7 @@ private:
     PinBank* clk_ = nullptr;
     PinBank* data_ = nullptr;
     PinBank* cs_ = nullptr;
+    uint32_t clk_slot_ = 0, data_slot_ = 0, cs_slot_ = 0;  // each pin's position in its bank
     GspiHost host_;
     bool selected_ = false;
     uint32_t shift_reg_ = 0;

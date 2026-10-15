@@ -32,6 +32,7 @@ cdef extern from "sysinfo.hpp" namespace "rp2040core":
         WindowHandler window_handler() noexcept
 
 cdef class RP2040SysInfo:
-    cdef SysInfoBlock _block
+    cdef SysInfoBlock* _block  # the chip's (`Mcu` builds and wires it), or `_own` for a stand-in chip that has no `Mcu`
+    cdef SysInfoBlock _own
     cdef public object rp2040
     cdef public object name

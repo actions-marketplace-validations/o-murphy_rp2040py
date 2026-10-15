@@ -5,8 +5,8 @@ oracle (tests/test_ssi_diff.py); `peripherals/ssi.py` is the facade that picks b
 
 What a firmware sees is the C++ block: when the chip adopts this object (`RP2040.peripherals[0x18000] = ssi`) it registers the
 block's own C++ read/write functions in the bus's window table (see `_native_window`), so a bootrom's DR0/SR polling never touches
-Python. Chip-select is the QSPI_SS pin: when that is a native `GPIOPin` the block is a *direct listener* of it (an edge never
-enters Python); anything else gets a Python listener that forwards the level. The flash is the chip's own buffer, by pointer.
+Python. The chip's C++ `Mcu` builds the block (record 0096, step 3a): its window, its interrupt line (XIP_IRQ), its DMA requests and its chip-select listener (a *direct
+listener* of the QSPI_SS pin, so an edge never enters Python) are wired there; this object is only the Python view. The flash is the chip's own buffer, by pointer.
 
 The reference's private state is kept readable under its names (`_ssienr`, `_write_enabled`, `_cs_asserted`, `_rx_queue`,
 `_tx_buffer`, ...) as views of the C++ state: the tests and the oracle look at them. `_tx_buffer` shows the first 260 bytes of the
@@ -16,36 +16,11 @@ command (all the block keeps) and the *count* as its length.
 from libc.stdint cimport int64_t, uint8_t, uint32_t
 from libcpp cimport bool as cppbool
 
-from rp2040py.native._gpio_pin cimport GPIOPin
-from rp2040py.native._pending cimport park_error, raise_if_pending
+from rp2040py.native._pending cimport raise_if_pending
 from rp2040py.native._window_map cimport WindowHandler
 
-from rp2040py.gpio_pin import GPIOPinState
 
 __all__ = ("RPSSI",)
-
-
-cdef void _warn_trampoline(void* ctx, uint32_t kind, uint32_t offset, int64_t value) noexcept:
-    cdef RPSSI ssi = <RPSSI> ctx
-    try:
-        if kind == kSsiWarnRead:
-            ssi.warn(f"Unimplemented peripheral read from 0x{offset:x}")
-        elif kind == kSsiWarnReadAtomicArea:
-            ssi.warn("Unimplemented read from peripheral in the atomic operation region")
-        else:
-            ssi.warn(f"Unimplemented peripheral write to 0x{offset:x}: 0x{value:x}")
-    except BaseException as error:
-        park_error(error)
-
-
-cdef cppbool _cs_low_trampoline(void* ctx, cppbool* low) noexcept:
-    cdef RPSSI ssi = <RPSSI> ctx
-    try:
-        low[0] = ssi.rp2040.qspi[1].value == GPIOPinState.LOW
-    except BaseException as error:
-        park_error(error)
-        return False
-    return True
 
 
 cdef class _RxView:
@@ -103,55 +78,31 @@ cdef class _TxView:
 
 cdef class RPSSI:
     def __init__(self, rp2040, name):
-        cdef SsiHost host
-        cdef GPIOPin pin
-        native_flash = getattr(rp2040, "_native_flash_address", None)
-        if native_flash is None:
+        native_ssi = getattr(rp2040, "_native_ssi_address", None)
+        if native_ssi is None:
             raise TypeError(
-                f"the native SSI works on the native chip's flash buffer; {type(rp2040).__name__} is not that "
+                f"the native SSI is a view of a block of the native chip's C++ core; {type(rp2040).__name__} is not that "
                 "(use the pure-Python peripherals/_ssi.RPSSI with it)"
             )
-        flash_address, flash_size = native_flash()
+        # the chip's `Mcu` builds the block: its window, its interrupt line, its DMA requests and its chip-select listener are wired inside
+        self._from_mcu = True
+        self._block = <SsiBlock*> <size_t> native_ssi()
         self.rp2040 = rp2040
         self.name = name
-        self._cs_pin = rp2040.qspi[1]
-        self._cs_native = False
-        self._cs_listening = False
-        host.warn = _warn_trampoline
-        host.cs_low = _cs_low_trampoline
-        host.ctx = <void*> self
-        self._block.init(<uint8_t*> <size_t> flash_address, <uint32_t> flash_size, host)
-        if isinstance(self._cs_pin, GPIOPin):
-            pin = <GPIOPin> self._cs_pin
-            if not self._block.bind_cs(pin.bank_ptr()):
-                raise_if_pending()
-            self._cs_native = True
-            self._cs_listening = True
-        else:
-            if not self._block.reset():
-                raise_if_pending()
-            self._cs_pin.add_listener(self._on_cs_pin_changed)
-            self._cs_listening = True
 
-    def _on_cs_pin_changed(self, value, _last_value):
-        self._block.on_cs_change(value == GPIOPinState.LOW)
+    def _warn_kind(self, kind, offset, value):
+        """A register access the block does not implement, as the logger's message (the chip's host calls this for the block it built)."""
+        if kind == kSsiWarnRead:
+            self.warn(f"Unimplemented peripheral read from 0x{offset:x}")
+        elif kind == kSsiWarnReadAtomicArea:
+            self.warn("Unimplemented read from peripheral in the atomic operation region")
+        else:
+            self.warn(f"Unimplemented peripheral write to 0x{offset:x}: 0x{value:x}")
 
     def _detach(self):
         """Takes the block off the chip-select pin (the oracle's rig replaces an SSI after construction; a second one listening would apply every
         command to the same flash twice)."""
-        cdef GPIOPin pin
-        if not self._cs_listening:
-            return
-        if self._cs_native:
-            self._block.detach()
-        else:
-            self._cs_pin._listeners.discard(self._on_cs_pin_changed)
-        self._cs_listening = False
-
-    def __dealloc__(self):
-        # Safe whichever of this block and the pin's bank the collector frees first: the bank tells the block when it dies (core/pin.hpp's `bank_gone`).
-        if self._cs_native and self._cs_listening:
-            self._block.detach()
+        self._block.detach()
 
     # --- the reference's private state, as views --------------------------------------------------
 
@@ -184,6 +135,34 @@ cdef class RPSSI:
         # the not-acted-on registers by offset, as the reference's dict (MWCR, SER, TXFTLR, RXFTLR, IMR, DMACR, DMATDLR, DMARDLR)
         offsets = (0x0C, 0x10, 0x18, 0x1C, 0x2C, 0x4C, 0x50, 0x54)
         return {offset: self._block.stored(index) for index, offset in enumerate(offsets)}
+
+    @property
+    def _sticky(self):
+        return self._block.sticky()
+
+    @_sticky.setter
+    def _sticky(self, value):
+        self._block.set_sticky(<uint32_t> (value & 0xFFFFFFFF))
+
+    @property
+    def _risr(self):
+        return self._block.risr()
+
+    @property
+    def _isr(self):
+        return self._block.isr()
+
+    @property
+    def _irq_level(self):
+        return bool(self._block.irq_level())
+
+    @property
+    def _dreq_tx(self):
+        return bool(self._block.dreq_tx())
+
+    @property
+    def _dreq_rx(self):
+        return bool(self._block.dreq_rx())
 
     @property
     def _write_enabled(self):

@@ -57,7 +57,7 @@ def _drain_a_byte(candidate: Rig, step: int) -> None:
     ids=lambda f: f.__name__.lstrip("_"),
 )
 def test_a_damaged_candidate_is_caught_where_it_was_damaged(perturb):
-    divergence = run_pair(generate(4, 1500), perturb=perturb)
+    divergence = run_pair(generate(6, 1500), perturb=perturb)
     assert divergence is not None
     assert divergence.step == 700, divergence
 
@@ -87,4 +87,6 @@ def test_the_runs_exercise_what_they_claim_to():
         assert total.get(name, 0) >= 20, (name, total)
     for name in ("log.irq.1", "log.irq.0", "log.dreq.1", "log.dreq.0", "log.tx", "log.log"):
         assert total.get(name, 0) >= 20, (name, total)
+    for name in ("tick.in_frame", "frame.ended", "reply.held"):
+        assert total.get(name, 0) >= 10, (name, total)
     assert total.get("reset", 0) >= 20 and total.get("reset.busy", 0) >= 5, total

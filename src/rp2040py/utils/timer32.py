@@ -4,6 +4,7 @@ import math
 from collections.abc import Callable
 from enum import IntEnum
 
+from rp2040py.clock._simulation_clock import TICKS_PER_NANO
 from rp2040py.clock.clock import IClock
 
 
@@ -25,21 +26,32 @@ class Timer32:
         self._base_freq = base_freq
 
         self._base_value = 0
-        self._base_nanos: float = 0
+        self._base_ticks: int = 0  # the clock's time in ticks of 1/16 ns when the counter was last set
+        clock.add_rebase_listener(self._rebased)  # ... and it follows the clock when its origin moves
         self._top_value = 0xFFFFFFFF
         self._prescaler_value: float = 1
         self._timer_mode = TimerMode.INCREMENT
         self._enabled = True
         self.listeners: list[Callable[[], None]] = []
 
+    def _rebased(self, delta: int) -> None:
+        self._base_ticks -= delta
+        # Folded into the base value, so that `_base_ticks` stays at the clock's time instead of drifting away from it by `delta` every move (it would overflow in C++)
+        top_modulo = self._top_value * 2 if self._timer_mode == TimerMode.ZIGZAG else self._top_value + 1
+        if (
+            top_modulo and self._base_freq and self._prescaler_value and self._enabled
+        ):  # (a stopped counter has no time in it to fold)
+            self._base_value = self.raw_counter % top_modulo
+        self._base_ticks = self.clock.ticks
+
     def reset(self) -> None:
-        self._base_nanos = self.clock.nanos
+        self._base_ticks = self.clock.ticks
         self._base_value = 0
         self._updated()
 
     def set(self, value: int, zig_zag_down: bool = False) -> None:
         self._base_value = self._top_value * 2 - value if zig_zag_down else value
-        self._base_nanos = self.clock.nanos
+        self._base_ticks = self.clock.ticks
         self._updated()
 
     def advance(self, delta: int) -> None:
@@ -63,7 +75,7 @@ class Timer32:
     def raw_counter(self) -> int:
         base_freq = self._base_freq
         prescaler_value = self._prescaler_value
-        base_nanos = self._base_nanos
+        base_ticks = self._base_ticks
         base_value = self._base_value
         enabled = self._enabled
         timer_mode = self._timer_mode
@@ -72,7 +84,7 @@ class Timer32:
             return self._base_value
 
         zigzag = timer_mode == TimerMode.ZIGZAG
-        ticks = ((self.clock.nanos - base_nanos) / 1e9) * (base_freq / prescaler_value)
+        ticks = ((self.clock.ticks - base_ticks) / (1e9 * TICKS_PER_NANO)) * (base_freq / prescaler_value)
         top_modulo = self._top_value * 2 if zigzag else self._top_value + 1
         if top_modulo == 0:
             # ZIGZAG with TOP == 0: a counter with one state (it counts 0 -> 0), so there is nothing to
@@ -109,7 +121,7 @@ class Timer32:
     @frequency.setter
     def frequency(self, value: float) -> None:
         self._base_value = self.counter
-        self._base_nanos = self.clock.nanos
+        self._base_ticks = self.clock.ticks
         self._base_freq = value
         self._updated()
 
@@ -120,7 +132,7 @@ class Timer32:
     @prescaler.setter
     def prescaler(self, value: float) -> None:
         self._base_value = self.counter
-        self._base_nanos = self.clock.nanos
+        self._base_ticks = self.clock.ticks
         self._enabled = self._prescaler_value != 0
         self._prescaler_value = value
         self._updated()
@@ -138,7 +150,7 @@ class Timer32:
     def enable(self, value: bool) -> None:
         if value != self._enabled:
             if value:
-                self._base_nanos = self.clock.nanos
+                self._base_ticks = self.clock.ticks
             else:
                 self._base_value = self.counter
             self._enabled = value

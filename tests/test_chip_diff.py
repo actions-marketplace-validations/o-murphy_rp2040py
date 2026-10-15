@@ -1,9 +1,8 @@
 """The reset cascade, pure-Python chip against native chip, in lockstep (docs/records/0096-cpp-mcu-core.md, step 3b; the oracle is tests/utils/chip_diff.py)."""
 
 import pytest
-
-from tests.utils import chip_diff
-from tests.utils.chip_pair import Native, PurePython, make_chip
+from utils import chip_diff
+from utils.chip_pair import Native, PurePython, make_chip
 
 SEEDS = range(40)
 

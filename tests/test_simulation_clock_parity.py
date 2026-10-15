@@ -58,7 +58,7 @@ class World:
 
     def observe(self):
         c = self.clock
-        return (c.nanos, c.nanos_to_next_alarm, c.has_scheduled_alarm)
+        return (c.nanos, c.nanos_to_next_alarm, c.has_scheduled_alarm, c.ticks, c.ticks_to_next_alarm)
 
     def apply(self, op):
         kind = op[0]
@@ -66,6 +66,18 @@ class World:
             self.alarms[op[1]].schedule(op[2])
         elif kind == "cancel":
             self.alarms[op[1]].cancel()
+        elif kind == "schedule_ticks":
+            self.alarms[op[1]].schedule_ticks(op[2])
+        elif kind == "advance_cycles":
+            try:
+                self.clock.advance_cycles(op[1], op[2])
+            except Boom as error:
+                self.log.append(("raised", error.args[0]))
+        elif kind == "tick_ticks":
+            try:
+                self.clock.tick_ticks(op[1])
+            except Boom as error:
+                self.log.append(("raised", error.args[0]))
         else:  # tick
             try:
                 self.clock.tick(op[1])
@@ -92,8 +104,21 @@ def _script(seed):
     ops = []
     for _ in range(250):
         roll = rng.random()
-        if roll < 0.4:
+        if roll < 0.35:
             ops.append(("schedule", rng.randrange(n), _delay(rng)))
+        elif roll < 0.4:
+            ops.append(("schedule_ticks", rng.randrange(n), rng.choice([0, 1, 7, 128, rng.randrange(0, 4000)])))
+        elif roll < 0.45:
+            ops.append(("tick_ticks", rng.choice([0, 1, 5, 128, rng.randrange(0, 3000)])))
+        elif roll < 0.5:
+            # a clock that is not a whole number of ticks per cycle: 133 MHz is 120.30 ticks
+            ops.append(
+                (
+                    "advance_cycles",
+                    rng.randrange(0, 12),
+                    rng.choice([128.0, 120.30075187969925, 333.3333333333333, 41.666666666666664]),
+                )
+            )
         elif roll < 0.55:
             ops.append(("cancel", rng.randrange(n)))
         else:
@@ -208,3 +233,62 @@ def test_an_alarm_can_be_rescheduled_from_its_own_callback_many_times(clock_cls)
 
     assert fired == [7.0 * (i + 1) for i in range(50)]
     assert not clock.has_scheduled_alarm
+
+
+@pytest.mark.parametrize("clock_cls", [PureClock, NativeClock], ids=["pure", "native"])
+def test_an_8_ns_step_still_resolves_after_more_than_2_to_the_53_ns(clock_cls):
+    """The failure that started docs/records/0100: a `double` of nanoseconds past 2**53 (104 days) cannot hold `now + 8`, and a DMA's one-word-per-cycle schedule collapsed to one instant."""
+    clock = clock_cls()
+    clock.tick_ticks(2**53 * 16 + 7)  # ~104 days, then a bit
+    fired = []
+    for index in range(3):
+        clock.create_alarm(lambda index=index: fired.append((index, clock.ticks))).schedule(8)
+    start = clock.ticks
+    clock.tick(8)
+    assert fired == [(0, start + 128), (1, start + 128), (2, start + 128)]
+    assert clock.ticks == start + 128
+    clock.tick_ticks(128 * 1000)
+    assert clock.ticks == start + 128 * 1001  # exact, a tick at a time, years in
+
+
+@pytest.mark.parametrize("clock_cls", [PureClock, NativeClock], ids=["pure", "native"])
+def test_the_year_2_5_of_the_failing_official_sequence_is_well_inside_the_range(clock_cls):
+    clock = clock_cls()
+    clock.tick_ticks(int(7.8e16 * 16))  # the reading `clock.nanos` had when rp2_dma failed
+    ticks = clock.ticks
+    clock.create_alarm(lambda: None).schedule(8)
+    clock.tick(8)
+    assert clock.ticks == ticks + 128
+    assert not clock.saturated
+
+
+@pytest.mark.parametrize("clock_cls", [PureClock, NativeClock], ids=["pure", "native"])
+def test_a_delay_is_rounded_half_up_to_a_tick_and_saturates(clock_cls):
+    clock = clock_cls()
+    alarm = clock.create_alarm(lambda: None)
+    alarm.schedule(1 / 32)  # half a tick
+    assert alarm.ticks == 1
+    alarm.schedule(1 / 32 - 1 / 1000)  # a positive delay is never rounded down to 'now': at least one tick
+    assert alarm.ticks == 1
+    alarm.schedule(0.0)
+    assert alarm.ticks == 0
+    alarm.schedule(float("nan"))
+    assert alarm.ticks == 0
+    alarm.schedule(1e30)  # "never": clamped, and the clock says so
+    assert alarm.ticks == 2**62 - 1
+    assert clock.saturated
+    assert clock.nanos_to_next_alarm == (2**62 - 1) / 16
+
+
+@pytest.mark.parametrize("clock_cls", [PureClock, NativeClock], ids=["pure", "native"])
+def test_a_cycle_that_is_not_a_whole_number_of_ticks_does_not_drift(clock_cls):
+    """133 MHz: 120.30 ticks per cycle. Rounded per cycle it would run 0.25 % fast; with the remainder carried, a million cycles, split any way, take the same time."""
+    ticks_per_cycle = 1e9 / 133e6 * 16
+    one_by_one, in_chunks = clock_cls(), clock_cls()
+    for _ in range(1_000_000):
+        one_by_one.advance_cycles(1, ticks_per_cycle)
+    for _ in range(10_000):
+        in_chunks.advance_cycles(100, ticks_per_cycle)
+    exact = 1_000_000 * ticks_per_cycle
+    assert abs(one_by_one.ticks - exact) <= 1
+    assert abs(in_chunks.ticks - exact) <= 1

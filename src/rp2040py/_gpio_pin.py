@@ -3,6 +3,7 @@ from collections.abc import Callable
 from enum import IntEnum
 from typing import TYPE_CHECKING
 
+from rp2040py._pin_bank import GPIOPinBank
 from rp2040py.peripherals.pio_registers import WaitType
 
 if TYPE_CHECKING:
@@ -60,9 +61,39 @@ IRQ_EDGE_LOW = 1 << 2
 IRQ_LEVEL_HIGH = 1 << 1
 IRQ_LEVEL_LOW = 1 << 0
 
+# PADS_BANK0.GPIOn resets to 0x56 (RP2040 datasheet table 341, pico-sdk PADS_BANK0_GPIO0_RESET): OD 0, IE 1, DRIVE 1 (4 mA), PUE 0, PDE 1, SCHMITT 1, SLEWFAST 0.
+# (This model started with 0b0110110 = 0x36, the value rp2040js carries: input disabled, 12 mA.)
+PAD_RESET = 0x56
+PAD_MASK = 0xFF  # 31:8 are reserved
+CTRL_MASK = 0x3003331F  # IRQOVER 29:28, INOVER 17:16, OEOVER 13:12, OUTOVER 9:8, FUNCSEL 4:0 (datasheet table 285)
+
 
 class GPIOPin:
-    def __init__(self, rp2040: "RP2040", index: int, name: str | None = None, always_output_enabled: bool = False):
+    def __init__(
+        self,
+        rp2040: "RP2040",
+        index: int,
+        name: str | None = None,
+        always_output_enabled: bool = False,
+        bank: GPIOPinBank | None = None,
+    ):
+        """`bank` is the shared `GPIOPinBank` this pin is a slot of (slot = `index` less the bank's first pin; the bank decides `always_output_enabled`); without one the pin gets a
+        private bank of its own, so a pin on its own (tests, a stand-in chip) behaves as before. The same contract as the native `GPIOPin`."""
+        if bank is None:
+            bank = GPIOPinBank(rp2040, 1, always_output_enabled, index)
+            slot = 0
+        else:
+            if index < bank.first or index - bank.first >= len(bank.shells):
+                raise ValueError(
+                    f"pin {index} is not in the bank (pins {bank.first}..{bank.first + len(bank.shells) - 1})"
+                )
+            slot = index - bank.first
+            if bank.shells[slot] is not None:
+                raise ValueError(f"pin {index} of the bank already has an object")
+            always_output_enabled = bank.always_output_enabled
+        self._bank = bank
+        self._slot = slot
+        bank.shells[slot] = self
         self.rp2040 = rp2040
         self.index = index
         self.name = name if name is not None else str(index)
@@ -95,14 +126,16 @@ class GPIOPin:
         self._last_value = self.value
 
         self.ctrl = 0x1F
-        self.pad_value = 0b0110110
+        self.pad_value = PAD_RESET
         self.irq_enable_mask = 0
         self.irq_force_mask = 0
         self.irq_status = 0
+        self._seen = False
+        self._sync_irq_levels(edges=False)
 
         self._listeners: set[GPIOPinListener] = set()
 
-    def reset(self, io=True, pads=True) -> None:
+    def reset(self, io=True, pads=True, pad_reset=PAD_RESET) -> None:
         """Return this pin's *registers* to their power-on values - `IO_BANK0.GPIOn_CTRL`,
         `PADS_BANK0.GPIOn` and the three IRQ masks - leaving everything about what is wired to the
         pin alone (docs/records/0089-one-reset-for-every-trigger.md Phase 5).
@@ -130,8 +163,10 @@ class GPIOPin:
             self.irq_force_mask = 0
             self.irq_status = 0
         if pads:
-            self.pad_value = 0b0110110
+            self.pad_value = pad_reset
         self._last_value = self.value
+        self._seen = False
+        self._sync_irq_levels(edges=False)  # a reset raises no edge; the level bits follow the pin
 
     @property
     def raw_interrupt(self) -> bool:
@@ -187,11 +222,11 @@ class GPIOPin:
 
     @property
     def raw_output_enable(self) -> bool:
-        if self._always_output_enabled:
-            return True
-
         index, rp2040, function_select = self.index, self.rp2040, self.function_select
         bitmask = 1 << index
+
+        if self._always_output_enabled:  # a QSPI pin: SIO drives it through GPIO_HI_OE (datasheet 2.19.2, table 282), XIP (and the rest) keep it enabled
+            return bool(rp2040.sio.qspi_gpio_output_enable & bitmask) if function_select == FUNCTION_SIO else True
 
         if function_select == FUNCTION_PWM:
             return bool(rp2040.pwm.gpio_direction & bitmask)
@@ -212,6 +247,11 @@ class GPIOPin:
         index, rp2040, function_select = self.index, self.rp2040, self.function_select
         bitmask = 1 << index
 
+        if (
+            self._always_output_enabled
+        ):  # a QSPI pin: only SIO (GPIO_HI_OUT) drives its level here; the XIP side is not modelled
+            return bool(rp2040.sio.qspi_gpio_value & bitmask) if function_select == FUNCTION_SIO else False
+
         if function_select == FUNCTION_PWM:
             return bool(rp2040.pwm.gpio_value & bitmask)
 
@@ -226,14 +266,26 @@ class GPIOPin:
 
         return False
 
+    def _chip_drive_level(self) -> bool | None:
+        """The level the chip itself drives onto the pad, or None if it does not drive it: the last announced state (HIGH / LOW are the only states in which the pad is driven; it
+        is the state after the output enable, the overrides and PADS.OD). A QSPI pin that is not under SIO is driven by the XIP side, which is not modelled: not counted."""
+        if self._last_value == GPIOPinState.HIGH or self._last_value == GPIOPinState.LOW:
+            if self._always_output_enabled and self.function_select != FUNCTION_SIO:
+                return None
+            return self._last_value == GPIOPinState.HIGH
+        return None
+
     @property
     def _effective_raw_input_value(self) -> bool:
-        """The pad's actual electrical reading: whatever last actively drove it, or - if nothing
-        ever has - resolved from whichever pull resistor is enabled (matching real hardware; a
-        floating pin isn't guaranteed low). Bus-keeper mode (both pulls enabled) and no-pulls both
-        fall back to the plain _raw_input_value default, same as before this resolution existed."""
+        """The pad's actual electrical reading: whatever last actively drove it from outside; else the level the chip itself drives (the input is always connected, datasheet
+        2.19.2: software reads back its own output); else - nothing drives it - resolved from whichever pull resistor is enabled (matching real hardware; a floating pin isn't
+        guaranteed low). Bus-keeper mode (both pulls enabled) and no-pulls both fall back to the plain _raw_input_value default. An external drive wins over the chip's own: the
+        model has no drive strengths to settle a contention with."""
         if self._driven:
             return self._raw_input_value
+        driven_by_chip = self._chip_drive_level()
+        if driven_by_chip is not None:
+            return driven_by_chip
         if self.pullup_enabled and not self.pulldown_enabled:
             return True
         if self.pulldown_enabled and not self.pullup_enabled:
@@ -280,7 +332,8 @@ class GPIOPin:
 
     @property
     def value(self) -> GPIOPinState:
-        if self.output_enable:
+        # PADS.OD "has priority over output enable from peripherals" (datasheet, GPIOn register): an output-disabled pad is not driven, whatever the function and the overrides say
+        if self.output_enable and not self.output_disable:
             return GPIOPinState.HIGH if self.output_value else GPIOPinState.LOW
         # TODO: check what happens when we enable both pullup/pulldown
         # ANSWER: It is valid, see: 2.19.4.1. Bus Keeper Mode, datasheet p240
@@ -305,18 +358,27 @@ class GPIOPin:
         self._driven = False
         self._apply_input_value(self._effective_raw_input_value)
 
+    def _seen_level(self) -> bool:
+        """The level the interrupt logic sees: the pad's reading behind its input buffer (PADS IE) - "Level High: the GPIO pin is a logical 1" (datasheet 2.19.3)."""
+        return self._effective_raw_input_value and self.input_enable
+
+    def _sync_irq_levels(self, *, edges: bool) -> None:
+        """INTR's level bits follow the seen level at all times (they are read only, "not latched"); the edge bits latch on a *transition* of it."""
+        seen = self._seen_level()
+        if edges and seen != self._seen:
+            self.irq_status |= IRQ_EDGE_HIGH if seen else IRQ_EDGE_LOW
+        self._seen = seen
+        self.irq_status = (self.irq_status & ~(IRQ_LEVEL_HIGH | IRQ_LEVEL_LOW)) | (
+            IRQ_LEVEL_HIGH if seen else IRQ_LEVEL_LOW
+        )
+
     def _apply_input_value(self, value: bool) -> None:
         # Shared by set_input_value() (an actual external drive) and refresh_input() (just
         # re-evaluating IRQ/PWM/PIO wait state after e.g. input_enable toggled) - only the former
         # should mark the pin as driven, so _driven is set in set_input_value() itself, not here.
         self._raw_input_value = value
         prev_irq_value = self.irq_value
-        if value and self.input_enable:
-            self.irq_status |= IRQ_EDGE_HIGH | IRQ_LEVEL_HIGH
-            self.irq_status &= ~IRQ_LEVEL_LOW
-        else:
-            self.irq_status |= IRQ_EDGE_LOW | IRQ_LEVEL_LOW
-            self.irq_status &= ~IRQ_LEVEL_HIGH
+        self._sync_irq_levels(edges=True)
         if self.irq_value != prev_irq_value:
             self.rp2040.update_io_interrupt()
         if self.function_select == FUNCTION_PWM:
@@ -331,12 +393,21 @@ class GPIOPin:
                 ):
                     machine.check_wait()
 
+    def pad_changed(self) -> None:
+        """The pad register was written: if that moved the level the interrupt logic sees (IE, or a pull on a floating pin), it is an input change."""
+        if self._seen_level() != self._seen:
+            self.refresh_input()
+
     def check_for_updates(self) -> None:
         last_value, value = self._last_value, self.value
         if value != last_value:
+            input_before = self.input_value
             self._last_value = value
             for listener in self._listeners:
                 listener(value, last_value)
+            # the chip's own drive is part of what the pad reads: if it moved the level the interrupt logic sees, or the input the PIO / PWM read, it is an input change
+            if self._seen_level() != self._seen or self.input_value != input_before:
+                self.refresh_input()
 
     def refresh_input(self) -> None:
         self._apply_input_value(self._raw_input_value)

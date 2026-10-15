@@ -19,7 +19,7 @@ cdef extern from "gspi.hpp" namespace "rp2040core":
 
     cdef cppclass GspiShifterCore "rp2040core::GspiShifter":
         GspiShifterCore() noexcept
-        cppbool attach(PinBank* clk, PinBank* data, PinBank* cs, const GspiHost& host) noexcept
+        cppbool attach(PinBank* clk, PinBank* data, PinBank* cs, const GspiHost& host, uint32_t clk_slot, uint32_t data_slot, uint32_t cs_slot) noexcept
         void detach() noexcept
         cppbool start_response(const uint8_t* bytes, uint32_t length) noexcept
         void reset() noexcept

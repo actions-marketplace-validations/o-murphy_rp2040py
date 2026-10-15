@@ -31,6 +31,24 @@ enum RegionFlags : uint32_t {
     // DPRAM -> `usb_ctrl.dpram_updated`). 8/16-bit writes to such a region are never handled here:
     // the caller's read-modify-write path already reaches the hook through its 32-bit write.
     kNotifyOnWrite = 1u << 2,
+    // The XIP flash window (docs/records/0098, "XIP_CTRL and the XIP subsystem"): the whole window - all four aliases, not just the part backed by the image - is read-only to the bus. A
+    // read tells the XIP hooks (`read_access`) once; a write of any width is swallowed by `write_access` and never reaches the image. Sub-word accesses above the image, and every
+    // sub-word access to an alias other than the first, stay "not handled" (the caller composes them from 32-bit accesses, as the pure-Python chip does), so each access is counted once.
+    kXip = 1u << 3,
+};
+
+// What the XIP block (core/xip_ctrl.hpp) offers the memory map: the access hooks of the flash window and the cache-as-SRAM segment `0x15000000`..`0x15FFFFFF`. Plain function pointers
+// and a ctx, like every host in this tree. `sram_*` are only used for 32-bit accesses; sub-word ones to the segment are "not handled" (the caller composes them).
+using XipAccessFn = void (*)(void* ctx, uint32_t address);
+using XipSramReadFn = uint32_t (*)(void* ctx, uint32_t address);
+using XipSramWriteFn = void (*)(void* ctx, uint32_t address, uint32_t value);
+
+struct XipHooks {
+    XipAccessFn read_access = nullptr;
+    XipAccessFn write_access = nullptr;
+    XipSramReadFn sram_read = nullptr;
+    XipSramWriteFn sram_write = nullptr;
+    void* ctx = nullptr;
 };
 
 struct Region {
@@ -70,6 +88,9 @@ public:
         count_ = 0;
         reindex();
     }
+
+    // Attaches the XIP hooks; with none attached (the default) a kXip region and the `0x15` segment behave like plain memory / unmapped addresses.
+    void set_xip(const XipHooks& hooks) noexcept { xip_ = hooks; }
     int count() const noexcept { return count_; }
     const Region& region(int index) const noexcept { return regions_[index]; }
 
@@ -82,6 +103,7 @@ public:
             if (rel < flash_.window) {
                 const uint32_t offset = rel & flash_.mask;
                 if (static_cast<uint64_t>(offset) + 4 <= flash_.size) {
+                    if (flash_.xip && xip_.read_access != nullptr) xip_.read_access(xip_.ctx, address);
                     *out = load32(flash_.data + offset);
                     return flash_.index;
                 }
@@ -92,6 +114,10 @@ public:
                 return ram_.index;
             }
         }
+        if ((address >> 24) == kXipSramSegment && xip_.sram_read != nullptr) {
+            *out = xip_.sram_read(xip_.ctx, address);
+            return (xip_index_ >= 0 ? xip_index_ : 0);
+        }
         int lo, hi;
         candidates(address, &lo, &hi);
         for (int i = lo; i < hi; ++i) {
@@ -101,6 +127,7 @@ public:
             uint32_t offset = rel & r.mask;
             if (r.flags & kWordIndexed) offset &= ~3u;
             if (offset > r.size || r.size - offset < 4) return kNotHandled;
+            if ((r.flags & kXip) && xip_.read_access != nullptr) xip_.read_access(xip_.ctx, address);
             *out = load32(r.data + offset);
             return i;
         }
@@ -111,6 +138,7 @@ public:
         {  // the fast regions hand out their own data pointer: no second lookup through the region table
             const uint32_t offset = address - kFlashBase;
             if (static_cast<uint64_t>(offset) + 2 <= flash_.size) {
+                if (flash_.xip && xip_.read_access != nullptr) xip_.read_access(xip_.ctx, address);
                 uint16_t v;
                 std::memcpy(&v, flash_.data + offset, sizeof v);
                 *out = v;
@@ -126,6 +154,7 @@ public:
         }
         const int i = find_sub_word(address, 2);
         if (i == kNotHandled) return kNotHandled;
+        if ((regions_[i].flags & kXip) && xip_.read_access != nullptr) xip_.read_access(xip_.ctx, address);
         uint16_t v;
         std::memcpy(&v, regions_[i].data + (address - regions_[i].base), sizeof v);
         *out = v;
@@ -136,6 +165,7 @@ public:
         {
             const uint32_t offset = address - kFlashBase;
             if (static_cast<uint64_t>(offset) + 1 <= flash_.size) {
+                if (flash_.xip && xip_.read_access != nullptr) xip_.read_access(xip_.ctx, address);
                 *out = flash_.data[offset];
                 return flash_.index;
             }
@@ -147,6 +177,7 @@ public:
         }
         const int i = find_sub_word(address, 1);
         if (i == kNotHandled) return kNotHandled;
+        if ((regions_[i].flags & kXip) && xip_.read_access != nullptr) xip_.read_access(xip_.ctx, address);
         *out = regions_[i].data[address - regions_[i].base];
         return i;
     }
@@ -157,6 +188,11 @@ public:
             if (static_cast<uint64_t>(off) + 4 <= ram_.size) {
                 std::memcpy(ram_.data + off, &value, sizeof value);
                 return ram_.index;
+            }
+            if (xip_write(address)) return xip_index_;
+            if ((address >> 24) == kXipSramSegment && xip_.sram_write != nullptr) {
+                xip_.sram_write(xip_.ctx, address, value);
+                return xip_index_ >= 0 ? xip_index_ : 0;
             }
             const uint32_t offset = address - kFlashBase;
             if (static_cast<uint64_t>(offset) + 4 <= flash_.size) {
@@ -186,6 +222,7 @@ public:
                 std::memcpy(ram_.data + off, &v, sizeof v);
                 return ram_.index;
             }
+            if (xip_write(address)) return xip_index_;
             const uint32_t offset = address - kFlashBase;
             if (static_cast<uint64_t>(offset) + 2 <= flash_.size) {
                 std::memcpy(flash_.data + offset, &v, sizeof v);
@@ -206,6 +243,7 @@ public:
                 ram_.data[off] = static_cast<uint8_t>(value);
                 return ram_.index;
             }
+            if (xip_write(address)) return xip_index_;
             const uint32_t offset = address - kFlashBase;
             if (static_cast<uint64_t>(offset) + 1 <= flash_.size) {
                 flash_.data[offset] = static_cast<uint8_t>(value);
@@ -219,6 +257,16 @@ public:
     }
 
 private:
+    static constexpr uint32_t kXipSramSegment = 0x15;
+
+    // A write of any width into the XIP flash window (all four aliases): reported to the hooks, never stored. False: not in the window (or no hooks).
+    bool xip_write(uint32_t address) const noexcept {
+        if (xip_.write_access == nullptr) return false;
+        if (address - xip_base_ >= xip_window_) return false;
+        xip_.write_access(xip_.ctx, address);
+        return true;
+    }
+
     static uint32_t load32(const uint8_t* p) noexcept {
         uint32_t v;
         std::memcpy(&v, p, sizeof v);
@@ -282,14 +330,24 @@ private:
         uint32_t window = 0, size = 0, mask = 0;  // size 0: no fast path
         uint8_t* data = nullptr;
         int index = kNotHandled;
+        bool xip = false;  // the region is the XIP flash window: its reads are reported to the hooks
     };
 
     void index_fast() noexcept {
         flash_ = Fast{};
         ram_ = Fast{};
+        xip_index_ = kNotHandled;
+        for (int i = 0; i < count_; ++i) {
+            if (regions_[i].flags & kXip) {
+                xip_index_ = i;
+                xip_base_ = regions_[i].base;
+                xip_window_ = regions_[i].window;
+                break;
+            }
+        }
         for (int i = 0; i < count_ && fast_enabled_; ++i) {
             const Region& r = regions_[i];
-            if (r.flags != kSubWord || (r.base != kFlashBase && r.base != kRamBase)) continue;
+            if ((r.flags & ~kXip) != kSubWord || (r.base != kFlashBase && r.base != kRamBase)) continue;
             const uint64_t first = r.base >> 28, last = (static_cast<uint64_t>(r.base) + r.window - 1) >> 28;
             bool alone = true;
             for (int j = 0; j < count_; ++j) {
@@ -297,12 +355,15 @@ private:
                 const uint64_t jf = regions_[j].base >> 28, jl = (static_cast<uint64_t>(regions_[j].base) + regions_[j].window - 1) >> 28;
                 if (jf <= last && first <= jl) alone = false;
             }
-            if (alone) (r.base == kFlashBase ? flash_ : ram_) = Fast{r.window, r.size, r.mask, r.data, i};
+            if (alone) (r.base == kFlashBase ? flash_ : ram_) = Fast{r.window, r.size, r.mask, r.data, i, (r.flags & kXip) != 0};
         }
     }
 
     Region regions_[kMaxRegions]{};
     Fast flash_, ram_;
+    XipHooks xip_;
+    int xip_index_ = kNotHandled;  // the kXip region (the XIP flash window), also what a cache-as-SRAM access reports as having served it
+    uint32_t xip_base_ = 0, xip_window_ = 0;
     bool fast_enabled_ = true;
     uint8_t block_[16] = {kNoRegion, kNoRegion, kNoRegion, kNoRegion, kNoRegion, kNoRegion, kNoRegion, kNoRegion,
                           kNoRegion, kNoRegion, kNoRegion, kNoRegion, kNoRegion, kNoRegion, kNoRegion, kNoRegion};

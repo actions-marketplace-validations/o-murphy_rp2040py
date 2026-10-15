@@ -4,6 +4,8 @@
 from libc.stdint cimport int64_t, uint32_t
 from libcpp cimport bool as cppbool
 
+from rp2040py.native._mcu_irq cimport McuIrqLine, McuDreqLine
+
 from rp2040py.native._clock cimport Alarm, Clock
 from rp2040py.native._window_map cimport WindowHandler
 
@@ -33,6 +35,8 @@ cdef extern from "adc.hpp" namespace "rp2040core":
     cdef cppclass AdcHost:
         AdcHost() noexcept
         AdcIrqFn irq
+        void* irq_ctx
+        void* dreq_ctx
         AdcDreqFn dreq
         AdcReadFn read
         AdcChannelValueFn channel_value
@@ -75,7 +79,11 @@ cdef extern from "adc.hpp" namespace "rp2040core":
         WindowHandler window_handler() noexcept
 
 cdef class RPADC:
-    cdef AdcBlock _block
+    cdef public bint _from_mcu  # this is the view of the `Mcu`'s block
+    cdef McuDreqLine _dreq_line  # the DMA request straight to the chip, when it has one (core/mcu.hpp)
+    cdef McuIrqLine _irq_line  # the line straight to the chip, when it has one (core/mcu.hpp)
+    cdef AdcBlock* _block  # the chip's (`Mcu` builds and wires it), or `_own` for a block made directly (a stand-in chip, a test)
+    cdef AdcBlock _own
     cdef public object rp2040
     cdef public object name
     cdef public object clock

@@ -322,8 +322,8 @@ static void test_the_enable_register() {
     wr(DATA_CMD, 1);
     wr(DATA_CMD, 2);
     CHECK(i2c.state == STATE_START && i2c.busy);
-    wr(ENABLE, 1 | EN_ABORT);                                    // aborting an active bus: reason USER_ABRT, FIFO flushed, stop forced
-    CHECK((i2c.abort_source & ABRT_USER_ABRT) != 0 && i2c.stop && rd(TXFLR) == 0);
+    wr(ENABLE, 1 | EN_ABORT);                                    // aborting an active bus: the stop is forced, the flush and the reason come when that stop is done
+    CHECK(i2c.abort_pending && i2c.stop && rd(TXFLR) == 2 && (i2c.abort_source & ABRT_USER_ABRT) == 0);
     CHECK((rd(ENABLE) & EN_ABORT) != 0);
     wr(ENABLE, 1);                                               // software cannot clear ABORT
     CHECK((rd(ENABLE) & EN_ABORT) != 0);
@@ -731,7 +731,7 @@ static void test_more_corners_of_the_state_machine() {
     wr(ENABLE, 1 | EN_ABORT);
     wr(DATA_CMD, 2);                                             // queued behind the abort
     env.events_n = 0;
-    CHECK(i2c.complete_stop() && env.events_n == 0 && (i2c.enable & EN_ABORT) == 0 && i2c.tx.count() == 1);
+    CHECK(i2c.complete_stop() && env.events_n == 0 && (i2c.enable & EN_ABORT) == 0 && i2c.tx.count() == 0);  // the command queued behind the abort is flushed with it
     fresh(kDefer);
     wr(ENABLE, 1);
     wr(DATA_CMD, 1);
@@ -872,10 +872,23 @@ static void test_registers_with_side_effects_and_masks_in_detail() {
     CHECK(i2c.abort_source == (ABRT_SBYTE_NORSTRT | ARB_LOST));
     // IC_ENABLE: ABORT works whenever the machine is not idle, and a disable flushes the RX FIFO too
     fresh(kSilent);
+    wr(ENABLE, 1);
     i2c.state = STATE_CONNECTED;
     wr(ENABLE, 1 | EN_ABORT);
-    CHECK((i2c.abort_source & ABRT_USER_ABRT) != 0 && i2c.stop && (i2c.enable & EN_ABORT) != 0);
+    CHECK(i2c.abort_pending && i2c.stop && i2c.busy && i2c.state == STATE_STOP && (i2c.enable & EN_ABORT) != 0 && (i2c.abort_source & ABRT_USER_ABRT) == 0);  // a master waiting for a command issues the STOP at once
+    wr(ENABLE, 1 | EN_ABORT);                                    // a second write while it is in progress aborts nothing more
+    CHECK(i2c.abort_source == 0);
+    CHECK(i2c.complete_stop() && (i2c.enable & EN_ABORT) == 0 && (i2c.abort_source & ABRT_USER_ABRT) != 0 && !i2c.abort_pending);
     fresh(kSilent);
+    i2c.state = STATE_CONNECTED;                                 // "only when ENABLE is already set": the write that sets ENABLE is not enough
+    wr(ENABLE, 0);
+    wr(ENABLE, 1 | EN_ABORT);
+    CHECK((i2c.enable & EN_ABORT) == 0 && !i2c.abort_pending && i2c.abort_source == 0 && !i2c.stop);
+    wr(ENABLE, 0);
+    wr(ENABLE, EN_ABORT);
+    CHECK((i2c.enable & EN_ABORT) == 0 && !i2c.abort_pending);
+    fresh(kSilent);
+    wr(ENABLE, 1);
     i2c.busy = true;                                             // busy, but the machine is idle: the bit is dropped
     wr(ENABLE, 1 | EN_ABORT);
     CHECK((i2c.enable & EN_ABORT) == 0 && i2c.abort_source == 0 && !i2c.stop);

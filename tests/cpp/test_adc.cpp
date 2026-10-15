@@ -244,8 +244,7 @@ static void test_interrupts_and_the_line() {
     CHECK(adc.complete_adc_read(1, false) && rd(INTR) == 0 && !last_irq());
     CHECK(adc.complete_adc_read(2, false) && rd(INTR) == 1 && rd(INTS) == 1 && last_irq());
     (void)rd(FIFO);
-    CHECK(rd(INTR) == 0 && last_irq());                    // a FIFO read does not touch the line: it is only recomputed at the next event
-    CHECK(adc.check_interrupts() && !last_irq());
+    CHECK(rd(INTR) == 0 && !last_irq());                   // draining below THRESH takes the line down (4.9.2.6: "cleared by draining the FIFO")
     CHECK(wr(INTF, 0xFFFFFFFFu));
     CHECK(rd(INTF) == 1 && rd(INTS) == 1 && last_irq());
     wr(INTE, 0);
@@ -343,6 +342,17 @@ static void test_a_free_running_capture_and_its_divider() {
     CHECK(tick(2000) && clk.has_alarm());
     wr(CS, CS_EN);
     CHECK(tick(100) && env.reads_n == 1 && !clk.has_alarm());
+    // clearing EN halts the capture (4.9.2): the conversion in flight completes, no further one starts, and the gap alarm does nothing
+    fresh();
+    wr(CS, CS_EN | CS_START_MANY);
+    wr(CS, CS_START_MANY);
+    CHECK(tick(2000) && env.reads_n == 1 && !clk.has_alarm());
+    fresh();
+    wr(DIV, 0x6080);
+    wr(CS, CS_EN | CS_START_MANY);
+    CHECK(tick(2000) && clk.has_alarm());
+    wr(CS, CS_START_MANY);
+    CHECK(tick(100) && env.reads_n == 1);
     // a larger sample time moves the threshold
     fresh();
     adc.sample_time = 3;

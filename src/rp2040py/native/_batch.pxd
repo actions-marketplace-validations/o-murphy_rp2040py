@@ -17,6 +17,7 @@ cdef extern from "batch.hpp" namespace "rp2040core":
     cdef cppclass BatchHost:
         const uint8_t* stopped
         const uint8_t* real_io
+        const uint8_t* clk_changed
         int pio_count
         const int* pio_stopped[4]
         BatchPioAdvanceFn pio_advance
@@ -31,4 +32,16 @@ cdef extern from "batch.hpp" namespace "rp2040core":
         int check_interval
         double paced_idle_nanos
 
-    int run_batch(Cpu& cpu, Clock& clock, const BatchHost& host, const BatchParams& params) noexcept
+    cdef const int kStopFault
+    cdef const int kStopCeiling
+    cdef const int kStopRequested
+    cdef const int kStopClockChanged
+    cdef const int kStopBudget
+    cdef const int kStopPaced
+
+    cdef cppclass BatchResult:
+        int reason
+        long iterations
+        int64_t ticks_advanced
+
+    int run_batch(Cpu& cpu, Clock& clock, const BatchHost& host, const BatchParams& params, BatchResult* result) noexcept

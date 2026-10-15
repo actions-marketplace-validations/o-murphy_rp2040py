@@ -1242,8 +1242,9 @@ class GSPIBus:
         """Hooks this bus onto `rp2040.gpio[clk]`/`[data]`/`[cs]` (defaults: `WL_CLK`/`WL_D`/
         `WL_CS`'s real Pico W pin numbers - docs/CYW43_WIFI_BACKLOG.md's pinout table). Only safe
         pre-run, same contract as every `ExternalDevice.attach()` (`external/device.py`) - this
-        class isn't one itself (see module docstring: it's a decode engine a future `Cyw43439`,
-        step 3, will own and call this from its own `attach()`)."""
+        class isn't one itself: `Cyw43439.attach()` (`chip.py`) owns it and calls this. With three
+        native pins the bit shifter registers as a *direct* C++ listener of CLK and CS (it must answer
+        on the falling edge, in the same cycle), so it is not in the pins' `_listeners`."""
         clk_pin = rp2040.gpio[clk]
         data_pin = rp2040.gpio[data]
         cs_pin = rp2040.gpio[cs]

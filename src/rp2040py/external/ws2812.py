@@ -52,6 +52,7 @@ never a picture, so nothing in `src/` grows an image dependency. What a caller d
 from collections.abc import Callable
 from typing import TYPE_CHECKING
 
+from rp2040py.clock._simulation_clock import TICKS_PER_NANO
 from rp2040py.gpio_pin import GPIOPinState
 
 if TYPE_CHECKING:
@@ -110,14 +111,17 @@ class Ws2812:
 
         self._clock: IClock | None = None
         self._latch_alarm: IAlarm | None = None
-        self._rise_nanos = 0.0
-        self._fall_nanos = 0.0
+        self._rise_ticks = (
+            0  # the clock's time in ticks of 1/16 ns: a difference of two stays exact however far into the run
+        )
+        self._fall_ticks = 0
         self._pending_high: float | None = None  # a bit whose low has not finished yet
         self._min_period = 0.0  # shortest high+low seen this frame - the true bit period
         self._bits = 0  # bits accumulated into the byte in progress, MSB-first
         self._bit_count = 0
         self._bytes = bytearray()
         self._unsubscribe: Callable[[], None] | None = None
+        self._unsubscribe_rebase: Callable[[], None] | None = None
 
     def attach(self, rp2040: "RP2040") -> None:
         self._clock = rp2040.clock
@@ -126,15 +130,22 @@ class Ws2812:
         # way `Epd2in9G` reschedules its own tx alarm per byte), so it only ever fires once the
         # line has really gone quiet.
         self._latch_alarm = rp2040.clock.create_alarm(self._latch)
+        self._unsubscribe_rebase = rp2040.clock.add_rebase_listener(
+            self._rebased
+        )  # the edges are absolute tick counts: they follow the clock when its origin moves
         self._unsubscribe = rp2040.gpio[self.gpio].add_listener(self._on_change)
+
+    def _rebased(self, delta: int) -> None:
+        self._rise_ticks -= delta
+        self._fall_ticks -= delta
 
     def _on_change(self, new_state: "GPIOPinState", old_state: "GPIOPinState") -> None:
         assert self._clock is not None and self._latch_alarm is not None  # set in attach()
-        now = self._clock.nanos
+        now = self._clock.ticks
         if new_state == GPIOPinState.HIGH:
             # A new bit starts, which is also the moment the previous one's low is finally known.
-            self._close_pending(now - self._fall_nanos)
-            self._rise_nanos = now
+            self._close_pending((now - self._fall_ticks) / TICKS_PER_NANO)
+            self._rise_ticks = now
             return
         if new_state != GPIOPinState.LOW or old_state != GPIOPinState.HIGH:
             # `GPIOPin.value` reports the pull configuration (INPUT/INPUT_PULL_UP/...) whenever
@@ -146,8 +157,8 @@ class Ws2812:
         # Falling edge: the high time is now known, but the bit cannot be judged until its low is
         # too (see the module docstring - a bit is its duty cycle, not its pulse width). The frame
         # is not over until the line stays low, so re-arm the latch on every falling edge.
-        self._pending_high = now - self._rise_nanos
-        self._fall_nanos = now
+        self._pending_high = (now - self._rise_ticks) / TICKS_PER_NANO
+        self._fall_ticks = now
         self._latch_alarm.schedule(self.latch_nanos)
 
     def _close_pending(self, low_nanos: float) -> None:

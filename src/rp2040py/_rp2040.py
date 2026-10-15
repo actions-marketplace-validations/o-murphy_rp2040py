@@ -1,10 +1,12 @@
 from collections.abc import Callable, Coroutine
 from typing import TYPE_CHECKING, Any
 
+from rp2040py._cortex_m0_core import CortexM0Core
+from rp2040py._gpio_pin import GPIOPin
+from rp2040py._pin_bank import GPIOPinBank
+from rp2040py._sio import RPSIO
+from rp2040py.clock._simulation_clock import SimulationClock
 from rp2040py.clock.clock import IClock
-from rp2040py.clock.simulation_clock import SimulationClock
-from rp2040py.cortex_m0_core import CortexM0Core
-from rp2040py.gpio_pin import GPIOPin
 from rp2040py.irq import IRQ
 from rp2040py.memory_map import (
     APB_START_ADDRESS,
@@ -16,13 +18,27 @@ from rp2040py.memory_map import (
 )
 from rp2040py.peripherals._adc import RPADC  # the pure chip's own ADC: the native one is the native chip's
 from rp2040py.peripherals._busctrl import RPBUSCTRL
+from rp2040py.peripherals._clocks import RPClocks
 from rp2040py.peripherals._dma import (  # the pure chip's own DMA: the native one works on the native chip's C++ bus
     RPDMA,
     DREQChannel,
 )
 from rp2040py.peripherals._i2c import RPI2C  # the pure chip's own I2C: the native one is the native chip's
+from rp2040py.peripherals._io import RPIO
+from rp2040py.peripherals._pads import RPPADS
+from rp2040py.peripherals._pio import RPPIO
+from rp2040py.peripherals._pll import RPPLL
 from rp2040py.peripherals._ppb import RPPPB  # the pure chip's own PPB: the native one is the native chip's
-from rp2040py.peripherals._psm import PSM_BITS_MASK, RPPSM, WDSEL_CLOCKS, WDSEL_RESETS, WDSEL_SIO, WDSEL_XIP, WDSEL_XOSC
+from rp2040py.peripherals._psm import (
+    PSM_BITS_MASK,
+    RPPSM,
+    WDSEL_CLOCKS,
+    WDSEL_RESETS,
+    WDSEL_ROSC,
+    WDSEL_SIO,
+    WDSEL_XIP,
+    WDSEL_XOSC,
+)
 from rp2040py.peripherals._pwm import RPPWM  # the pure chip's own PWM: the native one is the native chip's
 from rp2040py.peripherals._reset import (
     RESET_ADC,
@@ -48,6 +64,8 @@ from rp2040py.peripherals._reset import (
     RESETS_BITS_MASK,
     RPReset,
 )
+from rp2040py.peripherals._rosc import RPROSC
+from rp2040py.peripherals._rtc import RP2040RTC
 from rp2040py.peripherals._spi import (
     RPSPI,
     ISPIDMAChannels,
@@ -58,25 +76,22 @@ from rp2040py.peripherals._ssi import (
 from rp2040py.peripherals._syscfg import RP2040SysCfg
 from rp2040py.peripherals._sysinfo import RP2040SysInfo
 from rp2040py.peripherals._tbman import RPTBMAN
+from rp2040py.peripherals._timer import RPTimer
 from rp2040py.peripherals._uart import (  # the pure chip's own UART: the native one is the native chip's
     RPUART,
     IUARTDMAChannels,
 )
-from rp2040py.peripherals._vreg_and_chip_reset import RPVREGAndChipReset
+from rp2040py.peripherals._usb import RPUSBController
+from rp2040py.peripherals._vreg_and_chip_reset import HAD_POR, HAD_RUN, RPVREGAndChipReset
 from rp2040py.peripherals._watchdog import RPWatchdog
+from rp2040py.peripherals._xip_ctrl import (  # the pure chip's own XIP: the native one works on the native chip's flash buffer and memory map
+    RPXIPAux,
+    RPXIPCtrl,
+)
 from rp2040py.peripherals._xosc import RPXOSC
-from rp2040py.peripherals.clocks import RPClocks, reset_clock_tree, update_clocks
-from rp2040py.peripherals.io import RPIO
-from rp2040py.peripherals.pads import RPPADS
-from rp2040py.peripherals.peripheral import Peripheral, UnimplementedPeripheral
-from rp2040py.peripherals.pio import RPPIO
-from rp2040py.peripherals.pll import RPPLL
-from rp2040py.peripherals.rtc import RP2040RTC
-from rp2040py.peripherals.timer import RPTimer
-from rp2040py.peripherals.usb import RPUSBController
-from rp2040py.peripherals.xip_ctrl import RPXIPCtrl
+from rp2040py.peripherals.peripheral import Peripheral
 from rp2040py.qspi_pads import QSPI_PAD_RESET_VALUES
-from rp2040py.sio import RPSIO
+from rp2040py.reset_cause import ResetCause
 from rp2040py.utils.bit import (
     read_uint16_le,
     read_uint32_le,
@@ -163,16 +178,17 @@ class RP2040:
         self.pwm = RPPWM(self, "PWM_BASE")
         self.adc = RPADC(self, "ADC")
 
-        self.gpio = [GPIOPin(self, i) for i in range(30)]
+        # The chip's pins are slots of two banks (30 GPIO pins, 6 QSPI pins) - the same objects the native build has, so the chip asks the bank for what is a property of all
+        # its pins at once (`gpio_values`, the IO_BANK0 interrupt line) in either build. `gpio` / `qspi` are the banks' own pin lists.
+        self._gpio_bank = GPIOPinBank(self, 30)
+        self._qspi_bank = GPIOPinBank(self, 6, True)
+        self.gpio = self._gpio_bank.shells
+        for i in range(30):
+            GPIOPin(self, i, bank=self._gpio_bank)
 
-        self.qspi = [
-            GPIOPin(self, 0, "SCLK", always_output_enabled=True),
-            GPIOPin(self, 1, "SS", always_output_enabled=True),
-            GPIOPin(self, 2, "SD0", always_output_enabled=True),
-            GPIOPin(self, 3, "SD1", always_output_enabled=True),
-            GPIOPin(self, 4, "SD2", always_output_enabled=True),
-            GPIOPin(self, 5, "SD3", always_output_enabled=True),
-        ]
+        self.qspi = self._qspi_bank.shells
+        for i, name in enumerate(("SCLK", "SS", "SD0", "SD1", "SD2", "SD3")):
+            GPIOPin(self, i, name, bank=self._qspi_bank)
         # GPIOPin's own constructor default is PADS_BANK0's reset value, which is wrong for this
         # bank: PADS_QSPI resets each pad differently (RP2040 datasheet 2.19.6.3), and the
         # difference is load-bearing. GPIO_QSPI_SS is the only pad with a pull-up, which is what
@@ -181,7 +197,7 @@ class RP2040:
         # polls it - CircuitPython 10.x does, from RAM, during boot - never sees it go high.
         # See docs/records/0050-qspi-pad-reset-values.md.
         for _qspi_pin, _pad_reset in zip(self.qspi, QSPI_PAD_RESET_VALUES):
-            _qspi_pin.pad_value = _pad_reset
+            _qspi_pin.reset(io=False, pad_reset=_pad_reset)
 
         self.dma = RPDMA(self, "DMA")
         self.pio = [
@@ -220,17 +236,21 @@ class RP2040:
         self.xip_ctrl = RPXIPCtrl(self, "XIP_CTRL_BASE")
         self.ssi = RPSSI(self, "SSI")
         self.xosc = RPXOSC(self, "XOSC_BASE")
+        self.io_bank0 = RPIO(self, "IO_BANK0_BASE")
+        self.io_qspi = RPIO(self, "IO_QSPI_BASE", pins=self.qspi)
+        self.rosc = RPROSC(self, "ROSC_BASE")
 
         self.peripherals: dict[int, Peripheral] = {
             0x14000: self.xip_ctrl,
+            0x50400: RPXIPAux(self, "XIP_AUX_BASE"),
             0x18000: self.ssi,
             0x40000: RP2040SysInfo(self, "SYSINFO_BASE"),
             0x40004: self.syscfg,
             0x40008: self.clocks,
             0x4000C: self.resets,
             0x40010: self.psm,
-            0x40014: RPIO(self, "IO_BANK0_BASE"),
-            0x40018: RPIO(self, "IO_QSPI_BASE", pins=self.qspi),
+            0x40014: self.io_bank0,
+            0x40018: self.io_qspi,
             0x4001C: self.pads_bank0,
             0x40020: self.pads_qspi,
             0x40024: self.xosc,
@@ -248,7 +268,7 @@ class RP2040:
             0x40054: self.timer,
             0x40058: self.watchdog,
             0x4005C: self.rtc,
-            0x40060: UnimplementedPeripheral(self, "ROSC_BASE"),
+            0x40060: self.rosc,
             0x40064: self.vreg_and_chip_reset,
             0x4006C: RPTBMAN(self, "TBMAN_BASE"),
             0x50000: self.dma,
@@ -282,26 +302,45 @@ class RP2040:
 
         self.reset()
 
-    def enter_reset(self, *, from_watchdog: bool = False) -> None:
-        """Put the chip *into* reset: every block this reset covers goes to its reset values, and
-        the USB controller's `on_reset` fires so whatever is attached to the bus clears itself.
+    def enter_reset(self, *, from_watchdog: bool | None = None, cause: ResetCause | None = None) -> None:
+        """Put the chip *into* reset: every block this reset covers goes to its reset values, the cause is
+        recorded, and the USB controller's `on_reset` fires so whatever is attached to the bus clears itself.
 
         The chip-level half of a reset, owned by the chip (0057's option B). `BaseDevice` used to
         run this sequence itself, which meant anything holding a bare `RP2040` - the `run`
         subcommand, a board file, an `ExternalDevice` that only ever gets `attach(rp2040)` - could
         reset the chip and leave the host side of the USB link stale. What the device layer still
-        owns is the *cause* bookkeeping and the awaitable form, both of which need things this
-        object does not have.
+        owns is the awaitable form, which needs things this object does not have.
 
-        `from_watchdog` picks the WDSEL-gated domain set; see `reset()`. The `on_reset`
-        notification is **not** gated by it: the USB block is only register-reset when WDSEL
-        selects it, but a chip reset drops the device off the host's bus either way, and
-        `hard_reset()`'s guarantee (0089) must not become conditional on what a guest wrote there.
+        `cause` is why (`ResetCause`; default `RUN_PIN`, what a host-side "reset the board" is physically,
+        0089's D4). It picks the WDSEL-gated domain set (`WATCHDOG` is the only one that does; see `reset()`)
+        and what firmware reads back afterwards (0089 section 1.3): a `RUN_PIN` / `POWER_ON` reset clears the
+        watchdog's REASON / SCRATCH and sets CHIP_RESET to `HAD_RUN` / `HAD_POR`; a `WATCHDOG` reset leaves both
+        alone. The chip records it itself, *after* the reset (so the wider reset cannot wipe it), so a chip with
+        no device layer reports the same cause a device does (docs/records/0096-cpp-mcu-core.md, step 1, F1).
+        `from_watchdog=True` is the older spelling of `cause=ResetCause.WATCHDOG`; giving both and
+        contradicting them is an error. The `on_reset` notification is **not** gated by the cause: the USB
+        block is only register-reset when WDSEL selects it, but a chip reset drops the device off the host's bus
+        either way, and `hard_reset()`'s guarantee (0089) must not become conditional on what a guest wrote there.
         Does not start execution again - `leave_reset()` is that, and the RUN pin needs the two
         separable because a held button stays in the first."""
-        self.reset(preserve_flash=True, from_watchdog=from_watchdog)
+        if cause is None:
+            cause = ResetCause.WATCHDOG if from_watchdog else ResetCause.RUN_PIN
+        elif from_watchdog is not None and from_watchdog != (cause is ResetCause.WATCHDOG):
+            raise ValueError(f"enter_reset(from_watchdog={from_watchdog}, cause={cause}): they disagree")
+        self.reset(preserve_flash=True, from_watchdog=cause is ResetCause.WATCHDOG)
         if self.usb_ctrl.on_reset:
             self.usb_ctrl.on_reset()
+        self._record_reset_cause(cause)
+
+    def _record_reset_cause(self, cause: ResetCause) -> None:
+        """0089 section 1.3's table. A watchdog reset is the *absence* of bookkeeping: the watchdog block survives its own reset with REASON (and
+        `watchdog_enable()`'s SCRATCH[4] magic) intact, and CHIP_RESET is untouched, so firmware sees WDT/SOFTWARE/WATCHDOG exactly as it does on
+        silicon. Anything else resets the watchdog and records a chip-level cause (CHIP_RESET reports the *last* reset, one flag at a time)."""
+        if cause is ResetCause.WATCHDOG:
+            return
+        self.watchdog.reset()
+        self.vreg_and_chip_reset.record_reset_cause(HAD_RUN if cause is ResetCause.RUN_PIN else HAD_POR)
 
     def leave_reset(self) -> None:
         """Release the chip: point the core at flash's entry point, where the bootrom would have
@@ -412,7 +451,7 @@ class RP2040:
 
         What is still *not* reset, split by why:
 
-        - **`rosc`** - nothing to reset. It is an `UnimplementedPeripheral` with no state at all.
+        - **`rosc`** - not a special case any more: a `PSM.WDSEL` domain like XOSC, handled by the same gate.
         - **`xosc`** - not a special case at all any more: it is a `PSM.WDSEL` domain like SIO and
           CLOCKS, so the existing gate gets it exactly right on both paths. `watchdog_reboot()`
           selects "everything apart from ROSC and XOSC" - the oscillators produce the clock the
@@ -451,11 +490,12 @@ class RP2040:
             self.sio.reset()
         if psm_wdsel & WDSEL_CLOCKS:
             self.clocks.reset()
-            reset_clock_tree(self)
+            self.clocks.reset_tree()
 
         if resets_wdsel & RESET_IO_BANK0:
             for pin in self.gpio:
                 pin.reset(pads=False)
+            self.io_bank0.reset()
         if resets_wdsel & RESET_PADS_BANK0:
             for pin in self.gpio:
                 pin.reset(io=False)
@@ -463,14 +503,13 @@ class RP2040:
         if resets_wdsel & RESET_IO_QSPI:
             for qspi_pin in self.qspi:
                 qspi_pin.reset(pads=False)
+            self.io_qspi.reset()
         if resets_wdsel & RESET_PADS_QSPI:
-            for qspi_pin in self.qspi:
-                qspi_pin.reset(io=False)
             # PADS_QSPI does not share BANK0's reset value - GPIO_QSPI_SS's pull-up is what holds
             # the flash deselected and what makes BOOTSEL readable (record 0050). Re-applied here
             # exactly as __init__ does it, right after the generic pad reset above.
             for qspi_pin, pad_reset in zip(self.qspi, QSPI_PAD_RESET_VALUES):
-                qspi_pin.pad_value = pad_reset
+                qspi_pin.reset(io=False, pad_reset=pad_reset)
             self.pads_qspi.reset()
 
         if resets_wdsel & RESET_PWM:
@@ -509,9 +548,12 @@ class RP2040:
         # all (read-only chip identity), so `BasePeripheral`'s default no-op is the correct implementation.
         if psm_wdsel & WDSEL_XOSC:
             # Only ever selected on a RUN-pin/power-on reset: `watchdog_reboot()` clears this bit
-            # deliberately, because the oscillators clock the reset itself. `rosc` has no
-            # counterpart here - it is an UnimplementedPeripheral with no state to restore.
+            # deliberately, because the oscillators clock the reset itself. `rosc`
+            # follows below.
             self.xosc.reset()
+        if psm_wdsel & WDSEL_ROSC:
+            # Like XOSC: only ever selected on a RUN-pin/power-on reset (`watchdog_reboot()` clears it)
+            self.rosc.reset()
         if psm_wdsel & WDSEL_XIP:
             # The XIP domain is a PSM bit, not a RESETS one - there is no RESETS_RESET_XIP or
             # _SSI. Both halves of it reset together, as they do on silicon.
@@ -523,7 +565,7 @@ class RP2040:
 
     def update_clocks(self) -> None:
         """Re-derives `clk_sys`/`clk_peri` from the PLL and CLOCKS registers and retunes what runs from them (see `peripherals.clocks.update_clocks`)."""
-        update_clocks(self)
+        self.clocks.update()
 
     def add_clock_listener(self, listener: "Callable[[float, float], None]") -> "Callable[[], None]":
         """Calls `listener(clk_sys, old_clk_sys)` whenever clk_sys changes - for anything that derives a rate from it (a PIO clock divider, say). Returns the
@@ -549,8 +591,12 @@ class RP2040:
             # - 0x11000000 XIP_NOALLOC
             # - 0x12000000 XIP_NOCACHE
             # - 0x13000000 XIP_NOCACHE_NOALLOC
-            offset = address & 0x00FFFFFF
-            return read_uint32_le(self.flash, offset)
+            self.xip_ctrl.access(address)
+            return read_uint32_le(self.flash, address & 0x00FFFFFF)
+        if address >> 24 == 0x15:
+            # the cache's data RAM, usable as SRAM while the cache is off (a bus error otherwise)
+            value = self.xip_ctrl.sram_read(address)
+            return 0xFFFFFFFF if value is None else value
         if RAM_START_ADDRESS <= address < RAM_START_ADDRESS + self.ram_byte_size:
             return read_uint32_le(self.sram, address - RAM_START_ADDRESS)
         if DPRAM_START_ADDRESS <= address < DPRAM_START_ADDRESS + self.dpram_byte_size:
@@ -577,6 +623,7 @@ class RP2040:
     def read_uint16(self, address: int) -> int:
         """We assume the address is 16-bit aligned."""
         if FLASH_START_ADDRESS <= address < FLASH_START_ADDRESS + self.flash_byte_size:
+            self.xip_ctrl.access(address)
             return read_uint16_le(self.flash, address - FLASH_START_ADDRESS)
         if RAM_START_ADDRESS <= address < RAM_START_ADDRESS + self.ram_byte_size:
             return read_uint16_le(self.sram, address - RAM_START_ADDRESS)
@@ -586,6 +633,7 @@ class RP2040:
 
     def read_uint8(self, address: int) -> int:
         if FLASH_START_ADDRESS <= address < FLASH_START_ADDRESS + self.flash_byte_size:
+            self.xip_ctrl.access(address)
             return self.flash[address - FLASH_START_ADDRESS]
         if RAM_START_ADDRESS <= address < RAM_START_ADDRESS + self.ram_byte_size:
             return self.sram[address - RAM_START_ADDRESS]
@@ -603,8 +651,11 @@ class RP2040:
         # was always going to miss; write_uint8()/write_uint16() never had this problem.
         if address < self.bootrom_byte_size:
             bootrom[address // 4] = value & 0xFFFFFFFF
-        elif FLASH_START_ADDRESS <= address < FLASH_START_ADDRESS + self.flash_byte_size:
-            write_uint32_le(self.flash, address - FLASH_START_ADDRESS, value)
+        elif FLASH_START_ADDRESS <= address < FLASH_END_ADDRESS:
+            # the XIP window is read-only to the bus: flash changes through the SSI, and a write here only deletes a matching cache entry (or faults)
+            self.xip_ctrl.write_access(address)
+        elif address >> 24 == 0x15:
+            self.xip_ctrl.sram_write(address, value)
         elif RAM_START_ADDRESS <= address < RAM_START_ADDRESS + self.ram_byte_size:
             write_uint32_le(self.sram, address - RAM_START_ADDRESS, value)
         elif DPRAM_START_ADDRESS <= address < DPRAM_START_ADDRESS + self.dpram_byte_size:
@@ -627,6 +678,9 @@ class RP2040:
     def write_uint8(self, address: int, value: int) -> None:
         if RAM_START_ADDRESS <= address < RAM_START_ADDRESS + self.ram_byte_size:
             self.sram[address - RAM_START_ADDRESS] = value & 0xFF
+            return
+        if FLASH_START_ADDRESS <= address < FLASH_END_ADDRESS:
+            self.xip_ctrl.write_access(address)
             return
 
         aligned_address = u32(address & 0xFFFFFFFC)
@@ -653,6 +707,9 @@ class RP2040:
         if RAM_START_ADDRESS <= address < RAM_START_ADDRESS + self.ram_byte_size:
             write_uint16_le(self.sram, address - RAM_START_ADDRESS, value)
             return
+        if FLASH_START_ADDRESS <= address < FLASH_END_ADDRESS:
+            self.xip_ctrl.write_access(address)
+            return
 
         aligned_address = u32(address & 0xFFFFFFFC)
         offset = address & 0x3
@@ -669,21 +726,13 @@ class RP2040:
 
     @property
     def gpio_values(self) -> int:
-        result = 0
-        for gpio_index in range(len(self.gpio)):
-            if self.gpio[gpio_index].input_value:
-                result |= 1 << gpio_index
-        return result
+        return self._gpio_bank.input_values()
 
     def set_interrupt(self, irq: int, value: bool) -> None:
         self.core.set_interrupt(irq, value)
 
     def update_io_interrupt(self) -> None:
-        interrupt_value = False
-        for pin in self.gpio:
-            if pin.irq_value:
-                interrupt_value = True
-        self.set_interrupt(IRQ.IO_BANK0, interrupt_value)
+        self.set_interrupt(IRQ.IO_BANK0, self._gpio_bank.any_irq_value())
 
     def step(self) -> None:
         self.core.execute_instruction()

@@ -35,10 +35,26 @@ cdef class RPTBMAN:
         cdef TbmanHost host
         self.rp2040 = rp2040
         self.name = name
+        address = getattr(rp2040, "_native_tbman_address", None)
+        if address is not None:
+            # the chip's C++ `Mcu` has built the block already - with its window on the bus - and this object is the Python view of it
+            self._block = <TbmanBlock*> <size_t> address()
+            return
+        # a stand-in chip (an oracle's, a test's) has no `Mcu`: the shell owns a block and wires it to the stand-in's logger
+        self._block = &self._own
         host.warn = _warn_trampoline
         host.ctx = <void*> self
         host.failed = pending_flag()
-        self._block.init(host)
+        self._own.init(host)
+
+    def _warn_kind(self, kind, offset, value):
+        """A register access the block does not implement, as the logger's message (the chip's host calls this for the block it built)."""
+        if kind == kTbmanWarnRead:
+            self.warn(f"Unimplemented peripheral read from 0x{offset:x}")
+        elif kind == kTbmanWarnReadAtomicArea:
+            self.warn("Unimplemented read from peripheral in the atomic operation region")
+        else:
+            self.warn(f"Unimplemented peripheral write to 0x{offset:x}: 0x{value:x}")
 
     @property
     def raw_write_value(self):

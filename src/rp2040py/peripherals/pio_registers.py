@@ -9,7 +9,7 @@ cycle. Pure constants/helpers only, no classes, so both sides can depend on it s
 
 from enum import IntEnum
 
-from rp2040py.peripherals.dma import DREQChannel
+from rp2040py.peripherals._dma import DREQChannel
 
 __all__ = (
     "CTRL",
@@ -21,6 +21,9 @@ __all__ = (
     "DREQ_TX0",
     "DREQ_TX1",
     "EXECCTRL_EXEC_STALLED",
+    "EXECCTRL_INLINE_OUT_EN",
+    "EXECCTRL_OUT_EN_SEL_LSB",
+    "EXECCTRL_OUT_STICKY",
     "EXECCTRL_SIDE_EN",
     "EXECCTRL_SIDE_PINDIR",
     "EXECCTRL_STATUS_SEL",
@@ -53,6 +56,8 @@ __all__ = (
     "RXF3",
     "SHIFTCTRL_AUTOPULL",
     "SHIFTCTRL_AUTOPUSH",
+    "SHIFTCTRL_FJOIN_RX",
+    "SHIFTCTRL_FJOIN_TX",
     "SHIFTCTRL_IN_SHIFTDIR",
     "SHIFTCTRL_OUT_SHIFTDIR",
     "SM0_ADDR",
@@ -136,10 +141,15 @@ FDEBUG_RXSTALL = 1 << 0
 SHIFTCTRL_AUTOPUSH = 1 << 16
 SHIFTCTRL_AUTOPULL = 1 << 17
 SHIFTCTRL_IN_SHIFTDIR = 1 << 18  # 1 = shift input shift register to right (data enters from left). 0 = to left
+SHIFTCTRL_FJOIN_TX = 1 << 30  # TX FIFO steals the RX FIFO's storage: 8 deep, the RX FIFO is disabled
+SHIFTCTRL_FJOIN_RX = 1 << 31  # RX FIFO steals the TX FIFO's storage: 8 deep, the TX FIFO is disabled
 SHIFTCTRL_OUT_SHIFTDIR = 1 << 19  # 1 = shift out of output shift register to right. 0 = to left
 
 # EXECCTRL bits
 EXECCTRL_STATUS_SEL = 1 << 4
+EXECCTRL_OUT_STICKY = 1 << 17  # "Continuously assert the most recent OUT/SET to the pins"
+EXECCTRL_INLINE_OUT_EN = 1 << 18  # "use a bit of OUT data as an auxiliary write enable"
+EXECCTRL_OUT_EN_SEL_LSB = 19  # 23:19 "Which data bit to use for inline OUT enable"
 EXECCTRL_SIDE_PINDIR = 1 << 29
 EXECCTRL_SIDE_EN = 1 << 30
 EXECCTRL_EXEC_STALLED = 1 << 31

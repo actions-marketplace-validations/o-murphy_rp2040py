@@ -233,6 +233,10 @@ def mutant_rig(name: str) -> Rig:
         def _on_multi_shot_alarm(self) -> None:
             if name == "multi_shot_ignored":
                 return
+            if name == "multi_shot_ignores_en":
+                if self.cs & P.CS_START_MANY:
+                    self.start_adc_read()
+                return
             if name == "multi_shot_checks_start_one":
                 if self.cs & P.CS_START_ONE:
                     self.start_adc_read()
@@ -343,7 +347,8 @@ def mutant_rig(name: str) -> Rig:
                 while not (round_mask & (1 << channel)):
                     channel = (channel + 1) % self.num_channels
                 self._active_channel = channel
-            if self.cs & P.CS_START_MANY and name != "c_no_multi_shot":
+            en_ok = True if name == "c_multi_shot_ignores_en" else bool(self.cs & P.CS_EN)
+            if self.cs & P.CS_START_MANY and en_ok and name != "c_no_multi_shot":
                 clock_mhz = 48
                 sample_ticks = clock_mhz * self.sample_time
                 gate = self.divider >= sample_ticks if name == "c_divider_ge" else self.divider > sample_ticks
@@ -389,6 +394,13 @@ def mutant_rig(name: str) -> Rig:
                     self.fcs |= P.FCS_UNDER
                     return 0
                 return self.fifo.pull()
+            if offset == P.FIFO_REG and name == "fifo_read_no_irq":
+                if self.fifo.empty:
+                    self.fcs |= P.FCS_UNDER
+                    return 0
+                value = self.fifo.pull()
+                self._update_dma()
+                return value
             if offset == P.INTR and name == "intr_is_status":
                 return self.int_status
             if offset == P.INTE and name == "inte_reads_force":
@@ -524,7 +536,7 @@ MUTANTS = (
     "int_status_no_mask", "dma_gt", "dma_ignores_dreq_en", "dma_never_clears", "c_busy_kept", "c_result_not_stored", "c_result_unmasked", "c_err_missing", "c_err_never_cleared", "c_fifo_always",
     "c_overflow_silent", "c_value_unmasked", "c_shift_ignored", "c_shift_8", "c_fifo_err_ignored", "c_no_dma", "c_no_interrupts", "c_no_round_robin", "c_round_robin_same",
     "c_no_multi_shot", "c_divider_ge", "c_micros_doubled", "cs_ready_inverted", "cs_ready_missing", "cs_ready_without_en", "fcs_level_unmasked", "fcs_full_missing", "fcs_empty_missing",
-    "fifo_read_no_under", "fifo_read_no_dma", "intr_is_status", "inte_reads_force", "cs_start_without_en", "cs_start_when_busy", "cs_mask_all",
+    "fifo_read_no_under", "fifo_read_no_dma", "fifo_read_no_irq", "multi_shot_ignores_en", "c_multi_shot_ignores_en", "intr_is_status", "inte_reads_force", "cs_start_without_en", "cs_start_when_busy", "cs_mask_all",
     "cs_start_one_only", "fcs_over_not_cleared", "fcs_no_check", "fcs_mask_all", "div_unmasked", "inte_unmasked", "inte_no_check", "intf_unmasked", "intf_no_check",
     "reset_keeps_alarms", "reset_keeps_fifo", "reset_keeps_div", "reset_no_irq", "reset_clears_callback", "reset_clears_channel_values",
     "cs_sticky_in_fcs", "ainsel_setter_shift_mask", "c_round_robin_unwrapped", "fcs_no_dma", "dma_off_keeps", "cs_start_one_sticky",
@@ -599,8 +611,11 @@ def generate(seed: int, steps: int) -> list[tuple]:
             rr = r.choice((0, 0x11, 0x1F, 0x0F, 0x10, 0x03))
             ops.append(("write", P.CS, P.CS_EN | P.CS_START_MANY | (rr << P.CS_RROBIN_SHIFT), ALIASES[0]))
             ops.extend(("tick", r.choice((2000, 4000, 30_000, 100_000))) for _ in range(r.choice((2, 4, 8))))
-            if r.random() < 0.7:
-                ops.append(("write", P.CS, P.CS_EN, ALIASES[0]))
+            if (
+                r.random() < 0.7
+            ):  # stop it: START_MANY cleared, or (a third of the time) EN cleared with START_MANY left - the capture must halt all the same
+                ops.append(("write", P.CS, r.choice((P.CS_EN, P.CS_EN, P.CS_START_MANY)), ALIASES[0]))
+                ops.append(("tick", r.choice((2000, 30_000, 100_000))))
         elif roll < 0.68:
             ops.extend(("read", P.FIFO_REG, ALIASES[0]) for _ in range(r.choice((1, 1, 3, 5))))
         elif roll < 0.76:

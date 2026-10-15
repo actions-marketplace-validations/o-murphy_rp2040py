@@ -15,16 +15,18 @@ inside `on_transmit`: the block is re-entered from its own host callback, as the
 
 The API is the reference's: the registers' private attributes (readable and writable), `rx_fifo`/`tx_fifo` (views with the reference FIFO's attribute
 names), `int_status`, `enabled`, `data_bits`, `master_mode`, `spi_mode`, `clock_frequency`, `complete_transmit`, `check_interrupts`, `reset`, plus
-`BasePeripheral`'s surface. Unlike the DMA it needs neither the chip's bus nor a native clock.
+`BasePeripheral`'s surface. Unlike the DMA it does not need the chip's bus, but a word's time on the wire is an alarm of the chip's C++ clock, so it needs the native `SimulationClock` (as the UART and the ADC do).
 """
 
 from libc.stdint cimport int64_t, uint32_t
 from libcpp cimport bool as cppbool
 
+from rp2040py.native._mcu_irq cimport Mcu, McuIrqLine, mcu_irq_line, native_mcu, McuDreqPair, mcu_dreq_pair
 from rp2040py.native._pending cimport park_error, pending_flag, raise_if_pending
+from rp2040py.native._simulation_clock cimport SimulationClock
 from rp2040py.native._window_map cimport WindowHandler
 
-from rp2040py.peripherals._spi import _clock_frequency
+from rp2040py.peripherals._spi import _bit_ns, _clock_frequency
 
 __all__ = ("RPSPI",)
 
@@ -67,6 +69,16 @@ cdef cppbool _transmit_trampoline(void* ctx, uint32_t value) noexcept:
             # The reference's default device: the byte comes straight back as 0, from inside the callback. Never leaves C++.
             return spi._block.complete_transmit(0)
         callback(value)
+    except BaseException as error:
+        park_error(error)
+        return False
+    return True
+
+
+cdef cppbool _bit_trampoline(void* ctx, double* nanos) noexcept:
+    cdef RPSPI spi = <RPSPI> ctx
+    try:
+        nanos[0] = _bit_ns(spi.rp2040.clk_peri, spi._block.clock_divisor, (spi._block.control0 >> SCR_SHIFT) & SCR_MASK)
     except BaseException as error:
         park_error(error)
         return False
@@ -130,23 +142,80 @@ cdef class _Fifo:
 
 
 cdef class RPSPI:
-    def __init__(self, rp2040, name, irq, dreq):
+    def __init__(self, rp2040, name, irq, dreq, mcu_index=-1):
         cdef SpiHost host
+        clock = rp2040.clock
+        if not isinstance(clock, SimulationClock):
+            raise TypeError(
+                "the native SPI schedules a word's time on the wire as an alarm of the native SimulationClock; "
+                f"{type(rp2040).__name__} with {type(clock).__name__} is not that "
+                "(use the pure-Python peripherals/_spi.RPSPI with it)"
+            )
+        self.clock = clock
         self.rp2040 = rp2040
         self.name = name
         self.irq = irq
         self.dreq = dreq
         self._on_transmit = None
-        host.irq = _irq_trampoline
-        host.dreq = _dreq_trampoline
+        self._from_mcu = mcu_index >= 0
+        if mcu_index >= 0:
+            # the chip's C++ `Mcu` has built this block already - with its window on the bus, its line and request on the chip - and this object is the Python view of it
+            self._block = <SpiBlock*> <size_t> rp2040._native_spi_address(mcu_index)
+            if not self._block.power_on():
+                raise_if_pending()
+            return
+        self._block = &self._own
+        mcu = native_mcu(rp2040)
+        if mcu != NULL:
+            # the line goes from the C++ block straight to the chip's CPU, with no Python in between
+            self._irq_line.mcu = mcu
+            self._irq_line.line = <uint32_t> int(irq)
+            host.irq = mcu_irq_line
+            host.irq_ctx = &self._irq_line
+        else:
+            host.irq = _irq_trampoline
+            host.irq_ctx = NULL
+        if mcu != NULL:
+            # the request goes from the C++ block straight to the chip (and its DMA), with no Python in between
+            self._dreq_pair.mcu = mcu
+            self._dreq_pair.if_true = <uint32_t> int(self.dreq.tx)
+            self._dreq_pair.if_false = <uint32_t> int(self.dreq.rx)
+            host.dreq = mcu_dreq_pair
+            host.dreq_ctx = &self._dreq_pair
+        else:
+            host.dreq = _dreq_trampoline
+            host.dreq_ctx = NULL
         host.transmit = _transmit_trampoline
+        host.bit_ns = _bit_trampoline
         host.warn = _warn_trampoline
         host.ctx = <void*> self
         host.failed = pending_flag()
-        self._block.init(host)
+        self._own.init(&(<SimulationClock> clock)._clock, host)
         # The reference's constructor publishes both DREQs.
         if not self._block.power_on():
             raise_if_pending()
+
+    def _world_transmit(self, value):
+        """A word is on the wire: the attached device answers; with none, the byte comes straight back as 0 (the reference's default device)."""
+        callback = self._on_transmit
+        if callback is None:
+            return bool(self._block.complete_transmit(0))
+        callback(value)
+        return True
+
+    def _warn_kind(self, kind, offset, value):
+        """A register access the block does not implement, as the logger's message (the chip's host calls this for the block it built)."""
+        if kind == kSpiWarnRead:
+            self.warn(f"Unimplemented peripheral read from 0x{offset:x}")
+        elif kind == kSpiWarnReadAtomicArea:
+            self.warn("Unimplemented read from peripheral in the atomic operation region")
+        else:
+            self.warn(f"Unimplemented peripheral write to 0x{offset:x}: 0x{value:x}")
+
+    def __dealloc__(self):
+        # Safe whichever of this block and its clock the collector frees first: the C++ clock unlinks its alarms when it dies.
+        if self._block == &self._own:
+            self._own.detach()
 
     # --- the device on the bus -------------------------------------------------------------------
 
@@ -191,6 +260,14 @@ cdef class RPSPI:
     @_busy.setter
     def _busy(self, value):
         self._block.busy = bool(value)
+
+    @property
+    def _frame_active(self):
+        return bool(self._block.frame_active)
+
+    @property
+    def _reply(self):
+        return self._block.reply if self._block.has_reply else None
 
     @property
     def _control0(self):

@@ -38,8 +38,17 @@ REGISTERS = (
     P.CPUID,
     P.ICSR,
     P.VTOR,
+    P.AIRCR,
+    P.SCR,
+    P.CCR,
     P.SHPR2,
     P.SHPR3,
+    P.SHCSR,
+    P.MPU_TYPE,
+    P.MPU_CTRL,
+    P.MPU_RNR,
+    P.MPU_RBAR,
+    P.MPU_RASR,
     P.SYST_CSR,
     P.SYST_RVR,
     P.SYST_CVR,
@@ -55,11 +64,11 @@ UNIMPLEMENTED = (
     0x008,
     0x00C,
     0x020,
-    0xD0C,
-    0xD10,
-    0xD14,
-    0xD24,
+    0xD18,
+    0xD28,
     0xD2C,
+    0xD9C + 0x14,
+    0xDC0,
     0xE00,
     0x104,
     0x300,
@@ -90,6 +99,8 @@ class Rig:
             assert factory is not None
             self._replace_the_ppb(factory)
         self._tap()
+        # AIRCR.SYSRESETREQ: logged instead of resetting the core, so that the two sides are compared on *when* and *how often* it is asked for (the default handler is tested on its own)
+        self.chip.ppb.on_system_reset_request = lambda: self.log.append(("sysreset", self.chip.clock.nanos))
 
     def _replace_the_ppb(self, factory: Callable[..., Any]) -> None:
         chip = self.chip
@@ -158,6 +169,13 @@ class Rig:
                 int(timer.counter),
                 int(ppb.systick_alarm.target),
                 bool(ppb.systick_alarm.enable),
+            ),
+            "system": (
+                int(ppb.scr),
+                int(ppb.mpu_ctrl),
+                int(ppb.mpu_rnr),
+                tuple(int(word) for word in ppb.mpu_rbar),
+                tuple(int(word) for word in ppb.mpu_rasr),
             ),
             "regs": tuple(int(chip.read_uint32(PPB_BASE + offset)) for offset in SNAPSHOT_REGISTERS),
             "core": (
@@ -348,8 +366,105 @@ MUTATIONS: dict[str, tuple[str, str, int]] = {
         1,
     ),
     # -- VTOR / SHPR
-    "vtor_not_written": ("            core.vtor = value\n", "            pass\n", 1),
-    "shpr2_writes_shpr3": ("            core.shpr2 = value\n", "            core.shpr3 = value\n", 1),
+    "vtor_not_written": ("            core.vtor = value & VTOR_MASK\n", "            pass\n", 1),
+    "vtor_unmasked": ("            core.vtor = value & VTOR_MASK\n", "            core.vtor = value\n", 1),
+    "shpr2_unmasked": ("core.shpr2 = value & SHPR2_MASK", "core.shpr2 = value", 1),
+    "shpr3_unmasked": ("core.shpr3 = value & SHPR3_MASK", "core.shpr3 = value", 1),
+    "shpr2_writes_shpr3": (
+        "            core.shpr2 = value & SHPR2_MASK\n",
+        "            core.shpr3 = value & SHPR3_MASK\n",
+        1,
+    ),
+    # -- AIRCR / SCR / CCR / SHCSR
+    "aircr_no_key_check": (
+        "(value >> 16) & 0xFFFF == AIRCR_VECTKEY and value & AIRCR_SYSRESETREQ",
+        "value & AIRCR_SYSRESETREQ",
+        1,
+    ),
+    "aircr_key_only": (
+        "(value >> 16) & 0xFFFF == AIRCR_VECTKEY and value & AIRCR_SYSRESETREQ",
+        "(value >> 16) & 0xFFFF == AIRCR_VECTKEY",
+        1,
+    ),
+    "aircr_wrong_bit": ("AIRCR_SYSRESETREQ = 1 << 2", "AIRCR_SYSRESETREQ = 1 << 1", 1),
+    "aircr_read_value": ("AIRCR_READ_VALUE = 0xFA050000", "AIRCR_READ_VALUE = 0", 1),
+    "scr_unmasked": ("self.scr = value & SCR_MASK", "self.scr = value", 1),
+    "scr_not_stored": ("self.scr = value & SCR_MASK", "pass", 1),
+    "scr_survives_reset": ("        self.scr = 0\n", '        self.scr = getattr(self, "scr", 0)\n', 1),
+    "ccr_value": ("CCR_VALUE = 0x208", "CCR_VALUE = 0", 1),
+    "ccr_writable": (
+        "        if offset == CCR or offset == MPU_TYPE:\n            return  # read-only",
+        "        if offset == MPU_TYPE:\n            return  # read-only",
+        1,
+    ),
+    "shcsr_read_zero": ("return SHCSR_SVCALLPENDED if core.pending_svcall else 0", "return 0", 1),
+    "shcsr_never_clears": ("            else:\n                core.pending_svcall = False\n", "", 1),
+    "shcsr_no_update": (
+        "                core.pending_svcall = True\n                core.interrupts_updated = True\n",
+        "                core.pending_svcall = True\n",
+        1,
+    ),
+    # -- MPU
+    "mpu_type_value": ("MPU_TYPE_VALUE = 0x800", "MPU_TYPE_VALUE = 0x400", 1),
+    "mpu_type_writable": ("        if offset == CCR or offset == MPU_TYPE:", "        if offset == CCR:", 1),
+    "mpu_ctrl_unmasked": ("self.mpu_ctrl = value & MPU_CTRL_MASK", "self.mpu_ctrl = value", 1),
+    "mpu_ctrl_survives_reset": (
+        "        self.mpu_ctrl = 0\n",
+        '        self.mpu_ctrl = getattr(self, "mpu_ctrl", 0)\n',
+        1,
+    ),
+    "mpu_rnr_unmasked": (
+        "self.mpu_rnr = value & MPU_RNR_MASK\n            return",
+        "self.mpu_rnr = value\n            return",
+        1,
+    ),
+    "mpu_rnr_survives_reset": ("        self.mpu_rnr = 0\n", '        self.mpu_rnr = getattr(self, "mpu_rnr", 0)\n', 1),
+    "mpu_rbar_valid_ignored": (
+        "            if value & MPU_RBAR_VALID:\n                self.mpu_rnr = value & MPU_RNR_MASK\n",
+        "",
+        1,
+    ),
+    "mpu_rbar_valid_inverted": (
+        "            if value & MPU_RBAR_VALID:",
+        "            if not value & MPU_RBAR_VALID:",
+        1,
+    ),
+    "mpu_rbar_valid_unmasked": (
+        "                self.mpu_rnr = value & MPU_RNR_MASK\n            if self.mpu_rnr < MPU_REGIONS:",
+        "                self.mpu_rnr = value\n            if self.mpu_rnr < MPU_REGIONS:",
+        1,
+    ),
+    "mpu_rbar_addr_unmasked": (
+        "self.mpu_rbar[self.mpu_rnr] = value & MPU_RBAR_ADDR_MASK",
+        "self.mpu_rbar[self.mpu_rnr] = value",
+        1,
+    ),
+    "mpu_rbar_region_not_read": ("return self.mpu_rbar[region] | region", "return self.mpu_rbar[region]", 1),
+    "mpu_rbar_high_region_stores": (
+        "            if self.mpu_rnr < MPU_REGIONS:\n                self.mpu_rbar[self.mpu_rnr] = value & MPU_RBAR_ADDR_MASK",
+        "            if self.mpu_rnr < 16:\n                self.mpu_rbar[self.mpu_rnr % MPU_REGIONS] = value & MPU_RBAR_ADDR_MASK",
+        1,
+    ),
+    "mpu_rasr_unmasked": (
+        "self.mpu_rasr[self.mpu_rnr] = value & MPU_RASR_MASK",
+        "self.mpu_rasr[self.mpu_rnr] = value",
+        1,
+    ),
+    "mpu_rasr_high_region_reads": (
+        "return self.mpu_rasr[region] if region < MPU_REGIONS else 0",
+        "return self.mpu_rasr[region % MPU_REGIONS]",
+        1,
+    ),
+    "mpu_regions_alias": (
+        "self.mpu_rasr[self.mpu_rnr] = value & MPU_RASR_MASK",
+        "self.mpu_rasr[0] = value & MPU_RASR_MASK",
+        1,
+    ),
+    "mpu_regions_survive_reset": (
+        "        self.mpu_rbar = [0] * MPU_REGIONS\n",
+        '        self.mpu_rbar = getattr(self, "mpu_rbar", [0] * MPU_REGIONS)\n',
+        1,
+    ),
     "shpr3_reads_shpr2": ("            return core.shpr3\n", "            return core.shpr2\n", 1),
     # -- NVIC
     "ispr_no_update": (
@@ -523,6 +638,35 @@ def _nvic_scenario(r: random.Random) -> list[tuple]:
     return ops
 
 
+def _mpu_scenario(r: random.Random) -> list[tuple]:
+    """Fill some regions (and numbers past the eight that exist), then walk RNR over all sixteen reading RBAR / RASR back."""
+    ops: list[tuple] = []
+    for _ in range(r.randrange(1, 5)):
+        ops.append(("write", P.MPU_RNR, r.randrange(16)))
+        if r.random() < 0.5:
+            ops.append(("write", P.MPU_RBAR, r.getrandbits(32) | 0x10 * r.randrange(2)))
+        else:
+            ops.append(("write", P.MPU_RBAR, r.getrandbits(32) & ~0x10))
+        ops.append(("write", P.MPU_RASR, r.getrandbits(32)))
+    for region in range(16):
+        ops.append(("write", P.MPU_RNR, region))
+        ops.append(("read", P.MPU_RBAR))
+        ops.append(("read", P.MPU_RASR))
+    return ops
+
+
+def _system_scenario(r: random.Random) -> list[tuple]:
+    """AIRCR / SCR / SHCSR / ICSR hammered together: reset requests with good and bad keys, the SVCALL pending bit, the core taking what it can."""
+    ops: list[tuple] = []
+    for _ in range(r.randrange(2, 6)):
+        offset = r.choice((P.AIRCR, P.AIRCR, P.SCR, P.SHCSR, P.SHCSR, P.ICSR))
+        ops.append(("write", offset, _value(r, offset)))
+        ops.append(("read", r.choice((P.AIRCR, P.SCR, P.SHCSR, P.ICSR))))
+        if r.random() < 0.3:
+            ops.append(("service",))
+    return ops
+
+
 def _value(r: random.Random, offset: int) -> int:
     if offset == P.ICSR:
         return r.choice(
@@ -542,6 +686,29 @@ def _value(r: random.Random, offset: int) -> int:
         return r.choice((0, 1, 2, 3, 4, 5, 7, r.getrandbits(32)))
     if offset == P.SYST_RVR:
         return r.choice((*RELOADS, r.getrandbits(32)))
+    if offset == P.AIRCR:
+        return r.choice(
+            (
+                0,
+                4,
+                0x05FA0000,
+                0x05FA0004,
+                0x05FA0004,
+                0x05FA0004,
+                0x05FA0004,
+                0x05FA0001,
+                0xFA050004,
+                0x05FB0004,
+                0x04FA0004,
+                0x15FA0004,
+                r.getrandbits(32),
+                0x05FA0000 | r.getrandbits(16),
+            )
+        )
+    if offset == P.SHCSR:
+        return r.choice((0, 1 << 15, 0xFFFF7FFF, r.getrandbits(32)))
+    if offset in (P.MPU_RNR, P.MPU_RBAR):
+        return r.choice((0, 1, 7, 8, 15, 0x10, 0x17, 0x18, 0x1F, 0xFFFFFF10 | r.randrange(16), r.getrandbits(32)))
     if offset in (P.SHPR2, P.SHPR3):
         return r.choice((0, 0x40000000, 0x80000000, 0xC0000000, 0x00C00000, r.getrandbits(32)))
     if offset in NVIC_WORDS:
@@ -560,6 +727,10 @@ def generate(seed: int, steps: int) -> list[tuple]:
             ops.extend(_systick_fires_scenario(r))
         elif roll < 0.28:
             ops.extend(_nvic_scenario(r))
+        elif roll < 0.31:
+            ops.extend(_mpu_scenario(r))
+        elif roll < 0.35:
+            ops.extend(_system_scenario(r))
         elif roll < 0.46:
             offset = r.choice(REGISTERS)
             ops.append(("write", offset, _value(r, offset)))
@@ -702,6 +873,18 @@ def coverage(ops: list[tuple]) -> dict[str, int]:
             count("nvic.priorities_set")
         if core.pending_pend_sv or core.pending_nmi:
             count("scb.pending")
+        if core.pending_svcall:
+            count("scb.svcall_pending")
+        if ppb.scr:
+            count("scb.scr_set")
+        if ppb.mpu_ctrl:
+            count("mpu.enabled")
+        if any(ppb.mpu_rbar) or any(ppb.mpu_rasr):
+            count("mpu.regions_set")
+        if op[0] == "write" and op[1] == P.AIRCR and (op[2] >> 16) == 0x05FA and op[2] & 4:
+            count("aircr.sysreset")
+        if op[0] == "write" and op[1] == P.AIRCR and (op[2] >> 16) != 0x05FA and op[2] & 4:
+            count("aircr.bad_key")
         for event in rig.log[before:]:
             count(f"log.{event[0]}")
     return counts

@@ -22,6 +22,8 @@ struct Env {
     int64_t warn_value[16] = {};
     int warns = 0;
     int failed = 0;
+    int stable_calls = 0;
+    bool fail_stable = false;
 };
 static Env env;
 
@@ -34,12 +36,22 @@ static void on_warn(void*, uint32_t kind, uint32_t offset, int64_t value) {
     ++env.warns;
 }
 
+static bool on_stable(void*) {
+    ++env.stable_calls;
+    if (env.fail_stable) {
+        env.failed = 1;
+        return false;
+    }
+    return true;
+}
+
 static XoscBlock block;
 
 static void fresh() {
     env = Env();
     XoscHost host;
     host.warn = on_warn;
+    host.stable_changed = on_stable;
     host.failed = &env.failed;
     block.init(host);
     block.reset();
@@ -146,6 +158,46 @@ static void test_a_new_block_and_the_window_handler() {
     CHECK(handler.read32(handler.ctx, REG_COUNT) == 7);
 }
 
+static void test_the_host_hears_when_the_crystal_starts_or_stops() {
+    fresh();
+    CHECK(block.write(REG_CTRL, (CTRL_ENABLE_ENABLE << CTRL_ENABLE_LSB) | CTRL_FREQ_RANGE_1_15MHZ));
+    CHECK(env.stable_calls == 1);  // it became stable
+    CHECK(block.write(REG_CTRL, (CTRL_ENABLE_ENABLE << CTRL_ENABLE_LSB) | CTRL_FREQ_RANGE_1_15MHZ));
+    CHECK(env.stable_calls == 1);  // enabling it again changes nothing
+    CHECK(block.write(REG_STARTUP, 5) && block.write(REG_COUNT, 5) && block.write(REG_STATUS, STATUS_BADWRITE));
+    CHECK(env.stable_calls == 1);  // other registers do not tell
+    CHECK(block.write(REG_DORMANT, DORMANT_VALUE));
+    CHECK(env.stable_calls == 2);  // dormant: stopped
+    CHECK(block.write(REG_DORMANT, WAKE_VALUE));
+    CHECK(env.stable_calls == 3);  // woken while enabled: running again
+    CHECK(block.write(REG_CTRL, (CTRL_ENABLE_DISABLE << CTRL_ENABLE_LSB) | CTRL_FREQ_RANGE_1_15MHZ));
+    CHECK(env.stable_calls == 4);  // disabled
+    CHECK(block.write(REG_CTRL, (CTRL_ENABLE_DISABLE << CTRL_ENABLE_LSB) | CTRL_FREQ_RANGE_1_15MHZ));
+    CHECK(env.stable_calls == 4);
+    CHECK(block.write(REG_DORMANT, WAKE_VALUE));
+    CHECK(env.stable_calls == 4);  // woken while disabled: it stays stopped
+    CHECK(block.write(REG_CTRL, 0x123000 | CTRL_FREQ_RANGE_1_15MHZ));
+    CHECK(env.stable_calls == 4);  // an invalid ENABLE value changes nothing
+}
+
+static void test_reset_does_not_tell_the_host() {
+    fresh();
+    CHECK(block.write(REG_CTRL, (CTRL_ENABLE_ENABLE << CTRL_ENABLE_LSB) | CTRL_FREQ_RANGE_1_15MHZ));
+    CHECK(block.stable && env.stable_calls == 1);
+    CHECK(block.reset());
+    CHECK(!block.stable && env.stable_calls == 1);  // (a retune in the middle of a chip reset would drop clk_sys to the ring oscillator)
+}
+
+static void test_a_failing_host_is_reported_after_the_write_took_effect() {
+    fresh();
+    env.fail_stable = true;
+    CHECK(!block.write(REG_CTRL, (CTRL_ENABLE_ENABLE << CTRL_ENABLE_LSB) | CTRL_FREQ_RANGE_1_15MHZ));
+    CHECK(block.stable && env.stable_calls == 1);
+    fresh();
+    env.fail_stable = true;
+    CHECK(!block.write_atomic(REG_CTRL, CTRL_ENABLE_ENABLE << CTRL_ENABLE_LSB, kAtomicSet));  // through an alias too
+}
+
 int main() {
     test_reset_values();
     test_ctrl_keeps_reserved_bits_clear_and_freq_range_fixed();
@@ -159,6 +211,9 @@ int main() {
     test_unimplemented_offsets_warn();
     test_alias_writes_decode_against_a_read_and_remember_the_raw_value();
     test_a_new_block_and_the_window_handler();
+    test_the_host_hears_when_the_crystal_starts_or_stops();
+    test_reset_does_not_tell_the_host();
+    test_a_failing_host_is_reported_after_the_write_took_effect();
     if (failures != 0) {
         std::printf("%d check(s) failed\n", failures);
         return 1;

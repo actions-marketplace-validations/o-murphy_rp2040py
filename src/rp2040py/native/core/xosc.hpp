@@ -5,6 +5,7 @@
 //     other non-zero value sets BADWRITE and warns without changing the state (the datasheet says an invalid setting enables; that step is not independently sourced and the reference keeps its behaviour);
 //   - STATUS = STABLE (31) | BADWRITE (24, write 1 to clear) | ENABLED (12); DORMANT: 0x636F6D61 stops the oscillator, any other write selects WAKE (0x77616B65, the reset value) and a value that is not
 //     WAKE sets BADWRITE and warns; STARTUP keeps X4 (20) and DELAY (13:0), resets to 0xC4; COUNT keeps 8 bits and never counts down (a documented gap);
+//   - a write that flips STABLE (the crystal starts or stops) tells the host (`stable_changed`), which re-derives the clock tree; `reset()` does not;
 //   - `reset()` (the power-on reset, gated on PSM.WDSEL's XOSC bit by `RP2040.reset()`) puts every register and flag back; an unimplemented offset warns on a read (and reads 0xFFFFFFFF) and on a write;
 //   - an alias write decodes against a *read* of the register, as the reference's `BasePeripheral.write_uint32_atomic` does.
 //
@@ -22,8 +23,12 @@ constexpr uint32_t kXoscWarnRead = kRegWarnRead, kXoscWarnReadAtomicArea = kRegW
 // Warnings that carry data beyond the three of `RegWarn` (the host formats the message): `value` is the offending field.
 constexpr uint32_t kXoscWarnInvalidFreqRange = 3, kXoscWarnInvalidEnable = 4, kXoscWarnInvalidDormant = 5;
 
+using XoscStableFn = bool (*)(void* ctx);  // the oscillator started or stopped (STATUS.STABLE flipped by a register write): the clock tree is re-derived; false: a failure is parked
+
 struct XoscHost {
     RegWarnFn warn = nullptr;
+    XoscStableFn stable_changed = nullptr;  // optional
+    void* stable_ctx = nullptr;             // the context `stable_changed` is called with; null: `ctx` (see `bind_stable_listener`)
     void* ctx = nullptr;
     const int* failed = nullptr;  // the shared parked-failure flag (see _pending.pyx)
 };
@@ -44,6 +49,12 @@ public:
     XoscBlock& operator=(const XoscBlock&) = delete;
 
     void init(const XoscHost& host) noexcept { host_ = host; }
+
+    // Whoever owns the clock tree asks to be told directly when the crystal starts or stops (core/clock_sinks.hpp), in place of the host's `stable_changed`; `fn == nullptr` takes it back.
+    void bind_stable_listener(XoscStableFn fn, void* ctx) noexcept {
+        host_.stable_changed = fn;
+        host_.stable_ctx = ctx;
+    }
 
     bool failed() const noexcept { return host_failed(host_.failed); }
     int64_t raw_write_value() const noexcept { return raw_write_value_; }
@@ -91,6 +102,15 @@ public:
     }
 
     bool write(uint32_t offset, int64_t value) noexcept {
+        const bool was_stable = stable;
+        if (!write_register(offset, value)) return false;
+        // The crystal starting or stopping changes what the clock tree delivers (nothing from XOSC while it is stopped): a write that flipped STABLE tells the host. `reset()` does not: the CLOCKS
+        // domain reset re-derives the tree itself, and a retune in the middle of a chip reset would drop clk_sys to the ring oscillator.
+        if (stable != was_stable && host_.stable_changed) return host_.stable_changed(host_.stable_ctx != nullptr ? host_.stable_ctx : host_.ctx);
+        return true;
+    }
+
+    bool write_register(uint32_t offset, int64_t value) noexcept {
         using namespace xosc_regs;
         const uint32_t v = static_cast<uint32_t>(value);
         if (offset == REG_CTRL) {

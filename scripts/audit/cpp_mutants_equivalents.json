@@ -1,0 +1,19 @@
+{
+  "usb": {
+    "if (size < length) length = size; |  <  ->  <= ": "equal sizes: assigning the same value",
+    "if (address >= usb_regs::kDpramSize) return 0; | >= -> >": "address == 4096 leaves a count of 0 either way",
+    "if (size < count) count = size; |  <  ->  <= ": "equal sizes: assigning the same value",
+    "for (uint32_t pass = 0; pass < (dbl ? 2u : 1u); ++pass) { |  <  ->  <= ": "a third pass finds the buffer it just started with AVAILABLE cleared and returns",
+    "if (address < kDpramSize) { |  <  ->  <= ": "address == 4096 leaves a count of 0 either way",
+    "if (length < count) count = length; |  <  ->  <= ": "equal sizes: assigning the same value",
+    "if (!host_.write_queued(host_.ctx, endpoint, half, dpram_ + (address < kDpramSize ? address : 0), count)) return false; |  <  ->  <= ": "with address == 4096 the count is 0 and the pointer is not read",
+    "for (uint32_t i = 0; i < kHostInterruptEndpoints; ++i) { |  <  ->  <= ": "INT_EP_CTRL keeps bits 15:1, so bit 16 (a sixteenth endpoint) is never set",
+    "bool has_response = false; | false -> true": "the host function always assigns it before it is read",
+    "if (!host_.device_setup(host_.ctx, dpram_ + HOST_SETUP_PACKET, &has_response)) return false; |  +  ->  - ": "HOST_SETUP_PACKET is 0",
+    "bool present = false; | false -> true": "the host function always assigns it before it is read",
+    "if (data_len < available) available = data_len; |  <  ->  <= ": "equal sizes: assigning the same value"
+  },
+  "clocks": {
+    "fc_started_hz_ = 0.0; | delete": "fc_start() overwrites it before fc_done() can run: the alarm only exists after a start"
+  }
+}

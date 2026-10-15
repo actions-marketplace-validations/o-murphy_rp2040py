@@ -223,7 +223,7 @@ static void test_set_advance_and_the_stopped_counter() {
         Rig r(TimerMode::kIncrement, 9);
         r.us(3);
         r.t.set(2);
-        CHECK(r.t.base_value() == 2 && r.t.base_nanos() == 3000.0 && r.t.frequency() == 1e6 && r.t.prescaler() == 1.0);
+        CHECK(r.t.base_value() == 2 && r.t.base_ticks() == 48000 && r.t.frequency() == 1e6 && r.t.prescaler() == 1.0);
         CHECK(r.t.top() == 9 && r.t.mode() == TimerMode::kIncrement && r.t.enable());
     }
     {  // a mode change keeps the value

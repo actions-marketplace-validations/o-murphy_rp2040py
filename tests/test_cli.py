@@ -2,6 +2,7 @@ import argparse
 from pathlib import Path
 
 import pytest
+from utils.littlefs import importorskip_littlefs
 
 from rp2040py import cli
 from rp2040py.boards import BoardSpec
@@ -576,7 +577,7 @@ def test_version_flag_prints_version_and_exits_zero(capsys):
 
 
 def test_mklittlefs_rejects_unknown_disk_version(capsys):
-    pytest.importorskip("littlefs", reason="mklittlefs needs the optional 'fs' extra")
+    importorskip_littlefs()
     with pytest.raises(SystemExit) as exc_info:
         cli.main(["mklittlefs", "-o", "out.img", "--disk-version", "9.9", "main.py"])
     assert exc_info.value.code == 2
@@ -584,7 +585,7 @@ def test_mklittlefs_rejects_unknown_disk_version(capsys):
 
 
 def test_mklittlefs_end_to_end_through_argparse(tmp_path):
-    pytest.importorskip("littlefs", reason="mklittlefs needs the optional 'fs' extra")
+    importorskip_littlefs()
     main_src = tmp_path / "main.py"
     main_src.write_text("print('hi')\n")
     image = tmp_path / "out.img"
@@ -597,7 +598,7 @@ def test_mklittlefs_end_to_end_through_argparse(tmp_path):
 def test_mklittlefs_rejects_main_not_in_files_cleanly(caplog, tmp_path):
     # Regression test: build_littlefs_image's ValueError for an unmatched --main used to bubble
     # up as a raw Python traceback instead of a clean logged error + exit(1).
-    pytest.importorskip("littlefs", reason="mklittlefs needs the optional 'fs' extra")
+    importorskip_littlefs()
     app_src = tmp_path / "app.py"
     app_src.write_text("pass\n")
     image = tmp_path / "out.img"
@@ -610,7 +611,7 @@ def test_mklittlefs_rejects_main_not_in_files_cleanly(caplog, tmp_path):
 
 
 def test_mklittlefs_rejects_existing_output_without_force(caplog, tmp_path):
-    pytest.importorskip("littlefs", reason="mklittlefs needs the optional 'fs' extra")
+    importorskip_littlefs()
     app_src = tmp_path / "app.py"
     app_src.write_text("pass\n")
     image = tmp_path / "out.img"
@@ -625,7 +626,7 @@ def test_mklittlefs_rejects_existing_output_without_force(caplog, tmp_path):
 
 
 def test_mklittlefs_force_overwrites_existing_output(tmp_path):
-    pytest.importorskip("littlefs", reason="mklittlefs needs the optional 'fs' extra")
+    importorskip_littlefs()
     app_src = tmp_path / "app.py"
     app_src.write_text("pass\n")
     image = tmp_path / "out.img"
@@ -637,7 +638,7 @@ def test_mklittlefs_force_overwrites_existing_output(tmp_path):
 
 
 def test_mklittlefs_allows_no_files(tmp_path):
-    pytest.importorskip("littlefs", reason="mklittlefs needs the optional 'fs' extra")
+    importorskip_littlefs()
     image = tmp_path / "out.img"
 
     cli.main(["mklittlefs", "-o", str(image)])
@@ -646,7 +647,7 @@ def test_mklittlefs_allows_no_files(tmp_path):
 
 
 def test_mklittlefs_target_presets_block_size_and_count(tmp_path):
-    pytest.importorskip("littlefs", reason="mklittlefs needs the optional 'fs' extra")
+    importorskip_littlefs()
     from rp2040py.utils.firmware_retrieve import KALUMA
     from rp2040py.utils.firmware_retrieve import flash_layout as _flash_layout
 
@@ -659,7 +660,7 @@ def test_mklittlefs_target_presets_block_size_and_count(tmp_path):
 
 
 def test_mklittlefs_target_rejects_explicit_block_size_or_count(caplog, tmp_path):
-    pytest.importorskip("littlefs", reason="mklittlefs needs the optional 'fs' extra")
+    importorskip_littlefs()
     image = tmp_path / "out.img"
 
     with pytest.raises(SystemExit) as exc_info:

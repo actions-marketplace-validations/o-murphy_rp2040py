@@ -30,6 +30,7 @@ cdef extern from "tbman.hpp" namespace "rp2040core":
         WindowHandler window_handler() noexcept
 
 cdef class RPTBMAN:
-    cdef TbmanBlock _block
+    cdef TbmanBlock* _block  # the chip's (`Mcu` builds and wires it), or `_own` for a stand-in chip that has no `Mcu`
+    cdef TbmanBlock _own
     cdef public object rp2040
     cdef public object name

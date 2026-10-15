@@ -11,7 +11,7 @@ from rp2040py.native._rp2040 cimport RP2040
 
 
 cdef class CortexM0Core:
-    cdef Cpu _cpu
+    cdef Cpu* _cpu  # the chip's own (core/mcu.hpp): this object is its Python view
     # Typed as the concrete native RP2040, not `object`: the bus pointer handed to the C++ core comes from it, and a native
     # CortexM0Core can never end up paired with the pure-Python RP2040 or vice versa (rp2040py.native/__init__.py imports them
     # all-or-nothing).

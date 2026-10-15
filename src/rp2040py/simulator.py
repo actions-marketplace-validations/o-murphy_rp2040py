@@ -139,12 +139,19 @@ class Simulator:
         # One byte, not a plain attribute: the native batch loop (native/_simulator.pyx) reads it directly on every iteration, so a stop()
         # from another thread - or from an `on_break` callback in the middle of an instruction - is seen without a Python call. `stopped`
         # below is the property over it; the pure-Python loop uses the property.
-        self._stop_flag = bytearray(1)
+        # Over a native chip they are the chip's own two bytes (`RP2040._native_run_flags`, looked up on the type so a stand-in does not answer); otherwise bytes of a
+        # bytearray of this object's. Same indexing either way.
+        self._stop_flag: Any  # a bytearray, or the chip's own byte as a buffer
+        self._real_io_flag: Any
+        run_flags = getattr(type(self.rp2040), "_native_run_flags", None)
+        self._stop_flag, self._real_io_flag = (
+            run_flags(self.rp2040) if run_flags is not None else (bytearray(1), bytearray(1))
+        )
         self.stopped = True
-        # One byte too, for the same reason: nonzero while some device waits on the *real* world (a relayed DNS/NTP reply, a TCP connect in flight). The batch loops
+        self._real_io_flag[0] = 0  # (a chip's own byte outlives this Simulator: start with no wait outstanding)
+        # The second byte, for the same reason: nonzero while some device waits on the *real* world (a relayed DNS/NTP reply, a TCP connect in flight). The batch loops
         # then cap an idle jump (`_execute_batch._PACED_IDLE_NANOS`) and end the batch, and `execute()` sleeps for the simulated time it covered - so simulated time
         # cannot outrun the wall clock while a real reply is on its way (the guest's own timeouts run in simulated time; the reply arrives in wall time).
-        self._real_io_flag = bytearray(1)
         self._pace_origin: tuple[float, float] | None = (
             None  # (simulated nanos, monotonic seconds) when the current real-world wait began
         )

@@ -85,9 +85,21 @@ def test_the_runs_exercise_what_they_claim_to():
         "program.no_wel.long",
     ):
         assert total.get(name, 0) >= 20, (name, total)
-    for name in ("cs.assert", "cs.deassert", "dr0.cs_asserted", "dr0.cs_deasserted", "dr0.ssienr_clear"):
+    for name in ("cs.assert", "cs.deassert", "dr0.cs_asserted", "dr0.cs_deasserted", "dr0.ssienr_clear", "dr.alias"):
         assert total.get(name, 0) >= 50, (name, total)
     assert total.get("read.in_range", 0) >= 1000 and total.get("read.past_the_end", 0) >= 100, total
     assert total.get("shift.past_260", 0) >= 500, total  # a command longer than the 256 data bytes a program keeps
     assert total.get("reset", 0) >= 50 and total.get("reset.mid_command", 0) >= 10, total
     assert total.get("warning", 0) >= 100, total  # the unimplemented registers
+    for name in (
+        "held.rxo",
+        "held.rxu",
+        "rx.full",
+        "tmod.tx_only",
+        "isr.pending",
+        "dreq.rx_high",
+        "dreq.tx_high",
+        "irq",
+        "dreq",
+    ):
+        assert total.get(name, 0) >= 50, (name, total)  # the FIFO, interrupt and DMA-request behaviour

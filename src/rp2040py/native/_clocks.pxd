@@ -1,0 +1,94 @@
+# Cython view of core/clocks.hpp (docs/records/0096-cpp-mcu-core.md) and the declaration of the native CLOCKS shell.
+# Header-only C++17, compiled into every extension that cimports it (setup.py builds them all as C++).
+
+from libc.stdint cimport int64_t, uint32_t
+from libcpp cimport bool as cppbool
+
+from rp2040py.native._clock cimport Clock
+from rp2040py.native._pll cimport PllBlock
+from rp2040py.native._rosc cimport RoscBlock
+from rp2040py.native._xosc cimport XoscBlock
+from rp2040py.native._window_map cimport WindowHandler
+
+cdef extern from "clocks.hpp" namespace "rp2040core":
+    cdef const uint32_t kClocksWarnRead
+    cdef const uint32_t kClocksWarnReadAtomicArea
+    cdef const uint32_t kClocksWarnWrite
+
+    ctypedef void (*ClocksWarnFn)(void* ctx, uint32_t kind, uint32_t offset, int64_t value)
+    ctypedef double (*ClockHzFn)(void* ctx)
+    ctypedef cppbool (*ClockSinkFn)(void* ctx, double hz, double old)
+
+    cdef cppclass ClocksHost:
+        ClocksHost() noexcept
+        ClocksWarnFn warn
+        ClockHzFn xosc_hz
+        ClockHzFn rosc_hz
+        void* ctx
+        const int* failed
+
+    cdef cppclass ClocksBlock:
+        ClocksBlock() noexcept
+        void init(Clock* clock, const ClocksHost& host, PllBlock* pll_sys, PllBlock* pll_usb) noexcept
+        void detach() noexcept
+        void clear_sinks() noexcept
+        void bind_xosc(const XoscBlock* block) noexcept
+        void bind_rosc(const RoscBlock* block) noexcept
+        void set_crystal_hz(double hz) noexcept
+        int64_t raw_write_value() noexcept
+        cppbool add_sys_sink(ClockSinkFn fn, void* ctx) noexcept
+        cppbool add_peri_sink(ClockSinkFn fn, void* ctx) noexcept
+        cppbool add_ref_sink(ClockSinkFn fn, void* ctx) noexcept
+        cppbool add_rtc_sink(ClockSinkFn fn, void* ctx) noexcept
+        double clk_sys() noexcept
+        double clk_peri() noexcept
+        void force_clk_peri(double hz) noexcept
+        void reset() noexcept
+        cppbool reset_tree() noexcept
+        double ref_freq() noexcept
+        double sys_freq() noexcept
+        double peri_freq() noexcept
+        double rtc_freq() noexcept
+        double usb_freq() noexcept
+        double adc_freq() noexcept
+        double frequency_of(uint32_t source) noexcept
+        cppbool retune() noexcept
+        uint32_t read(uint32_t offset) noexcept
+        cppbool write(uint32_t offset, int64_t value) noexcept
+        cppbool write_atomic(uint32_t offset, int64_t raw, uint32_t atomic_type) noexcept
+        WindowHandler window_handler() noexcept
+        uint32_t ref_ctrl
+        uint32_t ref_div
+        uint32_t peri_ctrl
+        uint32_t peri_div
+        uint32_t usb_ctrl
+        uint32_t usb_div
+        uint32_t sys_ctrl
+        uint32_t sys_div
+        uint32_t adc_ctrl
+        uint32_t adc_div
+        uint32_t rtc_ctrl
+        uint32_t rtc_div
+
+cdef extern from "clock_sinks.hpp" namespace "rp2040core":
+    cppbool ppb_sys_sink(void* ctx, double hz, double old) noexcept
+    cppbool pwm_sys_sink(void* ctx, double hz, double old) noexcept
+    cppbool dma_sys_sink(void* ctx, double hz, double old) noexcept
+    double clocks_clk_sys(void* ctx) noexcept
+    double clocks_xosc_hz(void* ctx) noexcept
+    cppbool clocks_retune(void* ctx) noexcept
+    cppbool clocks_retune_hz(void* ctx, double hz) noexcept
+    cppbool watchdog_ref_sink(void* ctx, double hz, double old) noexcept
+    cppbool rtc_rtc_sink(void* ctx, double hz, double old) noexcept
+
+cdef class RPClocks:
+    cdef public bint _from_mcu  # this is the view of the `Mcu`'s block
+    cdef ClocksBlock* _block  # the chip's (`Mcu` builds and wires it), or `_own` for a block made directly (a stand-in chip, a test)
+    cdef ClocksBlock _own
+    cdef public object rp2040
+    cdef public object name
+    cdef public object clock
+    cdef object _pll_sys
+    cdef object _pll_usb
+    cdef object _consumers  # the blocks the direct sinks point into: kept alive while they are bound
+    cdef public unsigned char _sys_dirty  # raised whenever clk_sys changes: the batch loop ends its batch on it (core/batch.hpp `clk_changed`)

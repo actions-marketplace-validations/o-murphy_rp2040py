@@ -21,6 +21,8 @@ the active work; "Implemented" below it is everything already landed. A summary 
 this file would go stale within a session or two, which is exactly what happened to the one that
 used to sit here (it still named 0026/0027 as "the active work" long after both closed).
 
+**What the chip implements and what it does not** (block by block, with *when* each missing thing is to be done) is the living table [docs/reference/feature-coverage.md](docs/reference/feature-coverage.md) - update its rows (and `scripts/audit/register_status.py` for stubs) in the same commit as the change; it is the place to look for "what next" inside 0096/0098.
+
 From there, drill down rather than infer:
 
 - Each record's own header carries its `Status:` line, and multi-phase records keep a

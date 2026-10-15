@@ -25,12 +25,7 @@ __all__ = ("RPWatchdog",)
 cdef void _warn_trampoline(void* ctx, uint32_t kind, uint32_t offset, int64_t value) noexcept:
     cdef RPWatchdog block = <RPWatchdog> ctx
     try:
-        if kind == kWatchdogWarnRead:
-            block.warn(f"Unimplemented peripheral read from 0x{offset:x}")
-        elif kind == kWatchdogWarnReadAtomicArea:
-            block.warn("Unimplemented read from peripheral in the atomic operation region")
-        else:
-            block.warn(f"Unimplemented peripheral write to 0x{offset:x}: 0x{value:x}")
+        block._warn_kind(kind, offset, value)
     except BaseException as error:
         park_error(error)
 
@@ -187,7 +182,7 @@ cdef class _TimerView:
 
 
 cdef class RPWatchdog:
-    def __init__(self, rp2040, name):
+    def __init__(self, rp2040, name, mcu_index=-1):
         cdef WatchdogHost host
         cdef _TimerView timer
         cdef _AlarmView alarm
@@ -204,12 +199,18 @@ cdef class RPWatchdog:
         self.clock = clock
         self.on_watchdog_trigger = self._default_watchdog_trigger
         self._tick_listeners = []
-        host.warn = _warn_trampoline
-        host.trigger = _trigger_trampoline
-        host.tick_changed = _tick_trampoline
-        host.ctx = <void*> self
-        host.failed = pending_flag()
-        self._block.init(&(<SimulationClock> clock)._clock, host)
+        self._from_mcu = mcu_index >= 0
+        if mcu_index >= 0:
+            # the chip's C++ `Mcu` has built this block already and wired it (its window, its lines, the clock tree, the watchdog's tick) - this object is the Python view of it
+            self._block = <WatchdogBlock*> <size_t> rp2040._native_watchdog_address()
+        else:
+            self._block = &self._own
+            host.warn = _warn_trampoline
+            host.trigger = _trigger_trampoline
+            host.tick_changed = _tick_trampoline
+            host.ctx = <void*> self
+            host.failed = pending_flag()
+            self._own.init(&(<SimulationClock> clock)._clock, host)
         words = _Words.__new__(_Words)
         words._words = self._block.scratch
         self.scratch_data = words
@@ -222,9 +223,32 @@ cdef class RPWatchdog:
         alarm._alarm = &self._block.alarm
         self.alarm = alarm
 
+    def _warn_kind(self, kind, offset, value):
+        """A register access the block does not implement, as the logger's message (the chip's host calls this for the block it built)."""
+        if kind == kWatchdogWarnRead:
+            self.warn(f"Unimplemented peripheral read from 0x{offset:x}")
+        elif kind == kWatchdogWarnReadAtomicArea:
+            self.warn("Unimplemented read from peripheral in the atomic operation region")
+        else:
+            self.warn(f"Unimplemented peripheral write to 0x{offset:x}: 0x{value:x}")
+
+    def _world_trigger(self):
+        """The watchdog fired (or was triggered): the chip's reset, whatever `on_watchdog_trigger` is now."""
+        self.on_watchdog_trigger()
+
+    def _world_tick(self, tick_hz):
+        """The tick changed. The `Mcu` has told its own TIMER and SysTick; a TIMER or PPB the host replaced is told here, and then the host's listeners."""
+        for name in ("timer", "ppb"):
+            consumer = getattr(self.rp2040, name, None)
+            if consumer is not None and not getattr(consumer, "_from_mcu", False):
+                consumer.tick_changed(tick_hz)
+        for listener in list(self._tick_listeners):
+            listener(tick_hz)
+
     def __dealloc__(self):
-        # Unlink the alarm from the clock before the block goes away.
-        self._block.detach()
+        # Unlink the alarm from the clock before the block goes away (the chip's own block is the `Mcu`'s to detach).
+        if self._block == &self._own:
+            self._own.detach()
 
     def _default_watchdog_trigger(self):
         """The guest asked for a reset (TRIGGER, or a timeout) and nothing was installed over this hook: reset the chip (see the reference)."""

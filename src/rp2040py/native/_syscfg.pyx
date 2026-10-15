@@ -34,6 +34,14 @@ cdef void _warn_trampoline(void* ctx, uint32_t kind, uint32_t offset, int64_t va
 cdef class RP2040SysCfg:
     def __init__(self, rp2040, name):
         cdef SyscfgHost host
+        address = getattr(rp2040, "_native_syscfg_address", None)
+        self._from_mcu = address is not None
+        if address is not None:
+            # the chip's C++ `Mcu` has built the block already - on its own CPU, with its window on the bus - and this object is the Python view of it
+            self.rp2040 = rp2040
+            self.name = name
+            self._block = <SyscfgBlock*> <size_t> address()
+            return
         native_cpu_address = getattr(rp2040.core, "_native_cpu_address", None)
         if native_cpu_address is None:
             raise TypeError(
@@ -46,11 +54,21 @@ cdef class RP2040SysCfg:
         host.warn = _warn_trampoline
         host.ctx = <void*> self
         host.failed = pending_flag()
-        self._block.init(<Cpu*> (<size_t> native_cpu_address()), host)
+        self._block = &self._own
+        self._own.init(<Cpu*> (<size_t> native_cpu_address()), host)
 
     @property
     def raw_write_value(self):
         return self._block.raw_write_value()
+
+    def _warn_kind(self, kind, offset, value):
+        """A register access the block does not implement, as the logger's message (the chip's host calls this for the block it built)."""
+        if kind == kSyscfgWarnRead:
+            self.warn(f"Unimplemented peripheral read from 0x{offset:x}")
+        elif kind == kSyscfgWarnReadAtomicArea:
+            self.warn("Unimplemented read from peripheral in the atomic operation region")
+        else:
+            self.warn(f"Unimplemented peripheral write to 0x{offset:x}: 0x{value:x}")
 
     def read_uint32(self, offset):
         cdef uint32_t value = self._block.read(<uint32_t> offset)

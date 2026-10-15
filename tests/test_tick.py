@@ -5,7 +5,7 @@ is it, and the watchdog's own countdown runs at twice its rate (RP2040-E1). So a
 tick derived from the ring oscillator is not 1 MHz. Run on the pure-Python and the native chip alike.
 """
 
-from utils.tick import CLK_REF_CTRL, TICK_ENABLE, WATCHDOG_TICK, start_tick
+from utils.tick import CLK_REF_CTRL, TICK_ENABLE, WATCHDOG_TICK, start_crystal, start_tick
 
 from rp2040py.rp2040 import RP2040
 
@@ -40,6 +40,7 @@ def test_a_tick_from_the_ring_oscillator_is_not_one_megahertz():
 
 def test_switching_clk_ref_to_the_crystal_speeds_the_count_up_without_a_jump():
     chip = RP2040()
+    start_crystal(chip)
     chip.write_uint32(WATCHDOG_TICK, 12 | TICK_ENABLE)
     chip.clock.tick(MS)
     before = _count(chip)
@@ -68,6 +69,7 @@ def test_stopping_the_tick_freezes_the_timer_and_an_armed_alarm_waits_for_it():
 
 def test_an_alarm_is_set_in_counts_so_a_faster_tick_brings_it_nearer():
     chip = RP2040()
+    start_crystal(chip)
     chip.write_uint32(CLK_REF_CTRL, XOSC)
     chip.write_uint32(WATCHDOG_TICK, 6 | TICK_ENABLE)  # 2 MHz: two counts per microsecond
     chip.write_uint32(INTE, 1)

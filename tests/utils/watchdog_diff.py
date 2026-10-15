@@ -98,6 +98,9 @@ class Rig:
         elif kind == "tick":
             chip.clock.tick(op[1])
         elif kind == "clkref":
+            chip.write_uint32(
+                0x40024000, (0xFAB << 12) | 0xAA0
+            )  # xosc_init(): the crystal runs before clk_ref can take it
             chip.write_uint32(CLK_REF_CTRL, op[1])  # the clock tree tells the watchdog (update_clocks)
         elif kind == "reset":
             self.peripheral.reset()

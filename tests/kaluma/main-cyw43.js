@@ -29,6 +29,8 @@ wifi.scan(function (scanErr, networks) {
       return;
     }
     console.log('connected');
+    // Everything up to here is produced by the emulator alone (no internet): CI hard-fails on this marker, while the real TCP below stays soft-failing.
+    console.log('KALUMA CYW43 CORE OK');
 
     // A real TCP connection spliced out to the actual internet by the emulator's TcpReflector.
     // 1.1.1.1:80 for the same reason the other two scripts use it: fixed, highly available, and

@@ -1,7 +1,9 @@
+import math
 from collections.abc import Callable
 from enum import IntEnum
 from typing import TYPE_CHECKING
 
+from rp2040py.clock._simulation_clock import MAX_TICKS, TICKS_PER_NANO
 from rp2040py.irq import IRQ
 from rp2040py.peripherals.peripheral import BasePeripheral
 
@@ -164,6 +166,7 @@ class RPDMAChannel:
         self._transfer_fn: Callable[[], None] = self.transfer8
 
         self.transfer_alarm = rp2040.clock.create_alarm(self.transfer)
+        self._cycle_remainder = 0.0  # the fraction of a tick a clk_sys cycle that is not a whole number of ticks leaves (133 MHz: 120.30), carried to the next transfer
         self.reset()
 
     def start(self) -> None:
@@ -242,7 +245,12 @@ class RPDMAChannel:
 
     def schedule_transfer(self) -> None:
         if self.dma.dreq.get(self._treq_value, False) or self._treq_value == TREQ.PERMANENT:
-            self.transfer_alarm.schedule(0)
+            # "The DMA can perform one read access and one write access, up to 32 bits in size, every clock cycle" (datasheet 2.5): a transfer that is ready takes one clk_sys cycle
+            # ... in ticks, with the fraction carried so that a clock that is not a whole number of ticks per cycle does not run fast
+            exact = self._cycle_remainder + 1e9 / self.rp2040.clk_sys * TICKS_PER_NANO
+            whole = math.floor(exact)
+            self._cycle_remainder = exact - whole
+            self.transfer_alarm.schedule_ticks(min(MAX_TICKS, whole))
         else:
             delay = self.dma.get_timer(self._treq_value)
             if delay:
@@ -319,6 +327,7 @@ class RPDMAChannel:
                 self.dma.check_interrupts()
 
     def reset(self) -> None:
+        self._cycle_remainder = 0.0
         self.write_uint32(CHN_CTRL_TRIG, self.index << CHAIN_TO_SHIFT)
 
 

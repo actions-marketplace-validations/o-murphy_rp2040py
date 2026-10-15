@@ -8,7 +8,7 @@ The checklist every block of `src/rp2040py/native/core/` follows (record
 
 The steps below make the C++ equal to the Python reference; they say nothing about whether the reference is *right*. That is settled first, from real sources, by the method of record
 [0098](../records/0098-datasheet-conformance-audit.md) ("Method") - the same "3g rule" as for devices: every hardware fact is cited to an upstream source, never taken from memory or from
-what looks plausible. The order that worked for SYSINFO/TBMAN (0098, "SYSINFO and TBMAN"):
+what looks plausible. This applies to every block that is ported from now on - ROSC, IO_BANK0/PADS_BANK0, XIP_CTRL, USB and the clock tree among them: it is not an audit to do afterwards, it is the first step of the port, followed by the oracle and the rest of this recipe in the same pass (the blocks ported earlier were audited after the fact, record 0098). The order that worked for SYSINFO/TBMAN (0098, "SYSINFO and TBMAN"):
 
 1. **Get the datasheet as text** (not in the repo): `pdftotext -layout rp2040-datasheet.pdf rp2040.txt` from
    <https://datasheets.raspberrypi.com/rp2040/rp2040-datasheet.pdf>. Run the mechanical pass on the block:
@@ -69,8 +69,9 @@ a hole in the generator - widen it.
 ## 4. C++ checks and mutation testing
 
 `tests/cpp/test_X.cpp`: directed tests of every behaviour, with a recording host (and failure injection per host function).
-Then a textual mutation pass over the header (swap, drop, off-by-one every line of logic, compile with `-fsanitize=bounds`):
-every mutant killed or argued equivalent in the record.
+Then the textual mutation pass over the header, `python scripts/audit/cpp_mutants.py X` (swap, drop, off-by-one every line of logic; built with address + undefined sanitizers and `-fno-sanitize-recover`, so an
+out-of-bounds index a mutant introduces is a failure): every survivor is a gap in the checks to close, or an *equivalent* change recorded with its reason in `scripts/audit/cpp_mutants_equivalents.json`
+(the script exits 1 on an unlisted survivor and on a stale entry). Run it when the header or its checks change - hundreds of compiles, so not per push.
 
 ## 5. The shell (`native/_X.pxd/.pyx/.pyi`)
 
@@ -84,3 +85,4 @@ Check what the differential says the first time it runs reference against native
 Differential over many more seeds than CI runs; live boots (MicroPython, CircuitPython, Kaluma, Pico SDK as far as the block is
 touched) and the one scenario that exercises it; an A/B against the commit before if the block is on a hot path; full
 `uv run pre-commit run --all-files` on both builds; a progress-log entry in the record and the tracker row.
+And the living checklist: update the block's rows in [feature-coverage.md](feature-coverage.md) in the same commit (set the status of what the pass implemented, add what it found missing with its *when*), and the stub / partial lists in `scripts/audit/register_status.py`, and regenerate [register-coverage.md](register-coverage.md) (`scripts/audit/register_coverage.py`, see its docstring) when registers were added.

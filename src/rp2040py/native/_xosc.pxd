@@ -15,16 +15,19 @@ cdef extern from "xosc.hpp" namespace "rp2040core":
     cdef const uint32_t kXoscWarnInvalidDormant
 
     ctypedef void (*XoscWarnFn)(void* ctx, uint32_t kind, uint32_t offset, int64_t value)
+    ctypedef cppbool (*XoscStableFn)(void* ctx)
 
     cdef cppclass XoscHost:
         XoscHost() noexcept
         XoscWarnFn warn
+        XoscStableFn stable_changed
         void* ctx
         const int* failed
 
     cdef cppclass XoscBlock:
         XoscBlock() noexcept
         void init(const XoscHost& host) noexcept
+        void bind_stable_listener(XoscStableFn fn, void* ctx) noexcept
         int64_t raw_write_value() noexcept
         cppbool reset() noexcept
         uint32_t ctrl
@@ -41,6 +44,9 @@ cdef extern from "xosc.hpp" namespace "rp2040core":
         WindowHandler window_handler() noexcept
 
 cdef class RPXOSC:
-    cdef XoscBlock _block
+    cdef public bint _from_mcu  # this is the view of the `Mcu`'s block
+    cdef XoscBlock* _block  # the chip's (`Mcu` builds and wires it), or `_own` for a block made directly (a stand-in chip, a test)
+    cdef XoscBlock _own
+    cdef object _bound_tree  # the native clock tree this block tells directly (None: it tells the chip through Python)
     cdef public object rp2040
     cdef public object name

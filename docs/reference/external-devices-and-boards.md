@@ -27,6 +27,7 @@ exist so the extension point does not read like `rp2040py.device`, which is the 
 
 - [The attach-timing rule](#the-attach-timing-rule)
 - [Writing an `ExternalDevice`](#writing-an-externaldevice)
+  - [Telling time in a device](#telling-time-in-a-device)
 - [Writing a `BoardSpec`](#writing-a-boardspec)
   - [Scenario A: your own device mix, existing firmware](#scenario-a-your-own-device-mix-existing-firmware)
   - [Scenario B: a fully custom board (your own firmware)](#scenario-b-a-fully-custom-board-your-own-firmware)
@@ -130,6 +131,14 @@ device = MicroPythonDevice(board=board)  # see "Writing a BoardSpec" for `board`
 attach_external_devices(device.mcu, MyDevice())  # before device.start_async()/astart()
 device.start_async().result()
 ```
+
+### Telling time in a device
+
+A device that needs the simulated time uses the chip's clock, `rp2040.clock` (never the wall clock - the emulator does not run at the speed of silicon):
+
+- **A delay** is an alarm: `alarm = rp2040.clock.create_alarm(callback)` then `alarm.schedule(nanos)` (a float, in nanoseconds of *simulated* time). `st7735s`, `epd2in9g` and `ws2812` do exactly this.
+- **A duration between two events** (a pulse width, the time since the last edge) is a **difference of `rp2040.clock.ticks`**, an integer count of 1/16 ns - not of `clock.nanos`. `ticks` is exact however far into the run the emulator is; `nanos` is derived from it as a float and stops resolving a short interval after 104 days of simulated time ([record 0100](../records/0100-integer-clock.md)). Divide a difference by `rp2040py.clock._simulation_clock.TICKS_PER_NANO` (16) to get nanoseconds; `WS2812` is the worked example. **Do not keep an absolute `clock.ticks` across calls** unless you register `rp2040.clock.add_rebase_listener(callback)` (called with the `delta` to subtract): after ~100 simulated days the clock moves its origin back so the integer never runs out, and a stored absolute value would be wrong afterwards; `WS2812` registers one.
+- A custom clock (`IClock`) passed to a device in a test must provide `ticks`, `tick_ticks`, `advance_cycles` and `ticks_to_next_alarm` as well as `nanos`, plus `add_rebase_listener` and `rebased_ticks`; `MockClock` already does.
 
 ## Writing a `BoardSpec`
 

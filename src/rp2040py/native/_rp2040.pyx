@@ -36,7 +36,7 @@ from rp2040py.native._memory_map cimport (
     kWordIndexed,
 )
 from rp2040py.native._dma cimport RPDMA
-from rp2040py.native._mcu cimport kMcuBlockBusctrl, kMcuBlockRtc, kMcuBlockSyscfg, kMcuBlockSysinfo, kMcuBlockTbman, kMcuBlockVreg, Mcu, McuHost, kMcuBlockAdc, kMcuBlockClocks, kMcuBlockDma, kMcuBlockI2c0, kMcuBlockI2c1, kMcuBlockIoBank0, kMcuBlockIoQspi, kMcuBlockPadsBank0, kMcuBlockPadsQspi, kMcuBlockPllSys, kMcuBlockPllUsb, kMcuBlockPpb, kMcuBlockPio0, kMcuBlockPio1, kMcuBlockPwm, kMcuBlockRosc, kMcuBlockSsi, kMcuBlockUsb, kMcuBlockXip, kMcuBlockSio, kMcuBlockSpi0, kMcuBlockSpi1, kMcuBlockTimer, kMcuBlockUart0, kMcuBlockUart1, kMcuBlockWatchdog, kMcuBlockXosc
+from rp2040py.native._mcu cimport kMcuBlockBusctrl, kMcuBlockPsm, kMcuBlockResets, kMcuBlockRtc, kMcuBlockSyscfg, kMcuBlockSysinfo, kMcuBlockTbman, kMcuBlockVreg, Mcu, McuHost, kMcuBlockAdc, kMcuBlockClocks, kMcuBlockDma, kMcuBlockI2c0, kMcuBlockI2c1, kMcuBlockIoBank0, kMcuBlockIoQspi, kMcuBlockPadsBank0, kMcuBlockPadsQspi, kMcuBlockPllSys, kMcuBlockPllUsb, kMcuBlockPpb, kMcuBlockPio0, kMcuBlockPio1, kMcuBlockPwm, kMcuBlockRosc, kMcuBlockSsi, kMcuBlockUsb, kMcuBlockXip, kMcuBlockSio, kMcuBlockSpi0, kMcuBlockSpi1, kMcuBlockTimer, kMcuBlockUart0, kMcuBlockUart1, kMcuBlockWatchdog, kMcuBlockXosc
 from rp2040py.native._pending cimport park_error, pending_flag, raise_if_pending
 from rp2040py.native._pio cimport PioBlock
 from rp2040py.native._bus cimport BusHost, kBusWarnInvalidRead, kBusWarnUnalignedRead
@@ -296,6 +296,8 @@ cdef dict _BLOCK_WINDOW = {
     kMcuBlockRtc: 0x4005C,
     kMcuBlockTbman: 0x4006C,
     kMcuBlockBusctrl: 0x40030,
+    kMcuBlockPsm: 0x40010,
+    kMcuBlockResets: 0x4000C,
     kMcuBlockVreg: 0x40064,
     kMcuBlockSysinfo: 0x40000,
     kMcuBlockSyscfg: 0x40004,
@@ -1442,6 +1444,12 @@ cdef class RP2040:
     @property
     def gpio_values(self) -> int:
         return self._gpio_bank.input_values()
+
+    def _native_resets_address(self):
+        return <size_t> &self._mcu.resets()
+
+    def _native_psm_address(self):
+        return <size_t> &self._mcu.psm()
 
     def _native_busctrl_address(self):
         """The address of the BUSCTRL block the `Mcu` built, for the shell that is its Python view."""

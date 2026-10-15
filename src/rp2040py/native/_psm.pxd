@@ -32,6 +32,8 @@ cdef extern from "psm.hpp" namespace "rp2040core":
         WindowHandler window_handler() noexcept
 
 cdef class RPPSM:
-    cdef PsmBlock _block
+    cdef PsmBlock* _block  # the chip's (`Mcu` builds it), or `_own` for a block made directly (a stand-in chip, a test)
+    cdef PsmBlock _own
+    cdef public bint _from_mcu
     cdef public object rp2040
     cdef public object name

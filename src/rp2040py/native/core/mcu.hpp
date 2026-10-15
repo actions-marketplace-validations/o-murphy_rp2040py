@@ -35,6 +35,8 @@
 #include "pwm.hpp"
 #include "pin.hpp"
 #include "pio.hpp"
+#include "psm.hpp"
+#include "resets.hpp"
 #include "ssi.hpp"
 #include "usb.hpp"
 #include "xip_ctrl.hpp"
@@ -63,7 +65,7 @@ using McuResult = BatchResult;
 // What the world supplies to a chip that builds itself (step 3a of the revised plan, record 0096): the one interface the blocks go through for what the core cannot answer alone.
 // For now it is the warning (a register access the block does not implement: the logger of the host); the pins, the console and the rest come with the blocks that need them.
 // `warn(ctx, block, kind, offset, value)`: `block` is a `McuBlock`, `kind` the `kRegWarn*` code of core_host.hpp. `failed` is the host's parked-failure flag, shared by every block.
-enum McuBlock : uint32_t { kMcuBlockRtc = 0, kMcuBlockTbman = 1, kMcuBlockBusctrl = 2, kMcuBlockVreg = 3, kMcuBlockSysinfo = 4, kMcuBlockSyscfg = 5, kMcuBlockTimer = 6, kMcuBlockAdc = 7, kMcuBlockUart0 = 8, kMcuBlockUart1 = 9, kMcuBlockSpi0 = 10, kMcuBlockSpi1 = 11, kMcuBlockI2c0 = 12, kMcuBlockI2c1 = 13, kMcuBlockClocks = 14, kMcuBlockPllSys = 15, kMcuBlockPllUsb = 16, kMcuBlockXosc = 17, kMcuBlockRosc = 18, kMcuBlockPpb = 19, kMcuBlockWatchdog = 20, kMcuBlockDma = 21, kMcuBlockIoBank0 = 22, kMcuBlockIoQspi = 23, kMcuBlockPadsBank0 = 24, kMcuBlockPadsQspi = 25, kMcuBlockSio = 26, kMcuBlockPwm = 27, kMcuBlockPio0 = 28, kMcuBlockPio1 = 29, kMcuBlockSsi = 30, kMcuBlockXip = 31, kMcuBlockUsb = 32 };
+enum McuBlock : uint32_t { kMcuBlockRtc = 0, kMcuBlockTbman = 1, kMcuBlockBusctrl = 2, kMcuBlockVreg = 3, kMcuBlockSysinfo = 4, kMcuBlockSyscfg = 5, kMcuBlockTimer = 6, kMcuBlockAdc = 7, kMcuBlockUart0 = 8, kMcuBlockUart1 = 9, kMcuBlockSpi0 = 10, kMcuBlockSpi1 = 11, kMcuBlockI2c0 = 12, kMcuBlockI2c1 = 13, kMcuBlockClocks = 14, kMcuBlockPllSys = 15, kMcuBlockPllUsb = 16, kMcuBlockXosc = 17, kMcuBlockRosc = 18, kMcuBlockPpb = 19, kMcuBlockWatchdog = 20, kMcuBlockDma = 21, kMcuBlockIoBank0 = 22, kMcuBlockIoQspi = 23, kMcuBlockPadsBank0 = 24, kMcuBlockPadsQspi = 25, kMcuBlockSio = 26, kMcuBlockPwm = 27, kMcuBlockPio0 = 28, kMcuBlockPio1 = 29, kMcuBlockSsi = 30, kMcuBlockXip = 31, kMcuBlockUsb = 32, kMcuBlockPsm = 33, kMcuBlockResets = 34 };
 struct McuHost {
     void (*warn)(void* ctx, uint32_t block, uint32_t kind, uint32_t offset, int64_t value) = nullptr;
     void* ctx = nullptr;
@@ -121,6 +123,7 @@ constexpr uint32_t kUartBase[2] = {0x40034000, 0x40038000}, kIrqUart[2] = {20, 2
 constexpr uint32_t kSpiBase[2] = {0x4003C000, 0x40040000}, kIrqSpi[2] = {18, 19}, kDreqSpiTx[2] = {16, 18};
 constexpr uint32_t kI2cBase[2] = {0x40044000, 0x40048000}, kIrqI2c[2] = {23, 24};
 constexpr uint32_t kTbmanBase = 0x4006C000;  // TBMAN_BASE
+constexpr uint32_t kResetsBase = 0x4000C000, kPsmBase = 0x40010000;  // RESETS_BASE, PSM_BASE
 constexpr uint32_t kBusctrlBase = 0x40030000;  // BUSCTRL_BASE
 constexpr uint32_t kVregBase = 0x40064000;     // VREG_AND_CHIP_RESET_BASE
 constexpr uint32_t kSysinfoBase = 0x40000000;  // SYSINFO_BASE
@@ -393,6 +396,20 @@ public:
         busctrl_.init(b);
         bus.windows.attach(kBusctrlBase, busctrl_.window_handler());
 
+        ResetsHost rh;
+        rh.warn = block_warn<kMcuBlockResets>;
+        rh.ctx = this;
+        rh.failed = host.failed;
+        resets_.init(rh);
+        bus.windows.attach(kResetsBase, resets_.window_handler());
+
+        PsmHost pm;
+        pm.warn = block_warn<kMcuBlockPsm>;
+        pm.ctx = this;
+        pm.failed = host.failed;
+        psm_.init(pm);
+        bus.windows.attach(kPsmBase, psm_.window_handler());
+
         VregHost v;
         v.warn = block_warn<kMcuBlockVreg>;
         v.ctx = this;
@@ -476,6 +493,8 @@ public:
     RtcBlock& rtc() noexcept { return rtc_; }
     TbmanBlock& tbman() noexcept { return tbman_; }
     BusctrlBlock& busctrl() noexcept { return busctrl_; }
+    ResetsBlock& resets() noexcept { return resets_; }
+    PsmBlock& psm() noexcept { return psm_; }
     VregBlock& vreg() noexcept { return vreg_; }
     SysInfoBlock& sysinfo() noexcept { return sysinfo_; }
     SyscfgBlock& syscfg() noexcept { return syscfg_; }
@@ -868,6 +887,8 @@ private:
     RtcBlock rtc_;
     TbmanBlock tbman_;
     BusctrlBlock busctrl_;
+    ResetsBlock resets_;
+    PsmBlock psm_;
     VregBlock vreg_;
     SysInfoBlock sysinfo_;
     SyscfgBlock syscfg_;

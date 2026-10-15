@@ -15,6 +15,8 @@ from rp2040py.native._dma cimport DmaBlock
 from rp2040py.native._pio cimport PioBlock
 from rp2040py.native._adc cimport AdcBlock
 from rp2040py.native._busctrl cimport BusctrlBlock
+from rp2040py.native._psm cimport PsmBlock
+from rp2040py.native._reset cimport ResetsBlock
 from rp2040py.native._clocks cimport ClocksBlock
 from rp2040py.native._i2c cimport I2cBlock
 from rp2040py.native._pll cimport PllBlock
@@ -78,6 +80,8 @@ cdef extern from "mcu.hpp" namespace "rp2040core":
     cdef const uint32_t kMcuBlockSsi
     cdef const uint32_t kMcuBlockXip
     cdef const uint32_t kMcuBlockUsb
+    cdef const uint32_t kMcuBlockPsm
+    cdef const uint32_t kMcuBlockResets
 
     cdef cppclass McuHost:
         McuHost() noexcept
@@ -131,6 +135,8 @@ cdef extern from "mcu.hpp" namespace "rp2040core":
         RtcBlock& rtc() noexcept
         TbmanBlock& tbman() noexcept
         BusctrlBlock& busctrl() noexcept
+        ResetsBlock& resets() noexcept
+        PsmBlock& psm() noexcept
         VregBlock& vreg() noexcept
         SysInfoBlock& sysinfo() noexcept
         SyscfgBlock& syscfg() noexcept

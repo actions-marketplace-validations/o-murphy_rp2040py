@@ -573,6 +573,20 @@ int main() {
             (void)m.bus.read32(0x50110000 + 0x300);
             CHECK(world.warns == w + 1 && world.block == kMcuBlockUsb);  // still the chip's warning after the wire
         }
+
+        // RESETS and PSM (group 8): built by the Mcu - their windows, the warnings under their ids, the registers the cascade will read (WDSEL).
+        {
+            const int w = world.warns;
+            (void)m.bus.read32(0x4000C000 + 0x300);
+            CHECK(world.warns == w + 1 && world.block == kMcuBlockResets);
+            (void)m.bus.read32(0x40010000 + 0x300);
+            CHECK(world.warns == w + 2 && world.block == kMcuBlockPsm);
+        }
+        CHECK(m.bus.read32(0x4000C000 + 0x8) == 0x01FFFFFF);  // RESETS.RESET_DONE: every block out of reset
+        m.bus.write32(0x4000C000 + 0x4, 0x1234);               // RESETS.WDSEL
+        CHECK(m.resets().wdsel == 0x1234);
+        m.bus.write32(0x40010000 + 0x8, 0x0155);               // PSM.WDSEL
+        CHECK(m.psm().wdsel == 0x0155 && m.bus.read32(0x40010000 + 0xC) == 0x1FFFF);
     }
 
     if (failures == 0) std::printf("test_mcu: ok\n");

@@ -35,6 +35,7 @@ cdef class RP2040SysCfg:
     def __init__(self, rp2040, name):
         cdef SyscfgHost host
         address = getattr(rp2040, "_native_syscfg_address", None)
+        self._from_mcu = address is not None
         if address is not None:
             # the chip's C++ `Mcu` has built the block already - on its own CPU, with its window on the bus - and this object is the Python view of it
             self.rp2040 = rp2040

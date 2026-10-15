@@ -53,6 +53,7 @@ cdef class RPIO:
         self.pins = pins
         self._owner = owner
         self._count = len(pins)
+        self._from_mcu = mcu_index >= 0
         if mcu_index >= 0:
             # the chip's C++ `Mcu` holds this bank (and the IO and PADS blocks on it): this object is the Python view of it
             self._block = <IoBlock*> <size_t> rp2040._native_io_address(mcu_index)

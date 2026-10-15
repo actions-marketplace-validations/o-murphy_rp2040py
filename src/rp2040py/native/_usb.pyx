@@ -691,8 +691,8 @@ cdef class RPUSBController:
         if not self._block.dpram_updated(<uint32_t> offset):
             raise_if_pending()
 
-    def reset(self):
-        """Registers and the transaction state back to power-on. Callbacks, the delay tuning and the alarms' wiring are not touched."""
+    def _wire_reset(self):
+        """The host's end of the wire back to nothing: the connected device and every transfer queued for it (the chip's `Mcu` calls it just before it resets the block)."""
         self._device = None
         self._pending_response = None
         for queue in self._read_queue:
@@ -701,6 +701,10 @@ cdef class RPUSBController:
             del queue[:]
         for queue in self._reaction_queue:
             del queue[:]
+
+    def reset(self):
+        """Registers and the transaction state back to power-on. Callbacks, the delay tuning and the alarms' wiring are not touched."""
+        self._wire_reset()
         if not self._block.reset():
             raise_if_pending()
 

@@ -63,6 +63,7 @@ cdef class RPBUSCTRL:
         self.rp2040 = rp2040
         self.name = name
         address = getattr(rp2040, "_native_busctrl_address", None)
+        self._from_mcu = address is not None
         if address is not None:
             # the chip's C++ `Mcu` has built the block already - with its window on the bus - and this object is the Python view of it
             self._block = <BusctrlBlock*> <size_t> address()

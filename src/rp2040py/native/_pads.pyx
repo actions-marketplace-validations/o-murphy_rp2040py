@@ -49,6 +49,7 @@ cdef class RPPADS:
         self.name = name
         self.bank = bank
         self._owner = owner
+        self._from_mcu = mcu_index >= 0
         if mcu_index >= 0:
             # the chip's C++ `Mcu` holds this bank (and the IO and PADS blocks on it): this object is the Python view of it
             self._block = <PadsBlock*> <size_t> rp2040._native_pads_address(mcu_index)

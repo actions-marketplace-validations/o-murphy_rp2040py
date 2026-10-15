@@ -41,6 +41,7 @@ cdef class RPXOSC:
         cdef XoscHost host
         self.rp2040 = rp2040
         self.name = name
+        self._from_mcu = mcu_index >= 0
         if mcu_index >= 0:
             # the chip's C++ `Mcu` has built this block already - with its window on the bus and its notices to the clock tree - and this object is the Python view of it
             self._block = <XoscBlock*> <size_t> rp2040._native_xosc_address()

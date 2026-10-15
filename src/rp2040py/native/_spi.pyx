@@ -157,6 +157,7 @@ cdef class RPSPI:
         self.irq = irq
         self.dreq = dreq
         self._on_transmit = None
+        self._from_mcu = mcu_index >= 0
         if mcu_index >= 0:
             # the chip's C++ `Mcu` has built this block already - with its window on the bus, its line and request on the chip - and this object is the Python view of it
             self._block = <SpiBlock*> <size_t> rp2040._native_spi_address(mcu_index)

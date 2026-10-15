@@ -33,6 +33,7 @@ cdef extern from "busctrl.hpp" namespace "rp2040core":
         WindowHandler window_handler() noexcept
 
 cdef class RPBUSCTRL:
+    cdef public bint _from_mcu  # this is the view of the `Mcu`'s block
     cdef BusctrlBlock* _block  # the chip's (`Mcu` builds and wires it), or `_own` for a stand-in chip that has no `Mcu`
     cdef BusctrlBlock _own
     cdef public object rp2040

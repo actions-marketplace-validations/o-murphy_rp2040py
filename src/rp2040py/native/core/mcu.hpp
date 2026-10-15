@@ -65,6 +65,7 @@ using McuResult = BatchResult;
 // What the world supplies to a chip that builds itself (step 3a of the revised plan, record 0096): the one interface the blocks go through for what the core cannot answer alone.
 // For now it is the warning (a register access the block does not implement: the logger of the host); the pins, the console and the rest come with the blocks that need them.
 // `warn(ctx, block, kind, offset, value)`: `block` is a `McuBlock`, `kind` the `kRegWarn*` code of core_host.hpp. `failed` is the host's parked-failure flag, shared by every block.
+enum McuResetCause : uint32_t { kMcuResetPowerOn = 0, kMcuResetRunPin = 1, kMcuResetWatchdog = 2 };  // why a chip-level reset happened (`ResetCause`)
 enum McuBlock : uint32_t { kMcuBlockRtc = 0, kMcuBlockTbman = 1, kMcuBlockBusctrl = 2, kMcuBlockVreg = 3, kMcuBlockSysinfo = 4, kMcuBlockSyscfg = 5, kMcuBlockTimer = 6, kMcuBlockAdc = 7, kMcuBlockUart0 = 8, kMcuBlockUart1 = 9, kMcuBlockSpi0 = 10, kMcuBlockSpi1 = 11, kMcuBlockI2c0 = 12, kMcuBlockI2c1 = 13, kMcuBlockClocks = 14, kMcuBlockPllSys = 15, kMcuBlockPllUsb = 16, kMcuBlockXosc = 17, kMcuBlockRosc = 18, kMcuBlockPpb = 19, kMcuBlockWatchdog = 20, kMcuBlockDma = 21, kMcuBlockIoBank0 = 22, kMcuBlockIoQspi = 23, kMcuBlockPadsBank0 = 24, kMcuBlockPadsQspi = 25, kMcuBlockSio = 26, kMcuBlockPwm = 27, kMcuBlockPio0 = 28, kMcuBlockPio1 = 29, kMcuBlockSsi = 30, kMcuBlockXip = 31, kMcuBlockUsb = 32, kMcuBlockPsm = 33, kMcuBlockResets = 34 };
 struct McuHost {
     void (*warn)(void* ctx, uint32_t block, uint32_t kind, uint32_t offset, int64_t value) = nullptr;
@@ -97,6 +98,13 @@ struct McuHost {
     // The flash path. An SSI the host has replaced is asked for its BAUDR (`ssi_baudr`) by the XIP stream's pace; with a clock tree the host has put over the chip's, `clk_sys` is the host's. Both optional.
     bool (*ssi_baudr)(void* ctx, double* value) = nullptr;
     bool (*clk_sys)(void* ctx, double* hz) = nullptr;
+    // The reset cascade (`Mcu::reset`). A block the host has replaced (named in the `world` mask the host passes) is the host's to reset: `reset_block(block)`. `usb_reset` comes before the USB block's own
+    // reset (the host drops the device and the transfers it queued), `bus_reset` is the USB link seeing the chip reset (the device's `on_reset`), `record_cause` is a host's own VREG_AND_CHIP_RESET block
+    // being told the cause flag. All optional.
+    bool (*reset_block)(void* ctx, uint32_t block) = nullptr;
+    bool (*usb_reset)(void* ctx) = nullptr;
+    bool (*bus_reset)(void* ctx) = nullptr;
+    bool (*record_cause)(void* ctx, uint32_t flag) = nullptr;
     bool (*pio_started)(void* ctx, uint32_t index) = nullptr;                           // CTRL started a stopped PIO: the host runs its "no owning Simulator" fallback (the asyncio task of `run()`)
     double (*xosc_hz)(void* ctx) = nullptr;                                             // only while the host has put its own crystal block over the chip's
     double (*rosc_hz)(void* ctx) = nullptr;                                             // ... or its own ring oscillator
@@ -493,6 +501,63 @@ public:
     RtcBlock& rtc() noexcept { return rtc_; }
     TbmanBlock& tbman() noexcept { return tbman_; }
     BusctrlBlock& busctrl() noexcept { return busctrl_; }
+    // ---- the reset cascade (record 0096, step 3b; the pure-Python chip's `reset()` / `enter_reset()` / `leave_reset()` are its reference) ----
+    // `RESETS` and `PSM` decide what a watchdog reset covers (datasheet 2.13.5, 2.14.3; record 0089): `from_watchdog` reads PSM.WDSEL and RESETS.WDSEL (RESETS.WDSEL is all ones when PSM.WDSEL selects the
+    // RESETS controller itself, which holds every peripheral in reset); any other reset covers everything. SRAM and the ROM survive every path, the flash everywhere but a first reset (`preserve_flash` false).
+    // The core and the PPB are reset on every path (the one deliberate broadening, record 0096 F3). `world` has a bit (1 << McuBlock) for every block the host has put its own over: the host resets it.
+    // The two WDSEL words are arguments for a host whose PSM / RESETS are its own; the overload without them reads the ones the `Mcu` holds.
+    static constexpr uint32_t kPsmWdselSio = 0x4000, kPsmWdselXip = 0x1000, kPsmWdselResets = 0x8, kPsmWdselClocks = 0x4, kPsmWdselXosc = 0x2, kPsmWdselRosc = 0x1;
+    static constexpr uint32_t kPsmBitsMask = 0x1FFFF, kResetsBitsMask = 0x01FFFFFF;
+    bool reset(bool from_watchdog, bool preserve_flash, uint64_t world = 0) noexcept { return reset(from_watchdog, preserve_flash, psm_.wdsel, resets_.wdsel, world); }
+    bool reset(bool from_watchdog, bool preserve_flash, uint32_t psm_wdsel, uint32_t resets_wdsel, uint64_t world) noexcept {
+        if (from_watchdog) {
+            if ((psm_wdsel & kPsmWdselResets) != 0) resets_wdsel = kResetsBitsMask;
+        } else {
+            psm_wdsel = kPsmBitsMask;
+            resets_wdsel = kResetsBitsMask;
+        }
+        if (!cpu.reset()) return false;
+        if (!reset_step(kMcuBlockPpb, world)) return false;
+        if ((psm_wdsel & kPsmWdselSio) != 0 && !reset_step(kMcuBlockSio, world)) return false;
+        if ((psm_wdsel & kPsmWdselClocks) != 0 && !reset_step(kMcuBlockClocks, world)) return false;
+        // the pins' registers go with their IO / PADS block (a pin bank the host holds is reset by the host with it)
+        static constexpr struct { uint32_t bit; McuBlock block; } kGated[] = {
+            {1u << 5, kMcuBlockIoBank0}, {1u << 8, kMcuBlockPadsBank0}, {1u << 6, kMcuBlockIoQspi}, {1u << 9, kMcuBlockPadsQspi}, {1u << 14, kMcuBlockPwm}, {1u << 2, kMcuBlockDma},
+            {1u << 0, kMcuBlockAdc}, {1u << 21, kMcuBlockTimer}, {1u << 22, kMcuBlockUart0}, {1u << 23, kMcuBlockUart1}, {1u << 16, kMcuBlockSpi0}, {1u << 17, kMcuBlockSpi1},
+            {1u << 3, kMcuBlockI2c0}, {1u << 4, kMcuBlockI2c1}, {1u << 10, kMcuBlockPio0}, {1u << 11, kMcuBlockPio1}, {1u << 24, kMcuBlockUsb}, {1u << 15, kMcuBlockRtc},
+            {1u << 1, kMcuBlockBusctrl}, {1u << 18, kMcuBlockSyscfg},
+        };  // RESETS bit -> block, in the order the reference resets them (SYSINFO and TBMAN hold no instance state)
+        for (const auto& gate : kGated) {
+            if ((resets_wdsel & gate.bit) != 0 && !reset_step(gate.block, world)) return false;
+        }
+        if ((psm_wdsel & kPsmWdselXosc) != 0 && !reset_step(kMcuBlockXosc, world)) return false;
+        if ((psm_wdsel & kPsmWdselRosc) != 0 && !reset_step(kMcuBlockRosc, world)) return false;
+        if ((psm_wdsel & kPsmWdselXip) != 0) {  // the XIP domain is a PSM bit: both halves reset together
+            if (!reset_step(kMcuBlockXip, world) || !reset_step(kMcuBlockSsi, world)) return false;
+        }
+        if (!preserve_flash && flash_ != nullptr) {
+            for (uint32_t i = 0; i < flash_size_; ++i) flash_[i] = 0xFF;
+        }
+        return true;
+    }
+    // Into reset: the reset (flash kept), the USB link told (the device is off the bus either way, whatever WDSEL selected), then the cause recorded - after, so the wider reset cannot wipe it. A watchdog
+    // reset is the absence of bookkeeping (REASON and SCRATCH survive, CHIP_RESET is left alone); anything else resets the watchdog and records HAD_RUN / HAD_POR.
+    bool enter_reset(McuResetCause cause, uint64_t world = 0) noexcept { return enter_reset(cause, psm_.wdsel, resets_.wdsel, world); }
+    bool enter_reset(McuResetCause cause, uint32_t psm_wdsel, uint32_t resets_wdsel, uint64_t world) noexcept {
+        if (!reset(cause == kMcuResetWatchdog, true, psm_wdsel, resets_wdsel, world)) return false;
+        if (host_world_.bus_reset != nullptr && !host_world_.bus_reset(host_world_.ctx)) return false;
+        if (cause == kMcuResetWatchdog) return true;
+        if (!reset_step(kMcuBlockWatchdog, world)) return false;
+        const uint32_t flag = cause == kMcuResetRunPin ? vreg_regs::HAD_RUN : vreg_regs::HAD_POR;
+        if ((world >> kMcuBlockVreg & 1u) != 0) return host_world_.record_cause == nullptr || host_world_.record_cause(host_world_.ctx, flag);
+        vreg_.record_reset_cause(flag);
+        return true;
+    }
+    bool enter_reset_code(uint32_t cause, uint32_t psm_wdsel, uint32_t resets_wdsel, uint64_t world) noexcept { return enter_reset(static_cast<McuResetCause>(cause), psm_wdsel, resets_wdsel, world); }
+    // Out of reset: the core at the flash's entry point, where the boot ROM would have left it (the ROM image is optional for a host, record 0096 F2).
+    void leave_reset() noexcept { cpu.registers[15] = kFlashStart; }
+    static constexpr uint32_t kFlashStart = 0x10000000;
+
     ResetsBlock& resets() noexcept { return resets_; }
     PsmBlock& psm() noexcept { return psm_; }
     VregBlock& vreg() noexcept { return vreg_; }
@@ -610,6 +675,60 @@ public:
     int run(const McuLimits& limits, McuResult* result = nullptr) noexcept { return run_batch(cpu, *clock_, host_, limits, result); }
 
 private:
+    // One block of the cascade: the host's if it holds that block (`world`), the `Mcu`'s own otherwise.
+    bool reset_step(McuBlock block, uint64_t world) noexcept {
+        if ((world >> block & 1u) != 0) return host_world_.reset_block == nullptr || host_world_.reset_block(host_world_.ctx, block);
+        switch (block) {
+            case kMcuBlockPpb: ppb_.reset(); return true;
+            case kMcuBlockSio: sio_.reset(); return true;
+            case kMcuBlockClocks: clocks_.reset(); return clocks_.reset_tree();
+            case kMcuBlockIoBank0:
+            case kMcuBlockPadsBank0:
+            case kMcuBlockIoQspi:
+            case kMcuBlockPadsQspi: {
+                const uint32_t bank = (block == kMcuBlockIoQspi || block == kMcuBlockPadsQspi) ? 1 : 0;
+                const bool pads = block == kMcuBlockPadsBank0 || block == kMcuBlockPadsQspi;
+                // A pin bank the host holds is the host's to reset along with the block (its pins are the host's objects).
+                if (pins_world_[bank]) return host_world_.reset_block == nullptr || host_world_.reset_block(host_world_.ctx, block);
+                // PADS_QSPI does not share BANK0's reset value: GPIO_QSPI_SS's pull-up is what holds the flash deselected and what makes BOOTSEL readable (record 0050); SCLK, SS, SD0-SD3.
+                static constexpr uint32_t kQspiPad[6] = {0x56, 0x5A, 0x52, 0x52, 0x52, 0x52};
+                PinBank& b = pins(bank);
+                for (uint32_t i = 0; i < b.count(); ++i) {
+                    if (!b.reset(i, !pads, pads, (pads && bank == 1) ? kQspiPad[i] : pin_bits::kDefaultPad)) return false;
+                }
+                if (bank == 0) {
+                    if (pads) pads_bank0_.reset(); else io_bank0_.reset();
+                } else {
+                    if (pads) pads_qspi_.reset(); else io_qspi_.reset();
+                }
+                return true;
+            }
+            case kMcuBlockPwm: return pwm_.reset();
+            case kMcuBlockDma: return own_dma_.reset();
+            case kMcuBlockAdc: return adc_.reset();
+            case kMcuBlockTimer: return timer_.reset();
+            case kMcuBlockUart0: return uart_[0].reset();
+            case kMcuBlockUart1: return uart_[1].reset();
+            case kMcuBlockSpi0: return spi_[0].reset();
+            case kMcuBlockSpi1: return spi_[1].reset();
+            case kMcuBlockI2c0: return i2c_[0].reset();
+            case kMcuBlockI2c1: return i2c_[1].reset();
+            case kMcuBlockPio0: return pio_[0].reset();
+            case kMcuBlockPio1: return pio_[1].reset();
+            case kMcuBlockUsb:
+                if (host_world_.usb_reset != nullptr && !host_world_.usb_reset(host_world_.ctx)) return false;
+                return usb_.reset();
+            case kMcuBlockRtc: return rtc_.reset();
+            case kMcuBlockBusctrl: return busctrl_.reset();
+            case kMcuBlockSyscfg: return syscfg_.reset();
+            case kMcuBlockXosc: return xosc_.reset();
+            case kMcuBlockRosc: return rosc_.reset();
+            case kMcuBlockXip: return xip_.reset();
+            case kMcuBlockSsi: return ssi_.reset();
+            case kMcuBlockWatchdog: return watchdog_.reset();
+            default: return true;
+        }
+    }
     static bool step_pio(void* chip, int index, int64_t cycles) noexcept { return static_cast<Mcu*>(chip)->pio_[index].advance(cycles); }
     static double no_time(void*) noexcept { return 0.0; }
     // A block's `warn(ctx, kind, offset, value)` onto the host's `warn(ctx, block, kind, offset, value)`: the block id is the template's, so every block shares this one function.

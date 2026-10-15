@@ -95,6 +95,7 @@ cdef extern from "i2c.hpp" namespace "rp2040core":
         WindowHandler window_handler() noexcept
 
 cdef class RPI2C:
+    cdef public bint _from_mcu  # this is the view of the `Mcu`'s block
     cdef McuIrqLine _irq_line  # the line straight to the chip, when it has one (core/mcu.hpp)
     cdef I2cBlock* _block  # the chip's (`Mcu` builds and wires it), or `_own` for a block made directly (a stand-in chip, a test)
     cdef I2cBlock _own

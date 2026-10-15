@@ -64,6 +64,7 @@ cdef extern from "rtc.hpp" namespace "rp2040core":
         WindowHandler window_handler() noexcept
 
 cdef class RP2040RTC:
+    cdef public bint _from_mcu  # this is the view of the `Mcu`'s block
     cdef RtcBlock* _block  # the chip's (`Mcu` builds and wires it), or `_own` for a stand-in chip that has no `Mcu`
     cdef RtcBlock _own
     cdef public object rp2040

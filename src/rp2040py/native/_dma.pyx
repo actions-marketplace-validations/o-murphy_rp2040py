@@ -205,6 +205,7 @@ cdef class RPDMA:
         self.rp2040 = rp2040
         self.name = name
         self.clock = clock
+        self._from_mcu = mcu_index >= 0
         if mcu_index >= 0:
             # the chip's C++ `Mcu` has built this block already and bound it to the tree and the bus - this object is the Python view of it
             self._block = <DmaBlock*> <size_t> rp2040._native_dma_address()

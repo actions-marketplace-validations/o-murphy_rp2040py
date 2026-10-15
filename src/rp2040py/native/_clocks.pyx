@@ -143,6 +143,7 @@ cdef class RPClocks:
         pll_sys = rp2040.pll_sys  # the chip builds the PLLs first: the tree points at their C++ blocks
         pll_usb = rp2040.pll_usb
         clock = rp2040.clock
+        self._from_mcu = mcu_index >= 0
         if mcu_index >= 0:
             # the chip's C++ `Mcu` has built this block already - with its window on the bus and its notices to the clock tree - and this object is the Python view of it
             self.rp2040 = rp2040

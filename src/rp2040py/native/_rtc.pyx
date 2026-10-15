@@ -59,6 +59,7 @@ cdef class RP2040RTC:
         self.name = name
         self.clock = clock
         address = getattr(rp2040, "_native_rtc_address", None)
+        self._from_mcu = address is not None
         if address is not None:
             # the chip's C++ `Mcu` has built the block already - on its clock, with its window on the bus and its line on the CPU - and this object is the Python view of it
             self._block = <RtcBlock*> <size_t> address()

@@ -193,6 +193,7 @@ cdef class RPUART:
         self.dreq = dreq
         self.on_byte = None
         self.on_baud_rate_change = None
+        self._from_mcu = mcu_index >= 0
         if mcu_index >= 0:
             # the chip's C++ `Mcu` has built this block already - with its window on the bus, its line and request on the chip - and this object is the Python view of it
             self._block = <UartBlock*> <size_t> rp2040._native_uart_address(mcu_index)

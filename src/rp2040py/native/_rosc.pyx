@@ -63,6 +63,7 @@ cdef class RPROSC:
         self.name = name
         self.clock = clock
         self._random_bit = None
+        self._from_mcu = mcu_index >= 0
         if mcu_index >= 0:
             # the chip's C++ `Mcu` has built this block already - with its window on the bus and its notices to the clock tree - and this object is the Python view of it
             # (its RANDOMBIT comes from the block's own seeded generator until a source is set: `random_bit = fn`)

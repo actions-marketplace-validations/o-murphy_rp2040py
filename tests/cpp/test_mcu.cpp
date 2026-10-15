@@ -242,6 +242,8 @@ int main() {
             int uart_bytes = 0;
             int resets = 0, triggers = 0, ticks = 0;
             int pin_changes = 0;
+            int bus_resets = 0, usb_resets = 0;
+            uint64_t reset_blocks = 0;
             uint32_t pin_bank = 99, pin_number = 99;
             int pin_new = -1, pin_old = -1;
             double last_tick = -1.0;
@@ -264,6 +266,18 @@ int main() {
             ++w->uart_bytes;
             w->uart_instance = instance;
             w->uart_value = byte;
+            return true;
+        };
+        host.reset_block = [](void* ctx, uint32_t block) {
+            static_cast<World*>(ctx)->reset_blocks |= uint64_t{1} << block;
+            return true;
+        };
+        host.bus_reset = [](void* ctx) {
+            ++static_cast<World*>(ctx)->bus_resets;
+            return true;
+        };
+        host.usb_reset = [](void* ctx) {
+            ++static_cast<World*>(ctx)->usb_resets;
             return true;
         };
         host.pin_changed = [](void* ctx, uint32_t bank, uint32_t pin, int new_state, int old_state) {
@@ -587,6 +601,70 @@ int main() {
         CHECK(m.resets().wdsel == 0x1234);
         m.bus.write32(0x40010000 + 0x8, 0x0155);               // PSM.WDSEL
         CHECK(m.psm().wdsel == 0x0155 && m.bus.read32(0x40010000 + 0xC) == 0x1FFFF);
+
+        // The reset cascade (step 3b): what a reset covers, by cause and by PSM.WDSEL / RESETS.WDSEL (datasheet 2.13.5, 2.14.3; record 0089), the cause recorded after it, the flash, the hand-off to the host.
+        {
+            constexpr uint32_t kUart0Ibrd = 0x40034000 + 0x24, kPwmCh0Top = 0x40050000 + 0x10, kBusPriority = 0x40030000, kWdScratch0 = 0x40058000 + 0x0C, kChipReset = 0x40064000 + 0x8, kUsbAddrEndp = 0x50110000;
+            const auto dirty = [&] {
+                m.bus.write32(kUart0Ibrd, 67);
+                m.bus.write32(kPwmCh0Top, 7);
+                m.bus.write32(kBusPriority, 0x11);
+                m.bus.write32(0x14000000, 0x1);  // XIP_CTRL.CTRL: EN only (reset: EN | ERR_BADWRITE)
+                m.bus.write32(kWdScratch0, 0xCAFE);
+                m.bus.write32(kUsbAddrEndp, 5);
+            };
+            // a watchdog reset that selects nothing: the core and the PPB only
+            dirty();
+            m.bus.write32(0x40010000 + 0x8, 0);   // PSM.WDSEL
+            m.bus.write32(0x4000C000 + 0x4, 0);   // RESETS.WDSEL
+            CHECK(m.reset(true, true));
+            CHECK(m.bus.read32(kUart0Ibrd) == 67 && m.bus.read32(kPwmCh0Top) == 7 && m.bus.read32(kBusPriority) == 0x11 && m.bus.read32(0x14000000) == 1 && m.bus.read32(kUsbAddrEndp) == 5);
+            // RESETS.WDSEL picks single blocks (UART0 bit 22, PWM bit 14)
+            m.bus.write32(0x4000C000 + 0x4, (1u << 22) | (1u << 14));
+            CHECK(m.reset(true, true));
+            CHECK(m.bus.read32(kUart0Ibrd) == 0 && m.bus.read32(kPwmCh0Top) == 0xFFFF && m.bus.read32(kBusPriority) == 0x11 && m.bus.read32(kUsbAddrEndp) == 5);
+            dirty();
+            m.bus.write32(0x4000C000 + 0x4, 1u << 24);  // USBCTRL alone
+            CHECK(m.reset(true, true));
+            CHECK(m.bus.read32(kUsbAddrEndp) == 0 && m.bus.read32(kUart0Ibrd) == 67 && m.bus.read32(kPwmCh0Top) == 7);
+            // PSM.WDSEL naming the RESETS controller itself resets every peripheral whatever RESETS.WDSEL says; the XIP domain is its own bit
+            dirty();
+            m.bus.write32(0x4000C000 + 0x4, 0);
+            m.bus.write32(0x40010000 + 0x8, 0x8);
+            CHECK(m.reset(true, true));
+            CHECK(m.bus.read32(kUart0Ibrd) == 0 && m.bus.read32(kPwmCh0Top) == 0xFFFF && m.bus.read32(kBusPriority) == 0 && m.bus.read32(0x14000000) == 1 && m.bus.read32(kUsbAddrEndp) == 0);
+            m.bus.write32(0x40010000 + 0x8, 0x1000);  // XIP
+            CHECK(m.reset(true, true));
+            CHECK(m.bus.read32(0x14000000) == 3);
+            // any other reset covers everything, whatever the WDSEL registers hold
+            dirty();
+            m.bus.write32(0x40010000 + 0x8, 0);
+            const int usb_before = world.usb_resets;
+            CHECK(m.reset(false, true));
+            CHECK(world.usb_resets == usb_before + 1);  // the host drops its device just before the USB block's own reset
+            CHECK(m.bus.read32(kUart0Ibrd) == 0 && m.bus.read32(kPwmCh0Top) == 0xFFFF && m.bus.read32(kBusPriority) == 0 && m.bus.read32(0x14000000) == 3);
+            // the flash survives a live reset and is erased by a first one
+            CHECK(flash_image[5] == static_cast<uint8_t>(5 * 7 + 3));
+            CHECK(m.reset(false, false));
+            CHECK(flash_image[5] == 0xFF && flash_image[sizeof flash_image - 1] == 0xFF);
+            // a block the host holds is the host's to reset: its bit in `world` sends it there and the Mcu's own is left alone
+            dirty();
+            world.reset_blocks = 0;
+            CHECK(m.reset(false, true, uint64_t{1} << kMcuBlockPwm));
+            CHECK(world.reset_blocks == (uint64_t{1} << kMcuBlockPwm) && m.bus.read32(kPwmCh0Top) == 7 && m.bus.read32(kUart0Ibrd) == 0);
+            // the cause: a watchdog reset leaves REASON / SCRATCH and CHIP_RESET alone, anything else clears the watchdog's and records HAD_RUN / HAD_POR - after the reset - and tells the USB link either way
+            dirty();
+            const int buses = world.bus_resets;
+            const uint32_t chip_reset = m.bus.read32(kChipReset);
+            CHECK(m.enter_reset(kMcuResetWatchdog));
+            CHECK(m.bus.read32(kWdScratch0) == 0xCAFE && m.bus.read32(kChipReset) == chip_reset && world.bus_resets == buses + 1);
+            CHECK(m.enter_reset(kMcuResetRunPin));
+            CHECK(m.bus.read32(kWdScratch0) == 0 && (m.bus.read32(kChipReset) & (1u << 16)) != 0 && world.bus_resets == buses + 2);
+            CHECK(m.enter_reset(kMcuResetPowerOn));
+            CHECK((m.bus.read32(kChipReset) & (1u << 8)) != 0 && (m.bus.read32(kChipReset) & (1u << 16)) == 0 && world.bus_resets == buses + 3);
+            m.leave_reset();
+            CHECK(m.cpu.registers[15] == 0x10000000);
+        }
     }
 
     if (failures == 0) std::printf("test_mcu: ok\n");

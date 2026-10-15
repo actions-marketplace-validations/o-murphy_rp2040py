@@ -1,6 +1,6 @@
 # Cython view of core/mcu.hpp (docs/records/0096-cpp-mcu-core.md, step 2a): the chip as one object. Header-only C++17, compiled into every extension that cimports it.
 
-from libc.stdint cimport int64_t, uint8_t, uint32_t
+from libc.stdint cimport int64_t, uint8_t, uint32_t, uint64_t
 
 from libcpp cimport bool
 
@@ -109,6 +109,10 @@ cdef extern from "mcu.hpp" namespace "rp2040core":
         bool (*adc_read)(void* ctx, uint32_t channel) noexcept
         bool (*ssi_baudr)(void* ctx, double* value) noexcept
         bool (*clk_sys)(void* ctx, double* hz) noexcept
+        bool (*reset_block)(void* ctx, uint32_t block) noexcept
+        bool (*usb_reset)(void* ctx) noexcept
+        bool (*bus_reset)(void* ctx) noexcept
+        bool (*record_cause)(void* ctx, uint32_t flag) noexcept
         bool (*pio_started)(void* ctx, uint32_t index) noexcept
         bool (*adc_channel_value)(void* ctx, uint32_t channel, int64_t* value) noexcept
 
@@ -150,6 +154,9 @@ cdef extern from "mcu.hpp" namespace "rp2040core":
         void set_usb_dpram(uint8_t* data) noexcept
         void set_flash(uint8_t* data, uint32_t size) noexcept
         void set_ssi_world(bool world) noexcept
+        bool reset(bool from_watchdog, bool preserve_flash, uint32_t psm_wdsel, uint32_t resets_wdsel, uint64_t world) noexcept
+        bool enter_reset_code(uint32_t cause, uint32_t psm_wdsel, uint32_t resets_wdsel, uint64_t world) noexcept
+        void leave_reset() noexcept
         PwmBlock& pwm() noexcept
         PpbBlock& ppb() noexcept
         WatchdogBlock& watchdog() noexcept

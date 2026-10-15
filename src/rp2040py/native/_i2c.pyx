@@ -175,6 +175,7 @@ cdef class RPI2C:
         self._on_write_byte = None
         self._on_read_byte = None
         self._on_stop = None
+        self._from_mcu = mcu_index >= 0
         if mcu_index >= 0:
             # the chip's C++ `Mcu` has built this block already - with its window on the bus, its line and request on the chip - and this object is the Python view of it
             self._block = <I2cBlock*> <size_t> rp2040._native_i2c_address(mcu_index)

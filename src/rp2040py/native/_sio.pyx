@@ -181,6 +181,7 @@ cdef class RPSIO:
         cdef SioHost host
         self.rp2040 = rp2040
         self.name = "SIO"
+        self._from_mcu = mcu_index >= 0
         if mcu_index >= 0:
             # the chip's C++ `Mcu` holds this block (the pins' sources and the bus are already bound to it): this object is the Python view of it
             self._block = <SioBlock*> <size_t> rp2040._native_sio_address()

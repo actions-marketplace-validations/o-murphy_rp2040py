@@ -55,6 +55,7 @@ cdef class _InterpolatorView:
 
 
 cdef class RPSIO:
+    cdef public bint _from_mcu  # this is the view of the `Mcu`'s block
     cdef SioBlock* _block  # the chip's (`Mcu` builds it), or `_own` for a block made directly (a stand-in chip, a test)
     cdef SioBlock _own
     cdef public object rp2040

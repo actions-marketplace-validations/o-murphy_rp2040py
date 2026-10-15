@@ -29,6 +29,7 @@ cdef extern from "io.hpp" namespace "rp2040core":
         WindowHandler window_handler() noexcept
 
 cdef class RPIO:
+    cdef public bint _from_mcu  # this is the view of the `Mcu`'s block
     cdef IoBlock* _block  # the chip's (`Mcu` builds it on its bank), or `_own` for a block made directly (a stand-in chip, a test)
     cdef IoBlock _own
     cdef public object rp2040

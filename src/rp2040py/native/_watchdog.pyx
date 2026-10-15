@@ -199,6 +199,7 @@ cdef class RPWatchdog:
         self.clock = clock
         self.on_watchdog_trigger = self._default_watchdog_trigger
         self._tick_listeners = []
+        self._from_mcu = mcu_index >= 0
         if mcu_index >= 0:
             # the chip's C++ `Mcu` has built this block already and wired it (its window, its lines, the clock tree, the watchdog's tick) - this object is the Python view of it
             self._block = <WatchdogBlock*> <size_t> rp2040._native_watchdog_address()

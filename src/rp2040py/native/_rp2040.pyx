@@ -19,7 +19,7 @@ statically-typed local and call tick()/nanos_to_next_alarm/has_scheduled_alarm a
 dispatch - see native/_simulation_clock.pyx's own module docstring for the full rationale.
 """
 
-from libc.stdint cimport int64_t, uint8_t, uint32_t
+from libc.stdint cimport int64_t, uint8_t, uint32_t, uint64_t
 from libc.string cimport memset
 from libcpp cimport bool
 
@@ -328,6 +328,40 @@ cdef dict _BLOCK_WINDOW = {
     kMcuBlockUsb: 0x50110,
 }  # the block the `Mcu` built -> its key in the peripherals table
 
+# The blocks of the reset cascade and the chip attribute that holds each one's Python object (`RP2040._reset_world_mask`); the pin banks' IO / PADS blocks also follow their bank.
+_RESET_BLOCKS = (
+    (kMcuBlockPpb, lambda chip: chip.ppb),
+    (kMcuBlockSio, lambda chip: chip.sio),
+    (kMcuBlockClocks, lambda chip: chip.clocks),
+    (kMcuBlockIoBank0, lambda chip: chip.io_bank0),
+    (kMcuBlockPadsBank0, lambda chip: chip.pads_bank0),
+    (kMcuBlockIoQspi, lambda chip: chip.io_qspi),
+    (kMcuBlockPadsQspi, lambda chip: chip.pads_qspi),
+    (kMcuBlockPwm, lambda chip: chip.pwm),
+    (kMcuBlockDma, lambda chip: chip.dma),
+    (kMcuBlockAdc, lambda chip: chip.adc),
+    (kMcuBlockTimer, lambda chip: chip.timer),
+    (kMcuBlockUart0, lambda chip: chip.uart[0]),
+    (kMcuBlockUart1, lambda chip: chip.uart[1]),
+    (kMcuBlockSpi0, lambda chip: chip.spi[0]),
+    (kMcuBlockSpi1, lambda chip: chip.spi[1]),
+    (kMcuBlockI2c0, lambda chip: chip.i2c[0]),
+    (kMcuBlockI2c1, lambda chip: chip.i2c[1]),
+    (kMcuBlockPio0, lambda chip: chip.pio[0]),
+    (kMcuBlockPio1, lambda chip: chip.pio[1]),
+    (kMcuBlockUsb, lambda chip: chip.usb_ctrl),
+    (kMcuBlockRtc, lambda chip: chip.rtc),
+    (kMcuBlockBusctrl, lambda chip: chip.busctrl),
+    (kMcuBlockSyscfg, lambda chip: chip.syscfg),
+    (kMcuBlockXosc, lambda chip: chip.xosc),
+    (kMcuBlockRosc, lambda chip: chip.rosc),
+    (kMcuBlockXip, lambda chip: chip.xip_ctrl),
+    (kMcuBlockSsi, lambda chip: chip.ssi),
+    (kMcuBlockWatchdog, lambda chip: chip.watchdog),
+    (kMcuBlockVreg, lambda chip: chip.vreg_and_chip_reset),
+)
+_CAUSE_CODES = {ResetCause.POWER_ON: 0, ResetCause.RUN_PIN: 1, ResetCause.WATCHDOG: 2}  # core/mcu.hpp's McuResetCause
+
 
 cdef void _mcu_warn(void* ctx, uint32_t block, uint32_t kind, uint32_t offset, int64_t value) noexcept:
     # What a block that the `Mcu` built says about a register access it does not implement: the Python view of that block (the one in the peripherals table) words it for the logger.
@@ -524,6 +558,49 @@ cdef bool _w_i2c_stop(void* ctx, uint32_t instance) noexcept:
         return False
 
 
+cdef bool _w_reset_block(void* ctx, uint32_t block) noexcept:
+    cdef RP2040 chip = <RP2040> ctx
+    try:
+        chip._reset_block_python(block)
+    except BaseException as error:
+        park_error(error)
+        return False
+    return True
+
+
+cdef bool _w_usb_reset(void* ctx) noexcept:
+    cdef RP2040 chip = <RP2040> ctx
+    try:
+        wire_reset = getattr(chip.usb_ctrl, "_wire_reset", None)
+        if wire_reset is not None:
+            wire_reset()
+    except BaseException as error:
+        park_error(error)
+        return False
+    return True
+
+
+cdef bool _w_bus_reset(void* ctx) noexcept:
+    cdef RP2040 chip = <RP2040> ctx
+    try:
+        if chip.usb_ctrl.on_reset:
+            chip.usb_ctrl.on_reset()
+    except BaseException as error:
+        park_error(error)
+        return False
+    return True
+
+
+cdef bool _w_record_cause(void* ctx, uint32_t flag) noexcept:
+    cdef RP2040 chip = <RP2040> ctx
+    try:
+        chip.vreg_and_chip_reset.record_reset_cause(flag)
+    except BaseException as error:
+        park_error(error)
+        return False
+    return True
+
+
 cdef bool _w_ssi_baudr(void* ctx, double* value) noexcept:
     cdef RP2040 chip = <RP2040> ctx
     try:
@@ -704,6 +781,10 @@ cdef class RP2040:
         world.adc_read = _w_adc_read
         world.pio_started = _w_pio_started
         world.ssi_baudr = _w_ssi_baudr
+        world.reset_block = _w_reset_block
+        world.usb_reset = _w_usb_reset
+        world.bus_reset = _w_bus_reset
+        world.record_cause = _w_record_cause
         world.clk_sys = _w_clk_sys
         world.adc_channel_value = _w_adc_channel_value
         self._mcu.set_flash(<uint8_t*> &self._flash[0], <uint32_t> self.flash_byte_size)
@@ -874,24 +955,15 @@ cdef class RP2040:
             cause = ResetCause.WATCHDOG if from_watchdog else ResetCause.RUN_PIN
         elif from_watchdog is not None and from_watchdog != (cause is ResetCause.WATCHDOG):
             raise ValueError(f"enter_reset(from_watchdog={from_watchdog}, cause={cause}): they disagree")
-        self.reset(preserve_flash=True, from_watchdog=cause is ResetCause.WATCHDOG)
-        if self.usb_ctrl.on_reset:
-            self.usb_ctrl.on_reset()
-        self._record_reset_cause(cause)
-
-    def _record_reset_cause(self, cause: ResetCause) -> None:
-        """0089 section 1.3's table. A watchdog reset is the *absence* of bookkeeping: the watchdog block survives its own reset with REASON (and
-        `watchdog_enable()`'s SCRATCH[4] magic) intact, and CHIP_RESET is untouched, so firmware sees WDT/SOFTWARE/WATCHDOG exactly as it does on
-        silicon. Anything else resets the watchdog and records a chip-level cause (CHIP_RESET reports the *last* reset, one flag at a time)."""
-        if cause is ResetCause.WATCHDOG:
-            return
-        self.watchdog.reset()
-        self.vreg_and_chip_reset.record_reset_cause(HAD_RUN if cause is ResetCause.RUN_PIN else HAD_POR)
+        # The cascade, the USB link told and the cause recorded are the `Mcu`'s (the cause is recorded *after* the reset, so the wider reset cannot wipe it).
+        if not self._mcu.enter_reset_code(_CAUSE_CODES[cause], self.psm.wdsel, self.resets.wdsel, self._reset_world_mask()):
+            raise_if_pending()
+        raise_if_pending()
 
     def leave_reset(self) -> None:
         """Release the chip: point the core at flash's entry point, where the bootrom would have
         left it, and let it run. The other half of `enter_reset()`."""
-        self.core.pc = FLASH_START_ADDRESS
+        self._mcu.leave_reset()
 
     def _default_on_break(self, code: int) -> None:
         # TODO: raise HardFault exception
@@ -1020,105 +1092,92 @@ cdef class RP2040:
         `SYSINFO`/`TBMAN` are covered by not needing it - they hold no instance state at
         all, so `BasePeripheral`'s default no-op is their correct implementation.
         """
-        if from_watchdog:
-            psm_wdsel = self.psm.wdsel
-            resets_wdsel = self.resets.wdsel
-            if psm_wdsel & WDSEL_RESETS:
-                # The RESETS controller itself is in the watchdog's reset domain, and a reset
-                # RESETS block holds every peripheral in reset - so selecting it selects them all,
-                # regardless of what RESETS.WDSEL says. This is the path a real machine.reset()
-                # takes.
-                resets_wdsel = RESETS_BITS_MASK
-        else:
-            psm_wdsel = PSM_BITS_MASK
-            resets_wdsel = RESETS_BITS_MASK
+        if not self._mcu.reset(1 if from_watchdog else 0, 1 if preserve_flash else 0, self.psm.wdsel, self.resets.wdsel, self._reset_world_mask()):
+            raise_if_pending()
+        raise_if_pending()
 
-        # The core is reset on every path, including a watchdog reset that selected no PSM domain
-        # at all. Deliberate, and the one place this is knowingly broader than the hardware: with
-        # PROC0 unselected the emulated CPU would otherwise keep running into the reset it just
-        # asked for, which is the exact hang `BaseDevice._on_watchdog_trigger()` exists to prevent
-        # (it predates this phase). Revisit only with a firmware that actually depends on it.
-        self.core.reset()
-        self.ppb.reset()
+    def _reset_world_mask(self):
+        """Which blocks of the cascade the chip does not hold itself (an oracle's pure-Python reference, a test's stand-in): bit `block` of the mask, for the `Mcu` to hand to `_reset_block_python`."""
+        cdef uint64_t mask = 0
+        for block, getter in _RESET_BLOCKS:
+            if not getattr(getter(self), "_from_mcu", False):
+                mask |= (<uint64_t> 1) << block
+        # a pin bank the host holds takes its IO / PADS blocks with it
+        if not getattr(self._gpio_bank, "_from_mcu", False):
+            mask |= ((<uint64_t> 1) << kMcuBlockIoBank0) | ((<uint64_t> 1) << kMcuBlockPadsBank0)
+        if not getattr(self._qspi_bank, "_from_mcu", False):
+            mask |= ((<uint64_t> 1) << kMcuBlockIoQspi) | ((<uint64_t> 1) << kMcuBlockPadsQspi)
+        return mask
 
-        if psm_wdsel & WDSEL_SIO:
+    def _reset_block_python(self, block):
+        """The reference's reset of one block of the cascade, for a block the chip does not hold (the `Mcu` calls it instead of resetting its own)."""
+        if block == kMcuBlockPpb:
+            self.ppb.reset()
+        elif block == kMcuBlockSio:
             self.sio.reset()
-        if psm_wdsel & WDSEL_CLOCKS:
+        elif block == kMcuBlockClocks:
             self.clocks.reset()
             self.clocks.reset_tree()
-
-        if resets_wdsel & RESET_IO_BANK0:
+        elif block == kMcuBlockIoBank0:
             for pin in self.gpio:
                 pin.reset(pads=False)
             self.io_bank0.reset()
-        if resets_wdsel & RESET_PADS_BANK0:
+        elif block == kMcuBlockPadsBank0:
             for pin in self.gpio:
                 pin.reset(io=False)
             self.pads_bank0.reset()
-        if resets_wdsel & RESET_IO_QSPI:
+        elif block == kMcuBlockIoQspi:
             for qspi_pin in self.qspi:
                 qspi_pin.reset(pads=False)
             self.io_qspi.reset()
-        if resets_wdsel & RESET_PADS_QSPI:
-            # PADS_QSPI does not share BANK0's reset value - GPIO_QSPI_SS's pull-up is what holds
-            # the flash deselected and what makes BOOTSEL readable (record 0050). Re-applied here
-            # exactly as __init__ does it, right after the generic pad reset above.
+        elif block == kMcuBlockPadsQspi:
+            # PADS_QSPI does not share BANK0's reset value - GPIO_QSPI_SS's pull-up is what holds the flash deselected and what makes BOOTSEL readable (record 0050)
             for qspi_pin, pad_reset in zip(self.qspi, QSPI_PAD_RESET_VALUES):
                 qspi_pin.reset(io=False, pad_reset=pad_reset)
             self.pads_qspi.reset()
-
-        if resets_wdsel & RESET_PWM:
+        elif block == kMcuBlockPwm:
             self.pwm.reset()
-        if resets_wdsel & RESET_DMA:
+        elif block == kMcuBlockDma:
             self.dma.reset()
-        if resets_wdsel & RESET_ADC:
+        elif block == kMcuBlockAdc:
             self.adc.reset()
-        if resets_wdsel & RESET_TIMER:
+        elif block == kMcuBlockTimer:
             self.timer.reset()
-        if resets_wdsel & RESET_UART0:
+        elif block == kMcuBlockUart0:
             self.uart[0].reset()
-        if resets_wdsel & RESET_UART1:
+        elif block == kMcuBlockUart1:
             self.uart[1].reset()
-        if resets_wdsel & RESET_SPI0:
+        elif block == kMcuBlockSpi0:
             self.spi[0].reset()
-        if resets_wdsel & RESET_SPI1:
+        elif block == kMcuBlockSpi1:
             self.spi[1].reset()
-        if resets_wdsel & RESET_I2C0:
+        elif block == kMcuBlockI2c0:
             self.i2c[0].reset()
-        if resets_wdsel & RESET_I2C1:
+        elif block == kMcuBlockI2c1:
             self.i2c[1].reset()
-        if resets_wdsel & RESET_PIO0:
+        elif block == kMcuBlockPio0:
             self.pio[0].reset()
-        if resets_wdsel & RESET_PIO1:
+        elif block == kMcuBlockPio1:
             self.pio[1].reset()
-        if resets_wdsel & RESET_USBCTRL:
+        elif block == kMcuBlockUsb:
             self.usb_ctrl.reset()
-        if resets_wdsel & RESET_RTC:
+        elif block == kMcuBlockRtc:
             self.rtc.reset()
-        if resets_wdsel & RESET_BUSCTRL:
+        elif block == kMcuBlockBusctrl:
             self.busctrl.reset()
-        if resets_wdsel & RESET_SYSCFG:
+        elif block == kMcuBlockSyscfg:
             self.syscfg.reset()
-        # SYSINFO/TBMAN have RESETS bits too and are deliberately not called: they hold no instance state at
-        # all (read-only chip identity), so `BasePeripheral`'s default no-op is the correct implementation.
-        if psm_wdsel & WDSEL_XOSC:
-            # Only ever selected on a RUN-pin/power-on reset: `watchdog_reboot()` clears this bit
-            # deliberately, because the oscillators clock the reset itself. `rosc`
-            # follows below.
+        elif block == kMcuBlockXosc:
             self.xosc.reset()
-        if psm_wdsel & WDSEL_ROSC:
-            # Like XOSC: only ever selected on a RUN-pin/power-on reset (`watchdog_reboot()` clears it)
+        elif block == kMcuBlockRosc:
             self.rosc.reset()
-        if psm_wdsel & WDSEL_XIP:
-            # The XIP domain is a PSM bit, not a RESETS one - there is no RESETS_RESET_XIP or
-            # _SSI. Both halves of it reset together, as they do on silicon.
+        elif block == kMcuBlockXip:
             self.xip_ctrl.reset()
+        elif block == kMcuBlockSsi:
             self.ssi.reset()
+        elif block == kMcuBlockWatchdog:
+            self.watchdog.reset()
 
-        if not preserve_flash:
-            # Erased in place: building a filler first (a 16 MB bytes object, then a 16 MB bytearray copy of it) made every reset a 32 MB allocation, and on a 32-bit build
-            # (CI's ARMv7 wheel test) a run of chips waiting for the garbage collector turned that into a MemoryError.
-            memset(<uint8_t*> &self._flash[0], 0xFF, len(self._flash))
     def update_clocks(self):
         """Re-derives `clk_sys`/`clk_peri` from the PLL and CLOCKS registers and retunes what runs from them (see `peripherals.clocks.update_clocks`)."""
         self.clocks.update()

@@ -56,6 +56,7 @@ and `reference/` for those). The structure itself is decided in
 
 ### In progress / Proposed
 
+- [ ] [0105] the time architecture: an audit of the clock, the tick generators and who counts what | audit done; TIMER alarm-fires-early fixed in both builds, PIO cycle derivation and an integer TIMER count proposed, not started
 - [ ] [0104] the second core: the audit of the seams and an architecture that costs nothing while core 1 is off | proposed, documentation only - core 1 is now required (`_thread`, CoreMark 1.0.4+); the seams audited, the scheduling of the two cores on one thread is open (candidates and a measurement plan); order: seams, then core 1, then 0103's Python layer and the wider ABI
 - [ ] [0103] a wasm backend: toolchain, packaging, backend selection and testing | in progress - the headless proof of concept is built and measured: the module imports nothing, `ziglang` is in `[build-system].requires`, the module is in every wheel, MicroPython boots under `wasmhost` and the PoC runs in Pyodide; wasm runs at 0.4-0.6x of the Cython build and 90-145x the pure-Python one (the synthetic loop; clang's inlining was the gap, fixed by hints in the source); next: `RP2040PY_BACKEND` (cython -> wasm -> python) and a backend axis in the tests
 - [ ] [0102] a C ABI around the core, for wasm (and, later, cffi) | first slice built inside [0103] (boot, run, run_n, the ROM / flash / SRAM / UART0 buffers, registers; imports nothing); the host callbacks - pins, UART input, I2C / SPI devices, ADC, USB - are not designed; cffi is a later consumer, not part of it
@@ -290,6 +291,7 @@ record is added.
 [0096]: records/0096-cpp-mcu-core.md
 [0098]: records/0098-datasheet-conformance-audit.md
 [0104]: records/0104-second-core-seams-and-architecture.md
+[0105]: records/0105-time-architecture-audit.md
 [0103]: records/0103-wasm-backend.md
 [0102]: records/0102-c-abi-for-the-core.md
 [0101]: records/0101-reset-values-on-a-real-board.md

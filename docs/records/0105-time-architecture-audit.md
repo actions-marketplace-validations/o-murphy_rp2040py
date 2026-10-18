@@ -1,6 +1,6 @@
 # 0105 - the time architecture: an audit of the clock, the tick generators and who counts what
 
-Status: **audit done (2026-10-18); findings 1 and 2 fixed; the rest recorded with a proposed order, not started.** Prompted by the maintainer's remark that the clock and the generators "are all on crutches", and written before [0104](0104-second-core-seams-and-architecture.md)'s P0/D6, because the second core's scheduling contract depends on what "time" means for each block.
+Status: **audit done (2026-10-18); findings 1 and 2 fixed (1 twice: the first fix could livelock, see the log); the rest recorded with a proposed order, not started.** Prompted by the maintainer's remark that the clock and the generators "are all on crutches", and written before [0104](0104-second-core-seams-and-architecture.md)'s P0/D6, because the second core's scheduling contract depends on what "time" means for each block.
 
 ## What time is made of today (the same in the pure-Python reference and in C++)
 
@@ -33,3 +33,4 @@ Status: **audit done (2026-10-18); findings 1 and 2 fixed; the rest recorded wit
 
 - **2026-10-18** - audit; finding 1 reproduced and fixed in both builds with a regression test; the rest recorded.
 - **2026-10-18** - finding 2 measured (4000 of 4156 cycles at 133 MHz) and fixed in both builds, with a test in each.
+- **2026-10-18** - the lockstep oracles (`test_batch_parity.py`, `test_timer_parity.py`) did not cover either defect: the TIMER one was in the reference and the native port alike (a comparison cannot see a bug both share), and the batch parity ran at 125 MHz only, with no PIO running. Added: `test_a_running_pio_gets_the_same_cycles_...` (pure vs native, 125/133/48 MHz; fails on a mutant that drops the carry) and a property test `test_an_alarm_is_never_visible_before_the_count_has_reached_its_target` (40 seeds, random PAUSE/tick sizes; fails 41/50 on a mutant that drops the fraction). **The property test found a livelock in my first fix of finding 1**: a remainder under one tick rounded to a zero wait and the alarm re-armed itself at the same instant for ever (commit `9dd71b7` carries that defect; fixed by "at least one tick while the count is short"). The lesson for this record: a fix to time needs a property test, not only a parity one.

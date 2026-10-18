@@ -153,8 +153,9 @@ class RPTimer(BasePeripheral):
     def _arm_clock_alarm(self, alarm: "RPTimerAlarm") -> None:
         """(Re)schedules `alarm`'s clock alarm for the moment the count reaches its target: rounded UP to a tick, never early (a zero wait stays zero, as it always did)."""
         counts = self._counts_until(alarm.target_micros)
-        ticks = math.ceil(self._nanos_for(counts) * TICKS_PER_NANO - 1e-6) if counts > 0 else 0
-        alarm.clock_alarm.schedule_ticks(max(ticks, 0))
+        # (at least one tick while the count is short of the target at all: a zero wait would fire again at the very same instant, for ever)
+        ticks = max(math.ceil(self._nanos_for(counts) * TICKS_PER_NANO - 1e-6), 1) if counts > 0 else 0
+        alarm.clock_alarm.schedule_ticks(ticks)
 
     def _nanos_for(self, counts: float) -> float:
         """Simulated nanoseconds until the count has advanced by `counts` (at the current tick)."""

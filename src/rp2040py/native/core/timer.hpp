@@ -236,7 +236,7 @@ private:
             } else {
                 ticks = static_cast<int64_t>(exact);
                 if (static_cast<double>(ticks) < exact) ++ticks;  // ceil
-                if (ticks < 0) ticks = 0;
+                if (ticks < 1) ticks = 1;  // at least one tick while the count is short of the target: a zero wait would fire again at the very same instant, for ever
             }
         }
         clock_->schedule_ticks(&alarms_[index], ticks);

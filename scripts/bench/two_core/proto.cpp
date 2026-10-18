@@ -27,6 +27,7 @@ struct Core {
 };
 Core g_core[2] = {{&g_mcu.cpu}, {&g_cpu1}};
 bool g_two = true;
+uint32_t g_locks = 0;  // the SIO spinlock state a run starts with
 
 // the accuracy probe: a periodic alarm that records how far ahead of the clock each core's own time already is when the alarm fires
 Alarm g_alarm;
@@ -93,6 +94,7 @@ void load(const char* p0, const char* p1) {  // p1 may be null: a single-core ru
         g_cpu1.registers[13] = 0x2003F000;
     }
     Clock& clk = g_mcu.clock();
+    g_mcu.sio().spin_lock = g_locks;
     clk.cancel(&g_alarm);
     g_alarm.fire = on_alarm;
     g_skew = 0;
@@ -108,6 +110,16 @@ inline void exec1(Core& c) {
     ++c.n;
 }
 inline bool w(int i) { return !g_two ? (i == 1) : g_core[i].cpu->waiting; }  // a core that does not exist waits for ever
+
+// ---- the SIO flag: a wrapper over the SIO's window handler that notes every access (candidate E ends a quantum at one) ----
+bool g_hit = false;
+bool g_exact = false;  // candidate F: an SIO access first lets the other core catch up to this core's time
+int g_cur = 0;         // the core whose instruction is executing
+struct SioWrap { WindowHandler inner; };
+SioWrap g_wrap;
+void catch_up();
+uint32_t sio_read(void* ctx, uint32_t off) { g_hit = true; if (g_exact) catch_up(); auto* w = static_cast<SioWrap*>(ctx); return w->inner.read32(w->inner.ctx, off); }
+void sio_write(void* ctx, uint32_t off, int64_t v, uint32_t at) { g_hit = true; if (g_exact) catch_up(); auto* w = static_cast<SioWrap*>(ctx); w->inner.write32(w->inner.ctx, off, v, at); }
 
 // ---- the candidates ----
 void run_S(int64_t target) {  // one core, one instruction, one clock tick: the shape of today's loop
@@ -179,6 +191,58 @@ void run_C(int64_t target, int quantum) {  // each core runs to the end of a qua
     }
 }
 
+void catch_up() {  // runs inside the SIO access of core g_cur: the other core, if it is behind, executes up to this core's time first, so the access is ordered by time
+    const int p = g_cur, q = 1 - p;
+    if (w(q) || g_core[q].local >= g_core[p].local) return;
+    g_cur = q;
+    while (g_core[q].local < g_core[p].local) exec1(g_core[q]);
+    g_cur = p;
+}
+void run_F(int64_t target, int quantum) {  // a quantum (cut at the next alarm) with the exact ordering of every SIO access
+    Clock& clk = g_mcu.clock();
+    g_exact = true;
+    while (clk.ticks() < target) {
+        const int64_t now = clk.ticks();
+        int64_t horizon = now + static_cast<int64_t>(quantum) * kCycle;
+        if (clk.has_alarm()) horizon = std::min(horizon, now + clk.ticks_to_next_alarm());
+        horizon = std::max(horizon, now + kCycle);
+        if (w(0) && w(1)) break;
+        int64_t t = INT64_MAX;
+        for (int i = 0; i < 2; ++i) {
+            if (w(i)) continue;
+            g_cur = i;
+            while (g_core[i].local < horizon) exec1(g_core[i]);
+            t = std::min(t, g_core[i].local);
+        }
+        if (t > now) clk.tick_ticks(t - now);
+    }
+    g_exact = false;
+}
+void run_E(int64_t target, int quantum) {  // a quantum cut at the next alarm and ended early right after a core touches the SIO; the other core then catches up to that time
+    Clock& clk = g_mcu.clock();
+    while (clk.ticks() < target) {
+        if (w(0) && w(1)) break;
+        int64_t t = INT64_MAX;
+        for (int i = 0; i < 2; ++i) if (!w(i)) t = std::min(t, g_core[i].local);
+        const int64_t now = clk.ticks();
+        if (t > now) clk.tick_ticks(t - now);
+        int64_t horizon = t + static_cast<int64_t>(quantum) * kCycle;
+        if (clk.has_alarm()) horizon = std::min(horizon, clk.ticks() + clk.ticks_to_next_alarm());
+        horizon = std::max(horizon, t + kCycle);
+        const int p = pick();
+        g_hit = false;
+        while (g_core[p].local < horizon && !g_hit) exec1(g_core[p]);
+        if (g_hit) {
+            const int q = 1 - p;
+            if (!w(q)) {
+                const int64_t at = g_core[p].local;
+                g_hit = false;
+                while (g_core[q].local < at && !g_hit) exec1(g_core[q]);
+            }
+        }
+    }
+}
+
 struct Result { double wall; uint64_t n0, n1; int64_t sim_ticks; int64_t skew; uint64_t fires; uint32_t shared; };
 template <class F>
 Result measure(const char* p0, const char* p1, int64_t sim_cycles, F&& loop) {
@@ -210,6 +274,8 @@ void report(const char* wl, const char* name, const Result& r, bool pingpong) {
 
 int main() {
     setup_chip();
+    g_wrap.inner = g_mcu.sio().window_handler();
+    g_mcu.bus.set_sio(WindowHandler{sio_read, sio_write, &g_wrap});
     const int64_t T = 8 * 1000 * 1000;  // simulated cycles per run (64 ms at 125 MHz)
     struct Cand { const char* name; void (*fn)(int64_t); int q; };
     auto go = [&](const char* wl, const char* p0, const char* p1, bool pp) {
@@ -234,5 +300,23 @@ int main() {
     go("W3 1+idle", "alu0.bin", "wfi.bin", false);
     std::printf("-- W2: ping-pong through shared RAM (each core polls for the other)\n");
     go("W2 pingpong", "pp0.bin", "pp1.bin", true);
+    std::printf("-- W4: ping-pong through the SIO spinlocks (the way SDK firmware synchronises); both locks held at the start\n");
+    g_locks = 3;
+    report("W4 spinlock", "A  local time/instr", measure("sl0.bin", "sl1.bin", T, [](int64_t t) { run_A(t); }), true);
+    for (int q : {16, 64, 256, 1024}) {
+        char nm[32];
+        std::snprintf(nm, sizeof nm, "C  quantum %d cyc", q);
+        report("W4 spinlock", nm, measure("sl0.bin", "sl1.bin", T, [q](int64_t t) { run_C(t, q); }), true);
+    }
+    for (int q : {16, 64, 256, 1024}) {
+        char nm[32];
+        std::snprintf(nm, sizeof nm, "E  quantum %d + SIO cut", q);
+        report("W4 spinlock", nm, measure("sl0.bin", "sl1.bin", T, [q](int64_t t) { run_E(t, q); }), true);
+    }
+    for (int q : {16, 64, 256, 1024}) {
+        char nm[32];
+        std::snprintf(nm, sizeof nm, "F  quantum %d + exact SIO", q);
+        report("W4 spinlock", nm, measure("sl0.bin", "sl1.bin", T, [q](int64_t t) { run_F(t, q); }), true);
+    }
     return 0;
 }

@@ -40,6 +40,9 @@ put("pp0.bin", setup + [0x1C49, 0x6001, 0x6842, 0x428A, 0xD1FC, 0xE7F9])
 put("pp1.bin", setup + [0x6802, 0x428A, 0xD0FC, 0x1C11, 0x6041, 0xE7F9])
 put("wfi.bin", [0xBF30, 0xE7FE])
 
+# Core 0 reads the TIMER's microsecond counter in a loop (r0 = 0x40054000, TIMELR at +0x0C): the accuracy probe of the clock inside a scheduling quantum.
+put("tm0.bin", [0x2040, 0x0600, 0x2254, 0x0312, 0x1880, 0x2100, 0x68C3, 0x1C49, 0xE7FC])
+
 # Ping-pong through the SIO spinlocks, the way SDK firmware synchronises: r4 = SIO + 0x100 (SPINLOCK0 at [r4], SPINLOCK1 at [r4, #4]), r5 = the shared counter's address.
 # The harness starts with both locks held. Core 0 releases lock 1 and spins to claim lock 0 (and counts a round trip); core 1 spins to claim lock 1 and releases lock 0.
 sio_setup = [0x20D0, 0x0600, 0x2401, 0x0224, 0x1824, 0x2520, 0x062D, 0x2602, 0x0436, 0x19AD, 0x2100, 0x2200]

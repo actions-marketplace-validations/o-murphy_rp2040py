@@ -51,6 +51,8 @@ Its module is pure computation and imports nothing. This core must call the host
 2. **Measure:** CoreMark on the three backends with `scripts/bench/`.
 3. **Then decide** the Python layer (parity plan), `RP2040PY_BACKEND`, `--backend` in `conftest.py`, the packaging hook, and the move of `ziglang` into `[build-system].requires`.
 
+**Order revised 2026-10-18** (the second core is now required: [0104](0104-second-core-seams-and-architecture.md)): step 3 below - the Python layer and the widening of the C ABI - comes **after** the seams for core 1 (0104's P0), so that the ABI is widened with a core argument from the start; the *selection* of a backend (`RP2040PY_BACKEND`, `--backend`) does not depend on core 1 and may be done earlier if wanted.
+
 ## Progress log
 
 - 2026-10-17: proposed (documentation only), from the maintainer's concepts and the measurements above.

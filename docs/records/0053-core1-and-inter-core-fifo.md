@@ -1,5 +1,7 @@
 # 0053. Second core (core1) and the inter-core FIFO
 
+> **2026-10-18:** core 1 is now required (MicroPython's `_thread` and CoreMark 1.0.4+ need it). The audit of the seams, the architecture proposals and the open question of how the two cores are scheduled on one thread are in [0104](0104-second-core-seams-and-architecture.md); this record's addendum (no OS thread per core) stands.
+
 - Status: **Proposed — core1/the real FIFO not implemented.** The "Interim option" below landed
   2026-08-18 (a clearer read-side warning only); see that section's own addendum. Everything else
   in this record is still documentation only, no code.

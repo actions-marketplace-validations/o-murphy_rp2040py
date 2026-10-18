@@ -56,6 +56,7 @@ and `reference/` for those). The structure itself is decided in
 
 ### In progress / Proposed
 
+- [ ] [0104] the second core: the audit of the seams and an architecture that costs nothing while core 1 is off | proposed, documentation only - core 1 is now required (`_thread`, CoreMark 1.0.4+); the seams audited, the scheduling of the two cores on one thread is open (candidates and a measurement plan); order: seams, then core 1, then 0103's Python layer and the wider ABI
 - [ ] [0103] a wasm backend: toolchain, packaging, backend selection and testing | in progress - the headless proof of concept is built and measured: the module imports nothing, `ziglang` is in `[build-system].requires`, the module is in every wheel, MicroPython boots under `wasmhost` and the PoC runs in Pyodide; wasm runs at 0.4-0.6x of the Cython build and 90-145x the pure-Python one (the synthetic loop; clang's inlining was the gap, fixed by hints in the source); next: `RP2040PY_BACKEND` (cython -> wasm -> python) and a backend axis in the tests
 - [ ] [0102] a C ABI around the core, for wasm (and, later, cffi) | first slice built inside [0103] (boot, run, run_n, the ROM / flash / SRAM / UART0 buffers, registers; imports nothing); the host callbacks - pins, UART input, I2C / SPI devices, ADC, USB - are not designed; cffi is a later consumer, not part of it
 - [ ] [0101] the chip's reset values, read on a real board | proposed, waiting for a board - the 56 registers on which a fresh chip is meant to differ from the SVD, to be measured; nothing changes in the chip until then
@@ -72,7 +73,7 @@ and `reference/` for those). The structure itself is decided in
 - [ ] [0061] one firmware command with `--family` | deferred, documented - step 1 is nearly free since [0059]
 - [ ] [0064] read-only state server (WebSocket/Socket.IO) + web visualizer | deferred, documented - the watching half of [0060]; blocked on devices describing themselves ([0049])
 - [ ] [0060] external I/O bridges (web viewer, host GPIO) | deferred, documented - names the wall-clock ceiling a pin-level bridge cannot escape
-- [ ] [0053] second core (core1) + inter-core FIFO | proposed - core1 and the real FIFO unbuilt; the addendum settles the execution model
+- [ ] [0053] second core (core1) + inter-core FIFO | proposed, now required - core1 and the real FIFO unbuilt; the addendum settles that no OS thread is used; the audit and the open scheduling question are in [0104]
 - [ ] [0048] CYW43 step 4 NAT bridge (supersedes [0045]) | 4a-4e merged and live-verified; open only for its own gaps - backpressure, AP mode, multi-guest, IPv6
 
 ### Implemented
@@ -288,6 +289,7 @@ record is added.
 [0095]: records/0095-github-action-at-repo-root.md
 [0096]: records/0096-cpp-mcu-core.md
 [0098]: records/0098-datasheet-conformance-audit.md
+[0104]: records/0104-second-core-seams-and-architecture.md
 [0103]: records/0103-wasm-backend.md
 [0102]: records/0102-c-abi-for-the-core.md
 [0101]: records/0101-reset-values-on-a-real-board.md

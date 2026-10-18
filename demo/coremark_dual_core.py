@@ -23,7 +23,9 @@ enumerated, and it stops on the `Iterations/Sec : <n>` line.
 
 Expected: a valid result - about 12 s of simulated time, `Parallel Multicore : 2`, equal CRCs on both
 cores (`[0]crcfinal` = `[1]crcfinal` = 0xcc42, the single-core build's), and roughly twice the
-single-core score. The run takes several minutes of wall time: two busy cores, ~12 s of chip time.
+single-core score. The run takes about a minute of wall time after the build: ~12 s of chip time, and with both cores busy
+the native build runs at roughly 0.28x real time (one thread executes the two cores in turn; measured in a
+cloud container, 2026-10-18; one busy core is ~0.6x).
 """
 
 import os

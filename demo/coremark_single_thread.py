@@ -21,8 +21,8 @@ anything (its `core_start_parallel` is broken): for both cores see `coremark_dua
 cache is keyed by the asset's file name, which every release of that repository shares
 (`Coremark-RP2040.uf2`) - delete the cached file before switching to another release's URL.
 
-The run takes a few minutes of wall time: the benchmark needs ~12 s of simulated chip time and the
-emulator runs a busy core at roughly 0.1-0.2x real time.
+The run takes about half a minute of wall time: the benchmark needs ~12 s of simulated chip time and
+the native build runs one busy core at roughly 0.6x real time (measured in a cloud container, 2026-10-18).
 """
 
 import os

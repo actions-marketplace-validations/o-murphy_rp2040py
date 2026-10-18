@@ -44,7 +44,7 @@ INTERP_ADD_MASK = (
     0xFFFFFF  # INTERPx_ACCUMy_ADD is 23:0 (datasheet, and SIO_INTERP0_ACCUM0_ADD_BITS 0x00ffffff in pico-sdk's sio.h)
 )
 
-# INTER-CORE FIFO - not implemented, see docs/records/0053-core1-and-inter-core-fifo.md
+# INTER-CORE FIFO - the offsets; the FIFOs themselves are in RPSIO (docs/records/0104-second-core-seams-and-architecture.md)
 FIFO_ST = 0x050
 FIFO_WR = 0x054
 FIFO_RD = 0x058

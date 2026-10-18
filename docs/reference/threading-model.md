@@ -65,3 +65,7 @@ that pumps it) and one CLI helper:
   doing blocking I/O must not do it inline.
 
 The contract for these (which thread may touch the core, and how) is the "Core host contract: entry points, threads and the host interface" section of record 0096.
+
+## The second core is not a thread either
+
+Core 1 (record 0104) runs on the same thread as core 0: one batch loop executes both cores in turn against the one clock, in quanta of 16 cycles, and every access that leaves RAM and flash (the SIO, the PPB, any peripheral) first brings the other core up to this core's time. So two guest cores never run at the same instant on the host, and nothing in the library needs a lock for them; data exchanged through RAM with no device access in between can be seen up to a quantum late (the accuracy contract of 0104). `chip.quantum_cycles = 1` gives the exact scheduler (the bare C++ harness takes `RP2040PY_QUANTUM`); `--no-core1` / `RP2040PY_CORE1=0` leaves core 1 off and the loop is the single-core one, untouched.

@@ -1,8 +1,10 @@
 # 0053. Second core (core1) and the inter-core FIFO
 
+> **2026-10-18, later: built.** The second core and the inter-core FIFOs are implemented - the C++ core, the Python reference, the lockstep oracle and the shells, on by default - under [0104](0104-second-core-seams-and-architecture.md) (P0-P2; MicroPython's `_thread` and CoreMark on both cores run). What this record proposed as `Proposed` below is history; its addendum (no OS thread per core) is what 0104 kept. Open items are in 0104's "Next steps".
+>
 > **2026-10-18:** core 1 is now required (MicroPython's `_thread` and CoreMark 1.0.4+ need it). The audit of the seams, the architecture proposals and the open question of how the two cores are scheduled on one thread are in [0104](0104-second-core-seams-and-architecture.md); this record's addendum (no OS thread per core) stands.
 
-- Status: **Proposed — core1/the real FIFO not implemented.** The "Interim option" below landed
+- Status: **Implemented in [0104](0104-second-core-seams-and-architecture.md) (2026-10-18); the text below is the original proposal.** (Was: Proposed — core1/the real FIFO not implemented.) The "Interim option" below landed
   2026-08-18 (a clearer read-side warning only); see that section's own addendum. Everything else
   in this record is still documentation only, no code.
 - Conceived: 2026-08-16

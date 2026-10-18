@@ -343,9 +343,9 @@ The second half of the contract above, written once the core runs alone (G1, G2,
 
 **Open:** the C form of the struct (one registration per callback or one struct, versioning) and `request_stop` / `real_io` as real atomics for a threaded wasm host - both in 0102.
 
-## Dual-core seams to keep open in the single-core C++ API (design note, 2026-10-12 - **not started**, to be implemented only on an explicit go-ahead)
+## Dual-core seams to keep open in the single-core C++ API (design note, 2026-10-12 - **built 2026-10-18 as P0 of [0104](0104-second-core-seams-and-architecture.md); seams 1 and 3 and the per-core IRQ delivery exist, the cost with core 1 off was measured as zero**)
 
-The C++ core ships single-core first (record [0053](0053-core1-and-inter-core-fifo.md) stays proposed; rp2040js is single-core as well). Adding core 1 later should be additive, not an API break, so three seams are to be kept in the interface *before* the first intermediate release - cheap now, expensive once a standalone header-only repo has users:
+The C++ core ships single-core first (record [0053](0053-core1-and-inter-core-fifo.md) was proposed then, and is implemented in 0104 now; rp2040js is single-core as well). Adding core 1 later should be additive, not an API break, so three seams are to be kept in the interface *before* the first intermediate release - cheap now, expensive once a standalone header-only repo has users:
 
 1. **An initiator id on bus accesses.** SIO and the PPB are the only blocks whose result depends on *who* accesses them (`CPUID`, the two inter-core FIFOs, the per-core interpolators and divider, the banked NVIC/SysTick/SCB). The bus entry points and `BlockWindow` handlers need a core id (always 0 for now), or per-core SIO/PPB windows, so no handler has to change signature when core 1 appears.
 2. **IRQ line -> mask of cores.** Today a peripheral raises one line into one NVIC. Every peripheral line goes to both cores' NVICs on the chip, and IO_BANK0 already has separate `PROC0`/`PROC1` INTE/INTF/INTS sets plus `SIO_IRQ_PROC0/1`. The IRQ sink should take (line, level) and fan out through a per-line core mask (0b01 for now), so IO_BANK0 can register its PROC1 registers during its port without a later rewiring.

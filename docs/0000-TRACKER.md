@@ -74,13 +74,13 @@ and `reference/` for those). The structure itself is decided in
 - [ ] [0061] one firmware command with `--family` | deferred, documented - step 1 is nearly free since [0059]
 - [ ] [0064] read-only state server (WebSocket/Socket.IO) + web visualizer | deferred, documented - the watching half of [0060]; blocked on devices describing themselves ([0049])
 - [ ] [0060] external I/O bridges (web viewer, host GPIO) | deferred, documented - names the wall-clock ceiling a pin-level bridge cannot escape
-- [ ] [0053] second core (core1) + inter-core FIFO | superseded in practice by [0104] (built there); kept for the execution-model addendum
 - [ ] [0048] CYW43 step 4 NAT bridge (supersedes [0045]) | 4a-4e merged and live-verified; open only for its own gaps - backpressure, AP mode, multi-guest, IPv6
 
 ### Implemented
 
 - [x] [0098] CLOCKS and PLL: audit against datasheet 2.15 / 2.18, then the C++ port | the PLL's power bits / `LOCK`, `ENABLED0/1` and a stopped crystal giving 0 Hz fixed in the reference (`tests/test_clocks_xosc_pll.py`), `core/clocks.hpp` + `core/pll.hpp` + `core/clock_sinks.hpp` + `_clocks.pyx` / `_pll.pyx` held to a lockstep oracle (57 logic mutants) and mutation-tested C++ checks; the CPU's instruction time follows `clk_sys`, the crystal starting retunes the tree; resus, switch delays, clock gating documented not built (the row of 0098 below stays open for the rest of the blocks)
 - [x] [0098] USB: audit against datasheet 4.1 and TinyUSB, then the C++ port | the reference follows the datasheet (twelve findings, `tests/test_usb_datasheet.py`), `core/usb.hpp` + `_usb.pyx` held to a lockstep oracle (66 logic mutants) and to `tests/cpp/test_usb.cpp`; first mutation testing of a C++ block (`scripts/audit/cpp_mutants.py`); token-level wire, suspend/resume, device SOF documented not built (the row of 0098 below stays open for the rest of the blocks)
+- [x] [0053] second core (core1) + inter-core FIFO | built under [0104] (P0-P2, on by default); the no-OS-thread addendum stands
 - [x] [0100] an integer time base for the simulation clock | int64 ticks of 1/16 ns end to end; `rp2_dma` passes in the full official-suite sequence; the benchmark is within noise
 - [x] [0097] a Pyodide/WASM wheel for rp2040py | root-caused and fixed - a native clock/block reference cycle invisible to the GC exhausted the 32-bit/wasm address space one leaked chip at a time; `[tool.cibuildwheel.pyodide]`/`publish.yml`'s pyodide row now run the full test suite like every other platform
 - [x] [0095] `setup-rp2040py` action moved to the repo root, with branding | Marketplace-publishable; external consumers on the old `.github/actions/...` path need to update

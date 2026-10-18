@@ -63,7 +63,7 @@ and `reference/` for those). The structure itself is decided in
 - [ ] [0102] a C ABI around the core, for wasm (and, later, cffi) | first slice built inside [0103]; the host callbacks (pins, UART input, I2C/SPI devices, ADC, USB) are not designed
 - [ ] [0101] the chip's reset values, read on a real board | proposed, waiting for a board - the 56 registers on which a fresh chip is meant to differ from the SVD, to be measured; nothing changes in the chip until then
 - [ ] [0099] a WASM drop-in for the original rp2040js | proposed, nothing designed - once Phase 6 of 0096 boots MicroPython on wasmtime/node, try a TypeScript wrapper with rp2040js's public API and run its own specs against the core
-- [ ] [0098] the ported blocks against the RP2040 datasheet | code shipped, record open - every ported block read and fixed; open: PIO FJOIN/OUT_STICKY, DMA sniffer, frequency counter
+- [ ] [0098] the ported blocks against the RP2040 datasheet | code shipped, record open - every ported block read and fixed; open: PIO autopull timing, DMA sniffer/arbitration, RTC synchroniser, CLOCKS resus and gating, I2C and SPI slave modes, USB token wire (pads -> [0106])
 - [ ] [0096] a C++ MCU core, statically linked through Cython, WASM host last | phases 0-4 done (every block is C++), `Mcu` steps 0-3 done; next: the gate G1-G8, then Phase 6 (wasm); the second core is [0104]
 - [ ] [0094] a Zephyr guest boots here - MicroPython's `ports/zephyr` on `rpi_pico` | measured, nothing built - the RP2040 model needed no changes; its console is USB CDC, so the `micropython` subcommand sees silence
 - [ ] [0093] CircuitPython 8.0.2 never comes back after a chip reset | open, not root-caused - red on 8.x, green on 9.2.9/10.2.1; five hypotheses killed by measurement
@@ -165,14 +165,11 @@ and `reference/` for those). The structure itself is decided in
 - [x] [0004] buffer overflow / race conditions | `#7`
 - [x] [0002] mklittlefs image handling | `#6`
 - [x] [0001] CLI tool + public device API | `#3,#5,#10`
-
-### Rejected / Superseded
-
-- [ ] [0086] a FAT12 library dependency + a `mkfat12` CLI subcommand | rejected 2026-08-20, and `demo/mkfat12.py` deleted with it - the firmware writes its own CIRCUITPY ([0087])
-- [ ] [0045] CYW43 step 4 NAT bridge via `gVisor`'s `pkg/tcpip` | **Superseded → [0048]** - kept for its research trail
-- [ ] [0016] basic-block fusion / mini-JIT | **Rejected** - net negative in every integration attempt
-- [ ] [0015] HLE memcpy hook | **Rejected** - net negative (measurements kept)
-- [ ] [0014] threading model | **Superseded → [0025]**
+- [x] [0086] a FAT12 library dependency + a `mkfat12` CLI subcommand | rejected 2026-08-20, and `demo/mkfat12.py` deleted with it - the firmware writes its own CIRCUITPY ([0087])
+- [x] [0045] CYW43 step 4 NAT bridge via `gVisor`'s `pkg/tcpip` | **Superseded → [0048]** - kept for its research trail
+- [x] [0016] basic-block fusion / mini-JIT | **Rejected** - net negative in every integration attempt
+- [x] [0015] HLE memcpy hook | **Rejected** - net negative (measurements kept)
+- [x] [0014] threading model | **Superseded → [0025]**
 
 ## Notes (no state row — linked from ideas)
 

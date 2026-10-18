@@ -278,6 +278,7 @@ public:
         sh.update_pins = sio_update_pins;
         sh.add_cycles = sio_add_cycles;
         sh.launch_core1 = sio_launch_core1;
+        sh.send_event = sio_send_event;
         sh.ctx = this;
         sio_.init(&ports_, kMcuBlockSio, sh);
         sio_.bind_initiator(&bus.initiator);  // the divider, interpolators and CPUID are per core: the bus says which
@@ -871,9 +872,22 @@ private:
         }
         return true;
     }
+    static void sio_send_event(void* chip, uint32_t core) noexcept {
+        Cpu& target = static_cast<Mcu*>(chip)->core(static_cast<uint8_t>(core));
+        if (target.waiting && target.event_wait) {
+            target.waiting = target.event_wait = false;
+        } else {
+            target.event_registered = true;
+        }
+    }
     static bool sio_launch_core1(void* chip, uint32_t vtor, uint32_t sp, uint32_t pc) noexcept { return static_cast<Mcu*>(chip)->launch_core1(vtor, sp, pc); }
     static void psm_proc1(void* chip, bool held) noexcept {
-        if (held) static_cast<Mcu*>(chip)->hold_core1();
+        Mcu* m = static_cast<Mcu*>(chip);
+        if (held) {
+            m->hold_core1();
+        } else {
+            (void)m->sio_.core1_boot_done();  // out of reset: the boot ROM drains its FIFO and tells core 0 with a 0
+        }
     }
     static void sio_add_cycles(void* chip, uint32_t cycles) noexcept {
         Mcu* m = static_cast<Mcu*>(chip);

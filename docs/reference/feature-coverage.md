@@ -13,7 +13,7 @@ One place to see, block by block and datasheet section by section, what is model
 | Block | Model | Read against the datasheet | C++ core | Main gaps |
 |---|---|---|---|---|
 | Cortex-M0+ CPU, NVIC, SysTick, PPB | Partial | n/a (ARMv6-M tests; MicroPython interpreter tests) | Ported | System control and MPU registers present (0098); `SCR` and the MPU are stored, not acted on; core 1 |
-| SIO | Partial | Yes | Ported | inter-core FIFO; CPUID of core 1 |
+| SIO | Partial | Yes | Ported (the C++ core also has the inter-core FIFOs, core 1's divider and interpolators, `CPUID` of the initiating core and the boot ROM's launch handshake; **off by default**, `Mcu::set_core1_enabled`, until the Python reference has them - record 0104, P2) | inter-core FIFO and `CPUID` of core 1 in the Python reference and the shells |
 | TIMER | Partial | Yes | Ported | `DBGPAUSE` is stored (no debug halt) |
 | WATCHDOG | Partial | Yes | Ported | `PAUSE_DBG*`/`PAUSE_JTAG` are stored (no debug halt) |
 | RTC | Partial | Yes | Ported | clk_rtc synchroniser latency, dormant wake, GPIN reference |
@@ -53,7 +53,7 @@ Follows the datasheet's own table of contents (chapter.section), so a row is som
 | 2.1.4 | Narrow IO register writes | Unchecked | | - |
 | 2.2 | Address map | Done | memory_map, the window table | - |
 | 2.3.1 | SIO: divider, interpolators, spinlocks, GPIO ops | Done | 0098 | - |
-| 2.3.1 | SIO: inter-core FIFO | Missing | needs core 1 (record 0053) | Needs core 1 |
+| 2.3.1 | SIO: inter-core FIFO | Partial | C++ core only (off by default; record 0104, P1): two 8-deep FIFOs, `FIFO_ST` VLD / RDY / ROE / WOF, the two IRQ lines; not yet in the Python reference or the shells | P2 |
 | 2.3.2 | Interrupts: every IRQ line | Partial | to core 0 only | Needs core 1 |
 | 2.3.3 | Event signals (SEV / WFE) | Done | | - |
 | 2.3.4 | Debug | Partial | a GDB stub, not an SWD/DAP model | - |
@@ -78,7 +78,7 @@ Follows the datasheet's own table of contents (chapter.section), so a row is som
 | 2.6.3 | Flash and the XIP cache | Done | 0098; tags only (the data comes from the image); LRU, flush time and stream pace are model choices | - |
 | 2.7 | Boot sequence | Done | flash boot with boot2: MicroPython, CircuitPython, Kaluma, SDK examples in CI | - |
 | 2.8.1, 2.8.3 | Bootrom: processor-controlled boot, ROM contents | Done | flash routines go through the SSI | - |
-| 2.8.2 | Bootrom: launching code on core 1 | Missing | | Needs core 1 |
+| 2.8.2 | Bootrom: launching code on core 1 | Partial | C++ core only (off by default): the SIO answers the handshake instead of the ROM (`0, 0, 1, vector table, sp, entry`, echoes, restart on a wrong word) and `PSM.FRCE_OFF` `PROC1` returns core 1 to it; MicroPython's `_thread` runs (tests/test_gate_core1.py) | the ROM image on core 1 (exact) as an option; P2 |
 | 2.8.4, 2.8.5 | Bootrom: USB mass storage, PICOBOOT | Unchecked | | - |
 | 2.9, 2.10 | Power supplies, core regulator (analogue) | n/a | the `VREG` / `BOD` registers are stored (Stub) | - |
 | 2.11.1 | Top-level clock gates | Missing | | Go-ahead |

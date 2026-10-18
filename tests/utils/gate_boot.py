@@ -70,10 +70,17 @@ def write_images(directory: Path, flash: bytearray) -> "tuple[Path, Path]":
     return directory / "rom.bin", directory / "flash.bin"
 
 
-def run(exe: Path, rom: Path, flash: Path, expected: str) -> "subprocess.CompletedProcess[str]":
-    """Runs the harness until `expected` has arrived over UART0 (or 400 million instructions have been spent) and checks that it did."""
+def run(
+    exe: Path, rom: Path, flash: Path, expected: str, env: "dict[str, str] | None" = None
+) -> "subprocess.CompletedProcess[str]":
+    """Runs the harness until `expected` has arrived over UART0 (or 400 million instructions have been spent) and checks that it did. `env` is added to the environment (RP2040PY_CORE1=1 turns the second core on)."""
     done = subprocess.run(
-        [str(exe), str(rom), str(flash), "400", expected], capture_output=True, text=True, check=False, timeout=600
+        [str(exe), str(rom), str(flash), "400", expected],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=600,
+        env={**os.environ, **(env or {})},
     )
     assert expected in done.stdout, done.stdout + done.stderr
     assert done.returncode == 0, done.stdout + done.stderr

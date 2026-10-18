@@ -45,6 +45,8 @@ struct SioHost {
     void (*add_cycles)(void* ctx, uint32_t cycles) = nullptr;           // charge the CPU
     // Core 1 is launched (the last word of the boot ROM's handshake arrived over the FIFO, `multicore` mode): reset it to `vtor`, `sp`, `pc` and let it run. False: it failed.
     bool (*launch_core1)(void* ctx, uint32_t vtor, uint32_t sp, uint32_t pc) = nullptr;
+    // An event (what a `SEV` does) for core `core`: the boot ROM that this block stands in for executes one after each word it echoes, and core 0 sleeps in a WFE until it comes.
+    void (*send_event)(void* ctx, uint32_t core) = nullptr;
     void* ctx = nullptr;
 };
 
@@ -103,6 +105,14 @@ public:
     // record 0104). `set_multicore(true)` turns on the real ones and the high-level answer of the boot ROM's launch handshake for core 1.
     void set_multicore(bool on) noexcept { multicore_ = on; }
     bool multicore() const noexcept { return multicore_; }
+    // Core 1 has come out of reset (PSM.FRCE_OFF PROC1 cleared) and the boot ROM it runs has drained its mailbox: it pushes a 0 to core 0 (and a SEV after it), which `multicore_reset_core1()`
+    // of the pico-sdk waits for.
+    bool core1_boot_done() noexcept {
+        if (!multicore_) return true;
+        fifo_[1].push(0);
+        if (host_.send_event != nullptr) host_.send_event(host_.ctx, 0);
+        return update_fifo_irqs();
+    }
     // Core 1 goes back to its boot state (PSM, a chip reset): the FIFOs are emptied and the handshake starts over. False: a line could not be updated.
     bool reset_core1() noexcept {
         fifo_[0].clear();
@@ -390,6 +400,7 @@ private:
             ++launch_seq_;
         }
         fifo_[1].push(word);  // the echo (core 0 drains before a 0 and waits for each echo: there is room)
+        if (host_.send_event != nullptr) host_.send_event(host_.ctx, 0);  // (the ROM's SEV after it)
         if (!update_fifo_irqs()) return false;
         if (launch_seq_ < 6) return true;
         launch_seq_ = 0;

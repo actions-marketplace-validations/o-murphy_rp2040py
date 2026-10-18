@@ -89,6 +89,7 @@ int main(int argc, char** argv) {
         return true;
     };
     mcu.build(host);
+    if (const char* core1 = std::getenv("RP2040PY_CORE1"); core1 != nullptr && core1[0] == '1') mcu.set_core1_enabled(true);  // the second core (record 0104): off unless asked for
     mcu.set_crystal_hz(12e6);  // the Pico's crystal: the board's, a parameter of the world
     if (!mcu.reset(false, true)) {  // a power-on reset: everything, the flash kept
         std::fprintf(stderr, "reset failed\n");
@@ -99,6 +100,7 @@ int main(int argc, char** argv) {
     McuLimits limits;
     limits.instruction_ceiling = 1000000;
     limits.yield_budget_seconds = 1e9;  // no wall-clock budget: the harness has its own (instructions)
+    if (const char* quantum = std::getenv("RP2040PY_QUANTUM")) limits.quantum_cycles = std::atoi(quantum);  // two cores: 16 by default, 1 is the exact scheduler
     long done = 0;
     int stop = 0;
     McuResult result;

@@ -1,6 +1,6 @@
 # 0102 - a C ABI around the core, for wasm (and, later, cffi)
 
-Status: proposed (2026-10-16); **a first slice is built inside [0103](0103-wasm-backend.md) (2026-10-17/18): `native/wasm/rp2040_wasm.cpp`, the headless subset. The rest - the host callbacks - is documentation only, nothing designed in detail.** Companion to [0096](0096-cpp-mcu-core.md): this is the "host interface" of its gate G6 and the entry point of its Phase 6 (wasm). Written down on the maintainer's call ("for wasm"); per `CLAUDE.md` a note about what should eventually happen is not a go-ahead to implement it.
+Status: proposed (2026-10-16; 2026-10-18: the exports carry a core index for the registers (`rp2040_core_register` / `_set_register`), the module builds with the second core in it, but nothing in the wasm host enables or tests core 1 yet - 0104's "Next steps"); **a first slice is built inside [0103](0103-wasm-backend.md) (2026-10-17/18): `native/wasm/rp2040_wasm.cpp`, the headless subset. The rest - the host callbacks - is documentation only, nothing designed in detail.** Companion to [0096](0096-cpp-mcu-core.md): this is the "host interface" of its gate G6 and the entry point of its Phase 6 (wasm). Written down on the maintainer's call ("for wasm"); per `CLAUDE.md` a note about what should eventually happen is not a go-ahead to implement it.
 
 ## Why
 

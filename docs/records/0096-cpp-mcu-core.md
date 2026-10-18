@@ -1,6 +1,6 @@
 # 0096. A C++ MCU core, statically linked through Cython, with a WASM host last
 
-- Status: **In progress (2026-10-16).** Phases 0-4 are done: every block is C++ (Phase 5's CYW43 part left this record, see the phase-order entries). The C++ core is becoming a
+- Status: **In progress (2026-10-18; the second core was built meanwhile under [0104](0104-second-core-seams-and-architecture.md), on this record's dual-core seams, with core 1 on by default).** Phases 0-4 are done: every block is C++ (Phase 5's CYW43 part left this record, see the phase-order entries). The C++ core is becoming a
   self-sufficient, embeddable library (the decision and the gate G1-G8 are in the progress log, entry "The decision and the gate"). **Steps 0-3 of that plan are done:** the small closures (step 0), the written plan
   (step 1), the `Mcu` object and its step API with the interrupt lines and DREQs direct (2a-2c), every block built and wired by `Mcu` (3a, groups 1-8; 3c, the address table, was folded into 3a/3d), the reset cascade in C++
   with the chip-level oracle (3b) and the shell audit (3d). **Next: the gate G1-G8, then Phase 6 (WASM) and Phase 7.** Written per CLAUDE.md's "document vs. implement" rule: each step needs its own explicit go-ahead.

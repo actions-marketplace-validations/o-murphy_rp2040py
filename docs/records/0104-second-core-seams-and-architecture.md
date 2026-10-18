@@ -1,6 +1,6 @@
 # 0104 - the second core: the audit of the seams, and an architecture that costs nothing while core 1 is off
 
-Status: proposed (2026-10-18); **P0 (the seams) and P1 (core 1 in the C++ core) are built and measured, and P2 (the Python reference, the lockstep oracle, the shells) is mostly built; core 1 is on by default (see the progress log). The scheduling (F2 main, A strict) and the accuracy contract were decided by the maintainer on 2026-10-18; the rest of the proposals are not yet taken.** Companion to [0053](0053-core1-and-inter-core-fifo.md) (the second core and the inter-core FIFO; its addendum settles the execution model), to the "Dual-core seams" note in [0096](0096-cpp-mcu-core.md) and to [0102](0102-c-abi-for-the-core.md) / [0103](0103-wasm-backend.md) (the C ABI and the wasm backend, which must not freeze a single-core shape). Per `CLAUDE.md` a note about what should eventually happen is not a go-ahead to implement it: each phase below needs its own "yes".
+Status: **built (2026-10-18): P0 (the seams), P1 (core 1 in the C++ core) and P2 (the Python reference, the lockstep oracle, the shells) are done and measured; core 1 is on by default (`--no-core1` / `RP2040PY_CORE1=0` leave it off). MicroPython's `_thread` works (the official `thread/` group: 24 of 33 pass, 9 skip themselves, none fails or hangs), a pico-sdk program whose core 1 function returns relaunches, CoreMark runs on both cores (`demo/coremark_dual_core.py`). Open: the per-core GPIO IRQs, the Python view of core 1's PPB, the GDB stub's core selection, the wasm host, measurements with two busy cores ("Next steps").** The scheduling (F2 main, A strict) and the accuracy contract were decided by the maintainer on 2026-10-18. Companion to [0053](0053-core1-and-inter-core-fifo.md) (now implemented here), to the "Dual-core seams" note in [0096](0096-cpp-mcu-core.md) and to [0102](0102-c-abi-for-the-core.md) / [0103](0103-wasm-backend.md). Per `CLAUDE.md` each phase needed its own "yes".
 
 ## Why now, and the change of order
 
@@ -52,6 +52,8 @@ What is **not** affected: the memory map and the 40-odd peripheral windows (shar
 
 ## Proposals (none of these is decided)
 
+> **2026-10-18, later:** all taken in the built form: D1-D5 and D7 as written (the seams, the per-core state, the launch handshake answered in place of the ROM), D6 as F2 main / A strict. This section is the original proposal; the progress log says what was built and what changed.
+
 D1-D5 and D7-D11 are the parts that hold whichever way the scheduling question is answered; D6 is replaced by the open section after them.
 
 **D1 - a second `Cpu` in the `Mcu`.** `Mcu::cpu` stays core 0 (every caller and the whole public API unchanged); `Mcu::cpu1` is added, `present` from construction but **inactive** until launched. No pointer is added to the single-core path.
@@ -77,6 +79,8 @@ D1-D5 and D7-D11 are the parts that hold whichever way the scheduling question i
 **D11 - an option, not decided: a compile-time `RP2040PY_SINGLE_CORE`** that removes the dual loop and core 1's state, for builds where size matters (the wasm module is 187 KB today). Off by default; to be decided with the size of the dual code in front of us.
 
 ## Open: how the two cores are scheduled on one thread
+
+> **2026-10-18: decided** - F2 (a quantum, every device access a synchronisation point) as the main scheduler, A (quantum 1) as the strict one; no OS thread per core. The prototype rounds below are the evidence.
 
 The problem: the cores share one clock, and every instruction of either can change what the other sees (a peripheral register at time `t`, a FIFO, a spinlock, shared RAM). The scheduler decides in which order the instructions of the two cores run, and when the clock, the alarms, the PIO and the DMA are advanced. The choice sets the cost per instruction, the accuracy of timing, and the determinism. **Nothing here has been measured with two cores.**
 
@@ -165,6 +169,8 @@ So F, as written above, is **not accurate for anything that reads time**: inside
 
 ## Phases
 
+> **2026-10-18:** P0, P1 and P2 are done; P3 (real firmware) is done for MicroPython `_thread`, the pico-sdk multicore pattern and CoreMark 1.0.7 patched (a valid result); what is left is in "Next steps".
+
 - **P0 - the seams, no change of behaviour.** `Bus::initiator`, `Mcu::cpu1` (present, inactive), `ppb_[2]`, SIO per-core arrays, the per-core IRQ entry, `SEV` over the present cores, the core argument in the C ABI accessors. Every existing test passes unchanged. **Acceptance (all four):** (a) the callgrind instruction count of `run_batch` over the synthetic program of `scripts/bench/synthetic.py` is **identical** to the build before P0 (it is deterministic: the count, not a timing, is the proof of "nothing added"); (b) the synthetic benchmark of `scripts/bench/wasm_core.py` is within the noise (+-2 % best of 5) on the Cython build, the C++ build and the wasm module; (c) the CoreMark demo's wall time is within +-3 % (47 s for 12.07 simulated seconds on the 2.8 GHz Xeon of the sandbox of 2026-10-18); (d) the wasm module's size is reported (187 KB before).
 - **P0.5 - the scheduling prototype and the decision.** The throwaway prototype of the candidates above (`scripts/bench/two_core/`), the numbers in this record - two rounds done, F leads - then D6 decided by the maintainer. No product code.
 - **P1 - core 1 in C++** (after P0.5). the dual loop (the candidate chosen in P0.5), the FIFOs, the launch handshake (D7), `PSM` / `RESETS` `PROC1`, IO_BANK0 `PROC1`, `PROC1_NMI_MASK`. Tests in the bare-core harness with small hand-assembled two-core programs: FIFO ping-pong, spinlock contention, `SEV` / `WFE` wake, an IRQ on each core, the launch and the reset of core 1. **Acceptance:** P0's four, unchanged, with core 1 never launched; and the cost with two busy cores measured, expected near 2x the single-core wall time per simulated second (two cores execute twice the instructions).
@@ -189,6 +195,8 @@ State: P0, P1 and P2 are built (both builds, the lockstep oracle, core 1 on by d
 The maintainer's suggestion of 2026-10-18: extend the coverage of MicroPython's own test suite, in CI or locally. It already runs in CI as groups of `tests/micropython_official/run_suite.sh` in `.github/workflows/ci-micropython-official.yml` (`ports/rp2` and `extmod/machine_*`, `micropython/`, `extmod/`, `basics/`, each report-only or `STRICT`). The addition is a group **`thread/*.py`** (MicroPython's `tests/thread`), run **report-only first** - today they cannot pass, and the baseline (which hang, which fail, which skip) is worth recording *before* P1 so that P1's effect is a measured difference - and promoted to `STRICT` for the files that must pass once core 1 works (the ones that need real parallelism or timing the emulator does not give go to `EXCLUDE`, with the reason). Also candidates: `ports/rp2` tests that touch `_thread` or the FIFO. The baseline run is a small local step and does not need core 1.
 
 ## Risks and open questions
+
+> **2026-10-18:** the quantum-late visibility of RAM data, the cost of the dual loop and the lockstep blind spot (bugs shared by the reference and the port) were the risks; the first two were measured (the cost with core 1 off is zero), the third is covered by property tests and by running real firmware. The rest below is the original list.
 
 1. **Resolved by the datasheet** (2.3.2, see "Checked against the datasheet"): only the two GPIO lines are per core.
 2. **Time with two cores in the PIO and the DMA** (D6): the reference steps them by "the instruction's cycles"; stepping them by the clock's delta must give identical results in the single-core case - a test for P0/P1 before the dual loop is trusted.

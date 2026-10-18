@@ -1,6 +1,6 @@
 # 0105 - the time architecture: an audit of the clock, the tick generators and who counts what
 
-Status: **audit done (2026-10-18); findings 1, 2 and 6 (TIMER half) fixed (1 twice: the first fix could livelock, see the log); the rest recorded with a proposed order, not started.** Prompted by the maintainer's remark that the clock and the generators "are all on crutches", and written before [0104](0104-second-core-seams-and-architecture.md)'s P0/D6, because the second core's scheduling contract depends on what "time" means for each block.
+Status: **audit done (2026-10-18); findings 1, 2 and 6 (TIMER half) fixed (1 twice: the first fix could livelock, see the log); 3-5 are written into 0104's accuracy contract; open: `Timer32` and the PIO derived from the clock (neither started).** Prompted by the maintainer's remark that the clock and the generators "are all on crutches", and written before [0104](0104-second-core-seams-and-architecture.md)'s P0/D6, because the second core's scheduling contract depends on what "time" means for each block.
 
 ## What time is made of today (the same in the pure-Python reference and in C++)
 
@@ -26,8 +26,8 @@ Status: **audit done (2026-10-18); findings 1, 2 and 6 (TIMER half) fixed (1 twi
 
 1. ~~Finding 2~~ - done (fraction carried); deriving the PIO cycle from the clock outright is open.
 2. ~~Finding 6, TIMER~~ - done; `Timer32` (SysTick/PWM) after, keeping the `Math.round` parity with the reference until the reference is changed in the same step.
-3. Findings 3-5 are modelling choices, not defects: write their bounds into the accuracy contract of 0104 and decide there whether any is worth removing.
-4. Then 0104's P0 and D6.
+3. ~~Findings 3-5~~ - their bounds are item 3 of the accuracy contract in 0104 (written and accepted 2026-10-18); none is being removed.
+4. ~~0104's P0 and D6~~ - done (the seams, then core 1 with the F2 scheduler), see 0104. What is left of this record: `Timer32` (SysTick, PWM) to integers, the PIO derived from the clock outright, finding 7's parity checks as new time rules arrive.
 
 ## Progress log
 

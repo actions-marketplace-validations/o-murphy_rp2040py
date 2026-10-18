@@ -1,6 +1,6 @@
 # 0103 - a wasm backend: toolchain, packaging, backend selection and testing
 
-Status: in progress (opened 2026-10-17). **The headless proof of concept is built (2026-10-17); the Python layer (`RP2040PY_BACKEND`, `--backend`) is not.** The decisions below are the maintainer's. Companion to [0102](0102-c-abi-for-the-core.md) (the C surface the module exports) and the Phase 6 of [0096](0096-cpp-mcu-core.md). Per `CLAUDE.md` a note about what should eventually happen is not a go-ahead to implement it; the proof of concept below needs its own "yes".
+Status: in progress (opened 2026-10-17; 2026-10-18: the module now contains the two-core loop (190,167 bytes against 186,942, still importing nothing); core 1 is not exercised under wasm yet, see 0104's "Next steps"). **The headless proof of concept is built (2026-10-17); the Python layer (`RP2040PY_BACKEND`, `--backend`) is not.** The decisions below are the maintainer's. Companion to [0102](0102-c-abi-for-the-core.md) (the C surface the module exports) and the Phase 6 of [0096](0096-cpp-mcu-core.md). Per `CLAUDE.md` a note about what should eventually happen is not a go-ahead to implement it; the proof of concept below needs its own "yes".
 
 ## What is proposed
 

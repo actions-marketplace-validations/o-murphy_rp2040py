@@ -14,6 +14,9 @@ from typing import TYPE_CHECKING
 
 from rp2040py.clock._simulation_clock import TICKS_PER_NANO, nanos_to_ticks
 
+# Where LR points when core 1 starts (see `core/batch_dual.hpp`, `kCore1RomReturn`): an entry function that returns lands back in the boot ROM's `_wait_for_vector`.
+CORE1_ROM_RETURN = 0x00003FFC
+
 if TYPE_CHECKING:
     from rp2040py.simulator import Simulator
 
@@ -301,8 +304,16 @@ def _run_batch_dual(simulator: "Simulator", changed: list[bool]) -> None:
         for i in range(2):
             wake_at[i] = max(wake_at[i], now)
 
+    parked = [
+        False
+    ]  # core 1 returned from its entry function to the boot ROM (CORE1_ROM_RETURN): the batch ends and the chip puts it back to the ROM's wait
+
     def execute_one(core: int) -> None:
         nonlocal iterations
+        if core == 1 and (cores[1].pc & ~1) == CORE1_ROM_RETURN:
+            cores[1].waiting = True
+            parked[0] = True
+            return
         saved = current[0]
         current[0] = core
         rp2040.initiator = core
@@ -332,7 +343,7 @@ def _run_batch_dual(simulator: "Simulator", changed: list[bool]) -> None:
     ticks_since_check = 0
     rp2040._sync = sync
     try:
-        while iterations < 1000000 and not simulator.stopped and not changed[0]:
+        while iterations < 1000000 and not simulator.stopped and not changed[0] and not parked[0]:
             ticks_since_check += 1
             if ticks_since_check >= _TIME_CHECK_INTERVAL:
                 ticks_since_check = 0
@@ -373,3 +384,5 @@ def _run_batch_dual(simulator: "Simulator", changed: list[bool]) -> None:
     finally:
         rp2040._sync = None
         rp2040.initiator = 0
+    if parked[0]:
+        rp2040.hold_core1()  # (core 1 waits to be launched again, as after a reset)

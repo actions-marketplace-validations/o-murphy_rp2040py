@@ -3,6 +3,7 @@ from collections.abc import Callable, Coroutine
 from typing import TYPE_CHECKING, Any
 
 from rp2040py._cortex_m0_core import CortexM0Core
+from rp2040py._execute_batch import CORE1_ROM_RETURN
 from rp2040py._gpio_pin import GPIOPin
 from rp2040py._pin_bank import GPIOPinBank
 from rp2040py._sio import RPSIO
@@ -800,6 +801,9 @@ class RP2040:
         core.vtor = vector_table
         core.sp = sp & 0xFFFFFFFC
         core.pc = pc & 0xFFFFFFFE
+        core.registers[14] = (
+            CORE1_ROM_RETURN | 1
+        )  # (an entry function that returns lands back in the boot ROM: see _execute_batch)
         core.pending_interrupts = self.core.pending_interrupts & ~((1 << IRQ.IO_BANK0) | (1 << IRQ.IO_QSPI))
         core.interrupts_updated = True
         self.core1_running = True

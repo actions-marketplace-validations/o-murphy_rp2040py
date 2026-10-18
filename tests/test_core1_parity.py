@@ -190,10 +190,31 @@ def core1_wfe_then_marks() -> list[int]:
     return a.h
 
 
+def core0_launches_a_core_that_returns() -> list[int]:
+    a = Asm()
+    a.load_literals([0, 4, 5, 6], [SIO, CODE0, STACK1, CODE1 | 1])
+    _launch(a)
+    for _ in range(60):
+        a.nop()  # (core 1 marks r1, returns to the ROM and is parked there)
+    a.emit(BKPT)
+    return a.finish()
+
+
+def core1_marks_and_returns() -> list[int]:
+    """An entry function that returns: `bx lr` goes to where the launch left LR - the boot ROM."""
+    a = Asm()
+    a.load_literals([7], [RESULTS])
+    a.movs(1, 42)
+    a.str_(1, 7, 0)
+    a.emit(0x4770)  # bx lr
+    return a.finish()
+
+
 PROGRAMS = {
     "launch and ping-pong": (core0_launch_and_ping, core1_echo_plus_one),
     "both cores divide": (core0_divides_while_core1_divides, core1_divides),
     "sev wakes a wfe": (core0_launches_then_sevs, core1_wfe_then_marks),
+    "an entry function returns": (core0_launches_a_core_that_returns, core1_marks_and_returns),
 }
 
 
@@ -223,6 +244,8 @@ def _finished(program: str, chip) -> bool:
         return chip.core.registers[7] == 6
     if program == "both cores divide":
         return chip.read_uint32(RESULTS) != 0 and chip.read_uint32(RESULTS + 4) != 0
+    if program == "an entry function returns":
+        return chip.read_uint32(RESULTS) == 42 and not chip.core1_running  # parked: back where a reset leaves it
     return chip.core1.registers[1] == 42
 
 

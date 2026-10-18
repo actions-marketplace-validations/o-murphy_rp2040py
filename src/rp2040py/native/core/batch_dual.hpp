@@ -23,6 +23,11 @@
 
 namespace rp2040core {
 
+// Where `LR` points when core 1 starts: the pico-sdk's `core1_trampoline` leaves the boot ROM's return address there on purpose, so that an entry function that returns lands back in the ROM, in
+// `_wait_for_vector` (datasheet 2.8.1.1, 2.8.2: core 1 waits for a launch there after reset). The boot ROM is not run for core 1 (the SIO answers its handshake), so this is a made-up address in the last
+// word of the ROM's 16 KiB, which no ROM function starts at: reaching it parks core 1.
+constexpr uint32_t kCore1RomReturn = 0x00003FFCu;
+
 namespace dual_detail {
 
 struct State {
@@ -40,6 +45,7 @@ struct State {
     long iterations = 0;           // instructions executed, of either core
     uint8_t current = 0;           // the core whose instruction is running
     bool failed = false;
+    bool parked = false;           // core 1 returned from its entry function to the boot ROM (`kCore1RomReturn`): the batch ends, `Mcu::run` puts it back to the ROM's wait
 };
 
 inline int64_t ticks_for(State& s, int core, int64_t cycles) noexcept {
@@ -80,6 +86,11 @@ inline void note_wake(State& s) noexcept {
 
 // One instruction of `core`. False: it failed (the host has parked the error).
 inline bool execute_one(State& s, int core) noexcept {
+    if (core == 1 && (s.cpu[1]->registers[15] & ~1u) == kCore1RomReturn) {  // (the entry function returned: what the ROM does next is `_wait_for_vector`, the state of a core 1 that was just reset)
+        s.cpu[1]->waiting = true;
+        s.parked = true;
+        return true;
+    }
     const uint8_t saved = s.current;
     s.current = static_cast<uint8_t>(core);
     s.bus->initiator = static_cast<uint8_t>(core);
@@ -150,7 +161,7 @@ inline int run_batch_dual(Cpu& cpu0, Cpu& cpu1, Bus& bus, Clock& clock, const Ba
         return status;
     };
 
-    while (s.iterations < params.instruction_ceiling && !*host.stopped && !(host.clk_changed != nullptr && *host.clk_changed != 0)) {
+    while (s.iterations < params.instruction_ceiling && !s.parked && !*host.stopped && !(host.clk_changed != nullptr && *host.clk_changed != 0)) {
         if (++ticks_since_check >= params.check_interval) {
             ticks_since_check = 0;
             if (host.monotonic(host.ctx) - batch_start > params.yield_budget_seconds) {

@@ -711,7 +711,11 @@ public:
     // Runs until the limits or a request end it. Returns 0, or `kBatchFault` when a clock alarm, the CPU or a host call failed - the host has parked its own error, and
     // `result->reason` is `kStopFault`.
     int run(const McuLimits& limits, McuResult* result = nullptr) noexcept {
-        if (cpu1_running_) return run_batch_dual(cpu, cpu1, bus, *clock_, host_, limits, result);  // (the loop for two cores; the single-core one is not touched)
+        if (cpu1_running_) {  // (the loop for two cores; the single-core one is not touched)
+            const int status = run_batch_dual(cpu, cpu1, bus, *clock_, host_, limits, result);
+            if ((cpu1.registers[15] & ~1u) == kCore1RomReturn && cpu1.waiting) hold_core1();  // core 1 returned to the ROM: it waits to be launched again
+            return status;
+        }
         return run_batch(cpu, *clock_, host_, limits, result);
     }
 
@@ -725,6 +729,7 @@ public:
         cpu1.vtor = vtor;
         cpu1.registers[13] = sp & 0xFFFFFFFCu;
         cpu1.registers[15] = pc & 0xFFFFFFFEu;
+        cpu1.registers[14] = kCore1RomReturn | 1u;  // (an entry function that returns lands back in the ROM: see batch_dual.hpp)
         start_core1_interrupts();
         end_batch();
         return true;

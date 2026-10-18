@@ -1241,6 +1241,10 @@ _TCP_PORT_HELP = (
     "port that can't get one (e.g. mpremote via `connect socket://host:port`, pySerial's own "
     "built-in URL scheme); mutually exclusive with -c/-m/<filename> on `micropython` and with --pty"
 )
+_NO_CORE1_HELP = (
+    "leave the second core off: the inter-core FIFO registers are the old stub (they warn and read as 0xFFFFFFFF), and `multicore_launch_core1()` / MicroPython's `_thread` hang instead of "
+    "starting a thread. Also set by the RP2040PY_CORE1=0 environment variable. Core 1 is on by default (docs/records/0104)"
+)
 _PTY_HELP = (
     "serve the console over a real pseudo-terminal (POSIX only) instead of this process's own "
     "stdio - like --tcp-port, but a *real* POSIX serial-like device path (see the logged "
@@ -1288,6 +1292,7 @@ def _shared_arg_parser(*names: str) -> argparse.ArgumentParser:
         "dump-fs": {"type": _LITTLEFS_SUFFIX_VALIDATOR, "help": _DUMP_FS_HELP},
         "tcp-port": {"type": int, "default": None, "help": _TCP_PORT_HELP},
         "pty": {"action": "store_true", "help": _PTY_HELP},
+        "no-core1": {"action": "store_true", "help": _NO_CORE1_HELP},
     }
     shared = argparse.ArgumentParser(add_help=False)
     for name in names:
@@ -1360,7 +1365,7 @@ def main(argv: "list[str] | None" = None) -> None:
 
     run_parser = subparsers.add_parser(
         "run",
-        parents=[_shared_arg_parser("gdb-port", "bootrom", "fetch-fw-only")],
+        parents=[_shared_arg_parser("gdb-port", "bootrom", "fetch-fw-only", "no-core1")],
         help="run a native .hex/.uf2 image with a GDB server",
     )
     # See mp_parser's own --board/--board-spec comment above for why --board defaults to None
@@ -1390,6 +1395,7 @@ def main(argv: "list[str] | None" = None) -> None:
                 "dump-fs",
                 "tcp-port",
                 "pty",
+                "no-core1",
                 "fetch-fw-only",
             )
         ],
@@ -1435,6 +1441,7 @@ def main(argv: "list[str] | None" = None) -> None:
                 "dump-fs",
                 "tcp-port",
                 "pty",
+                "no-core1",
                 "fetch-fw-only",
             )
         ],
@@ -1454,7 +1461,7 @@ def main(argv: "list[str] | None" = None) -> None:
 
     bench_parser = subparsers.add_parser(
         "bench",
-        parents=[_shared_arg_parser("bootrom", "expect-text", "expect-regex", "littlefs", "fetch-fw-only")],
+        parents=[_shared_arg_parser("bootrom", "expect-text", "expect-regex", "littlefs", "fetch-fw-only", "no-core1")],
         help="benchmark: synthetic instruction dispatch, or (--image) a firmware through the real engine",
     )
     # --board's default is applied inside _board_source() (not here), for the same reason as `micropython`'s: --board-spec's mutual exclusion needs to know it was never given.
@@ -1540,6 +1547,10 @@ def main(argv: "list[str] | None" = None) -> None:
 
     argcomplete.autocomplete(parser)
     args = parser.parse_args(argv)
+    if getattr(args, "no_core1", False):
+        os.environ["RP2040PY_CORE1"] = (
+            "0"  # read by every chip when it is built (RP2040.__init__): the second core stays off
+        )
 
     # format="%(message)s": without a handler configured anywhere, stdlib logging's own "handler
     # of last resort" only ever emits WARNING+ (to stderr) - INFO-level calls like

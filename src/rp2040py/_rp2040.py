@@ -1,3 +1,4 @@
+import os
 from collections.abc import Callable, Coroutine
 from typing import TYPE_CHECKING, Any
 
@@ -183,6 +184,13 @@ class RP2040:
             self, "PPB", core=self.core1
         )  # core 1's SysTick, SCR, MPU and NVIC window, reached when the initiator is core 1
         self.sio = RPSIO(self)
+        if os.environ.get("RP2040PY_CORE1", "1").lower() in (
+            "0",
+            "off",
+            "false",
+            "no",
+        ):  # the CLI's --no-core1 sets it: the second core is on unless asked to be off
+            self.set_core1_enabled(False)
 
         self.uart = [
             RPUART(

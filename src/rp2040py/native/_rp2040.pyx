@@ -86,6 +86,7 @@ from rp2040py.utils.logging import ConsoleLogger, LogLevel
 # actually do with `array` is call the plain array.array(...) constructor, which needs no special
 # declaration - a normal Python-level call works identically and is limited-API-safe.
 import array
+import os
 from rp2040py.native._register_warning import warn_register
 
 __all__ = (
@@ -739,6 +740,8 @@ cdef class RP2040:
 
         self.ppb = RPPPB(self, "PPB", 0)
         self.sio = RPSIO(self, 0)
+        if os.environ.get("RP2040PY_CORE1", "1").lower() in ("0", "off", "false", "no"):  # the CLI's --no-core1 sets it: the second core is on unless asked to be off
+            self.set_core1_enabled(False)
 
         self.uart = [
             RPUART(

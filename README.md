@@ -77,6 +77,12 @@ uv tool install rp2040py   # as a standalone CLI tool
 uvx rp2040py ...           # run without installing at all
 ```
 
+> [!NOTE]
+> **1.0.0b1 is a beta**, and pip does not pick a pre-release unless asked: `pip install --pre rp2040py`
+> (or `rp2040py==1.0.0b1`; with uv, `uv add rp2040py --prerelease allow`, `uvx --prerelease allow rp2040py ...`).
+> What changed since 0.3.6, and the behaviour changes to know about (core 1 is on by default), are the
+> first entries of the [CHANGELOG](CHANGELOG.md).
+
 Any of these gives you the `rp2040py` console script (`python -m rp2040py` works identically), so
 the emulator is runnable without a git checkout - see [Run the demo project](#run-the-demo-project)
 below for the checkout-equivalent commands.

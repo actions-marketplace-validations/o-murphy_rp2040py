@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.0b1] - 2026-10-18
+
 ### Changed
 - **Behaviour changes to know about before upgrading:** (1) **core 1 is on by default** - firmware that touches the SIO inter-core FIFO (`multicore_launch_core1()`, MicroPython's `_thread`) now gets a working second core instead of the all-ones stub and its warning; `--no-core1` / `RP2040PY_CORE1=0` / `set_core1_enabled(False)` give the old behaviour back ([record 0104](docs/records/0104-second-core-seams-and-architecture.md)). (2) **Building from source needs `ziglang`** (it is in `[build-system].requires`, so `pip` fetches it; it compiles the wasm module that goes into every wheel). (3) **The engine runs without a thread of its own** and `Simulator(threadless=False)` is gone (listed below). (4) **Simulated time is integer ticks of 1/16 ns** ([record 0100](docs/records/0100-integer-clock.md)), not floating-point nanoseconds. (5) Writes to the XIP flash window are rejected by the bus, as on the chip.
 - **The native blocks raise their interrupt lines straight on the CPU** ([record 0096](docs/records/0096-cpp-mcu-core.md), step 2b): UART, SPI, I2C, ADC, PWM, RTC, USB, SSI, DMA, PIO, the timer and the IO_BANK0 pins call `Mcu::set_interrupt` in C++ with no Python in between. **`RP2040.set_interrupt` on the native chip is now a property**: calling it works as before, and assigning a function to it (a test that spies on the lines) makes every block's line go to that function instead of the CPU, as on any chip whose `set_interrupt` was replaced; `del chip.set_interrupt` takes it away. No other change in behaviour.
@@ -1849,7 +1851,8 @@ end.
   measurements). Combined effect versus the initial port: real MicroPython + littlefs boot time
   dropped from minutes to seconds under CPython, and to single-digit seconds under PyPy.
 
-[Unreleased]: https://github.com/o-murphy/rp2040py/compare/v0.3.6...HEAD
+[Unreleased]: https://github.com/o-murphy/rp2040py/compare/v1.0.0b1...HEAD
+[1.0.0b1]: https://github.com/o-murphy/rp2040py/compare/v0.3.6...v1.0.0b1
 [0.3.6]: https://github.com/o-murphy/rp2040py/compare/v0.3.5...v0.3.6
 [0.3.5]: https://github.com/o-murphy/rp2040py/compare/v0.3.4...v0.3.5
 [0.3.4]: https://github.com/o-murphy/rp2040py/compare/v0.3.3...v0.3.4

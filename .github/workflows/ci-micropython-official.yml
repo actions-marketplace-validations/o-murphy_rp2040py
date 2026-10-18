@@ -57,7 +57,7 @@ jobs:
             push: "import/*:"
             exclude: "import/import_file.py"
             strict: true
-          # The second core (record 0104): MicroPython's threads run on core 1. Report only: 23 of 33 pass, 9 skip themselves, and thread/disable_irq.py hangs (open, see the record).
+          # The second core (record 0104): MicroPython's threads run on core 1. Report only: 24 of 33 pass, 9 skip themselves, none fails or hangs (a core 1 whose entry function returns parks, record 0104). It can gate once it has stayed green for a few runs (stress_create.py hung once).
           - name: thread/ (the second core)
             globs: "thread/*.py"
             core1: "1"

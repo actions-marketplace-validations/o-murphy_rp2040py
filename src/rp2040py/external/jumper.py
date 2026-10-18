@@ -7,8 +7,7 @@ The model has no drive strengths, so two ends both driven by the chip are a cont
 settle: the wire carries the level of the end with the lower index, and the other end keeps its own.
 
 Only what reaches a pad is carried: SIO, PWM and PIO outputs (the functions `GPIOPin` models). The
-UART, SPI and I2C functions are not routed to pads by the model (record 0104's follow-up, the
-`extmod_hardware` group), so a jumper between a UART's TX and RX pins carries nothing yet.
+UART, SPI and I2C functions are not routed to pads by the model (record 0106), so a jumper between a UART's TX and RX pins carries nothing yet.
 """
 
 from typing import TYPE_CHECKING

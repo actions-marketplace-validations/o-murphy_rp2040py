@@ -56,13 +56,14 @@ and `reference/` for those). The structure itself is decided in
 
 ### In progress / Proposed
 
+- [ ] [0106] routing the UART, SPI and I2C functions to the pads | proposed, nothing built - found by `extmod_hardware`; Wokwi routes by FUNCSEL over bit-level models; layer vs pin-bank sources is open
 - [ ] [0105] the time architecture: an audit of the clock, the tick generators and who counts what | audit done, TIMER/PIO fixes landed; `Timer32` and PIO-from-clock still proposed
 - [ ] [0104] the second core: seams, architecture, core 1 in the C++ core and the reference | P0-P2 done, core 1 on by default, `thread/` 24 of 33, dual-core CoreMark demo; open: per-core GPIO IRQs, GDB/wasm
 - [ ] [0103] a wasm backend: toolchain, packaging, backend selection and testing | headless module built and measured (0.4-0.6x of the Cython build); next: `RP2040PY_BACKEND` and a backend axis in the tests
 - [ ] [0102] a C ABI around the core, for wasm (and, later, cffi) | first slice built inside [0103]; the host callbacks (pins, UART input, I2C/SPI devices, ADC, USB) are not designed
 - [ ] [0101] the chip's reset values, read on a real board | proposed, waiting for a board - the 56 registers on which a fresh chip is meant to differ from the SVD, to be measured; nothing changes in the chip until then
 - [ ] [0099] a WASM drop-in for the original rp2040js | proposed, nothing designed - once Phase 6 of 0096 boots MicroPython on wasmtime/node, try a TypeScript wrapper with rp2040js's public API and run its own specs against the core
-- [ ] [0098] the ported blocks against the RP2040 datasheet | code shipped, record open - every ported block read and fixed; open: UART/SPI/I2C routed to the pads, PIO FJOIN/OUT_STICKY, DMA sniffer, frequency counter
+- [ ] [0098] the ported blocks against the RP2040 datasheet | code shipped, record open - every ported block read and fixed; open: PIO FJOIN/OUT_STICKY, DMA sniffer, frequency counter
 - [ ] [0096] a C++ MCU core, statically linked through Cython, WASM host last | phases 0-4 done (every block is C++), `Mcu` steps 0-3 done; next: the gate G1-G8, then Phase 6 (wasm); the second core is [0104]
 - [ ] [0094] a Zephyr guest boots here - MicroPython's `ports/zephyr` on `rpi_pico` | measured, nothing built - the RP2040 model needed no changes; its console is USB CDC, so the `micropython` subcommand sees silence
 - [ ] [0093] CircuitPython 8.0.2 never comes back after a chip reset | open, not root-caused - red on 8.x, green on 9.2.9/10.2.1; five hypotheses killed by measurement
@@ -291,6 +292,7 @@ record is added.
 [0096]: records/0096-cpp-mcu-core.md
 [0098]: records/0098-datasheet-conformance-audit.md
 [0104]: records/0104-second-core-seams-and-architecture.md
+[0106]: records/0106-peripheral-routing-to-pads.md
 [0105]: records/0105-time-architecture-audit.md
 [0103]: records/0103-wasm-backend.md
 [0102]: records/0102-c-abi-for-the-core.md

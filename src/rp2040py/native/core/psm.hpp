@@ -34,6 +34,13 @@ public:
     uint32_t frce_off = 0;
     uint32_t wdsel = 0;
 
+    // PROC1 is bit 16: forcing it off holds core 1 in reset (`multicore_reset_core1()` does it and clears it again). The chip is told each time the held state changes (record 0104).
+    using Proc1Fn = void (*)(void* ctx, bool held);
+    void bind_proc1(Proc1Fn fn, void* ctx) noexcept {
+        proc1_fn_ = fn;
+        proc1_ctx_ = ctx;
+    }
+
     uint32_t read(uint32_t offset) noexcept {
         using namespace psm_regs;
         if (offset == FRCE_ON) return frce_on;
@@ -49,8 +56,10 @@ public:
         const uint32_t v = static_cast<uint32_t>(value) & BITS_MASK;
         if (offset == FRCE_ON) {
             frce_on = v;
+            proc1_changed();
         } else if (offset == FRCE_OFF) {
             frce_off = v;
+            proc1_changed();
         } else if (offset == REG_WDSEL) {
             wdsel = v;
         } else if (offset == REG_DONE) {
@@ -65,6 +74,17 @@ public:
 
 
 private:
+    bool proc1_held() const noexcept { return (frce_off & ~frce_on & (1u << 16)) != 0; }  // (FRCE_ON overrides FRCE_OFF)
+    void proc1_changed() noexcept {
+        const bool held = proc1_held();
+        if (held != proc1_was_held_) {
+            proc1_was_held_ = held;
+            if (proc1_fn_ != nullptr) proc1_fn_(proc1_ctx_, held);
+        }
+    }
+    Proc1Fn proc1_fn_ = nullptr;
+    void* proc1_ctx_ = nullptr;
+    bool proc1_was_held_ = false;
 };
 
 }  // namespace rp2040core

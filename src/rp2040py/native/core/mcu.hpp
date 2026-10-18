@@ -24,6 +24,7 @@
 #include "batch.hpp"
 #include "bus.hpp"
 #include "clock.hpp"
+#include "batch_dual.hpp"
 #include "cpu.hpp"
 #include "dma.hpp"
 #include "i2c.hpp"
@@ -276,6 +277,7 @@ public:
         sh.qspi_in = sio_qspi_in;
         sh.update_pins = sio_update_pins;
         sh.add_cycles = sio_add_cycles;
+        sh.launch_core1 = sio_launch_core1;
         sh.ctx = this;
         sio_.init(&ports_, kMcuBlockSio, sh);
         sio_.bind_initiator(&bus.initiator);  // the divider, interpolators and CPUID are per core: the bus says which
@@ -382,6 +384,7 @@ public:
         bus.windows.attach(kResetsBase, resets_.window_handler());
 
         psm_.init(&ports_, kMcuBlockPsm);
+        psm_.bind_proc1(psm_proc1, this);
         bus.windows.attach(kPsmBase, psm_.window_handler());
 
         vreg_.init(&ports_, kMcuBlockVreg);
@@ -394,6 +397,7 @@ public:
         bus.windows.attach(kSysinfoBase, sysinfo_.window_handler());
 
         syscfg_.init(&cpu, &ports_, kMcuBlockSyscfg);  // (PROC0_NMI_MASK is the chip's own CPU)
+        syscfg_.bind_core1(&cpu1);
         bus.windows.attach(kSyscfgBase, syscfg_.window_handler());
 
         // The blocks with lines, requests and devices (group 2). Each instance's callbacks get its own `McuInstance` as their context.
@@ -701,7 +705,34 @@ public:
 
     // Runs until the limits or a request end it. Returns 0, or `kBatchFault` when a clock alarm, the CPU or a host call failed - the host has parked its own error, and
     // `result->reason` is `kStopFault`.
-    int run(const McuLimits& limits, McuResult* result = nullptr) noexcept { return run_batch(cpu, *clock_, host_, limits, result); }
+    int run(const McuLimits& limits, McuResult* result = nullptr) noexcept {
+        if (cpu1_running_) return run_batch_dual(cpu, cpu1, bus, *clock_, host_, limits, result);  // (the loop for two cores; the single-core one is not touched)
+        return run_batch(cpu, *clock_, host_, limits, result);
+    }
+
+    // ---- core 1 (record 0104, P1) ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+    // Off by default: the inter-core FIFO registers warn and read as 0xFFFFFFFF as before, and nothing can launch core 1. A host that wants the second core turns it on (the Python reference grows it
+    // in P2; until then a chip whose shells compare with the reference leaves it off).
+    void set_core1_enabled(bool on) noexcept { sio_.set_multicore(on); }
+    // Core 1 starts at the vector table, stack and entry core 0 sent it (the handshake of datasheet 2.8.2, answered by the SIO). The batch ends at its next iteration (`clk_changed_`, the flag the loop
+    // already tests) so that `run()` picks the loop for two cores for the next one.
+    bool launch_core1(uint32_t vtor, uint32_t sp, uint32_t pc) noexcept {
+        cpu1.reset_state();
+        cpu1.vtor = vtor;
+        cpu1.registers[13] = sp & 0xFFFFFFFCu;
+        cpu1.registers[15] = pc & 0xFFFFFFFEu;
+        start_core1_interrupts();
+        clk_changed_ = 1;
+        return true;
+    }
+    // Core 1 goes back to the boot ROM (PSM.FRCE_OFF PROC1, `multicore_reset_core1()`): it stops, its FIFOs are emptied and a new handshake is needed.
+    void hold_core1() noexcept {
+        cpu1_running_ = false;
+        irq_slow_ = irq_hook_ != nullptr ? 1 : 0;
+        cpu1.reset_state();
+        (void)sio_.reset_core1();
+        clk_changed_ = 1;
+    }
 
 private:
     // One block of the cascade: the host's if it holds that block (`world`), the `Mcu`'s own otherwise.
@@ -839,6 +870,10 @@ private:
             if ((pin_mask & (1u << i)) != 0 && !bank.check_for_updates(i)) return false;
         }
         return true;
+    }
+    static bool sio_launch_core1(void* chip, uint32_t vtor, uint32_t sp, uint32_t pc) noexcept { return static_cast<Mcu*>(chip)->launch_core1(vtor, sp, pc); }
+    static void psm_proc1(void* chip, bool held) noexcept {
+        if (held) static_cast<Mcu*>(chip)->hold_core1();
     }
     static void sio_add_cycles(void* chip, uint32_t cycles) noexcept {
         Mcu* m = static_cast<Mcu*>(chip);

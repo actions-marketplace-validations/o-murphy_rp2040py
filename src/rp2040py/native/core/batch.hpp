@@ -50,6 +50,7 @@ struct BatchParams {
     double yield_budget_seconds = 0.005;
     int check_interval = 256;
     double paced_idle_nanos = 1e6;      // the longest idle jump while `real_io` is set (1 ms of simulated time)
+    int quantum_cycles = 16;            // two cores only (batch_dual.hpp): the cycles a core runs ahead of the other between synchronisation points; 1 is the exact scheduler
 };
 
 // Why a batch ended (`BatchResult::reason`). Exactly one holds; they are checked in this order.

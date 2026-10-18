@@ -276,7 +276,7 @@ private:
 
     // The region a `width`-byte sub-word access falls entirely inside, or kNotHandled. Sub-word
     // accesses never use the mirror: only the first `size` bytes of a window.
-    int find_sub_word(uint32_t address, uint32_t width) const noexcept {
+    RP2040PY_ALWAYS_INLINE int find_sub_word(uint32_t address, uint32_t width) const noexcept {
         {
             const uint32_t offset = address - kFlashBase;
             if (static_cast<uint64_t>(offset) + width <= flash_.size) return flash_.index;

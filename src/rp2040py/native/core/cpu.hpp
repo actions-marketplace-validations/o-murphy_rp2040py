@@ -81,6 +81,7 @@ public:
     uint32_t banked_sp;
     uint64_t cycles;
     bool event_registered, waiting;
+    bool event_wait = false;  // `waiting` because of a WFE (not a WFI): the other core's SEV wakes it
     bool n, c, z, v;
     uint32_t break_rewind;
     bool pm;
@@ -431,7 +432,7 @@ private:
         for (uint32_t& r : registers) r = 0;
         banked_sp = 0;
         cycles = 0;
-        event_registered = waiting = false;
+        event_registered = waiting = event_wait = false;
         n = c = z = v = false;
         break_rewind = 0;
         pm = false;

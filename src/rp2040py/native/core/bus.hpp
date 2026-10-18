@@ -50,6 +50,26 @@ public:
     MemoryMap mem;
     WindowMap windows;
 
+    // Two cores on one clock (record 0104, F2): every access that leaves RAM and flash - the SIO, the PPB, every peripheral window - first calls `fn`, so the scheduler can bring the other core and the
+    // clock up to the accessing core's time before the access happens. The handlers are wrapped while it is installed and handed back by `set_sync(nullptr, nullptr)`: with core 1 off the bus has
+    // nothing of this in it. Install it after the SIO, the PPB and the windows are attached. `storage` holds the wrappers (`kSyncStorage` of them) while it is installed.
+    static constexpr int kSyncStorage = WindowMap::kMaxWindows + 3;
+    RP2040PY_NOINLINE void set_sync(SyncFn fn, void* ctx, SyncedHandler* storage) noexcept {
+        windows.remove_sync();
+        if (synced_ != nullptr) {
+            sio_ = synced_[0].inner;
+            ppb_[0] = synced_[1].inner;
+            ppb_[1] = synced_[2].inner;
+            synced_ = nullptr;
+        }
+        if (fn == nullptr) return;
+        windows.install_sync(fn, ctx, storage + 3);
+        synced_ = storage;
+        sio_ = synced_[0].wrap(sio_, fn, ctx);
+        ppb_[0] = synced_[1].wrap(ppb_[0], fn, ctx);
+        ppb_[1] = synced_[2].wrap(ppb_[1], fn, ctx);
+    }
+
     // Which core is making the access: 0 or 1 (record 0104, D2). The scheduler writes it when it changes core, never per access; the SIO and the PPB - the only blocks banked per core -
     // read it, and RAM, flash and every other window never look at it. Always 0 while core 1 is not running.
     uint8_t initiator = 0;
@@ -129,6 +149,7 @@ private:
 
     BusHost host_;
     WindowHandler sio_{}, ppb_[2]{};
+    SyncedHandler* synced_ = nullptr;  // while installed: the wrappers of the SIO, core 0's PPB, core 1's
     bool has_sio_ = false, has_ppb_ = false;
 };
 

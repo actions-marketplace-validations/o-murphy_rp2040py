@@ -47,6 +47,31 @@ struct WindowHandler {
 
 constexpr int kNoWindow = -1;
 
+// A handler with something to do before every access: the scheduler of two cores brings the other core and the clock to the accessing core's time first (record 0104, F2). The handlers are
+// WRAPPED while core 1 runs and handed back as they were when it does not, so the single-core path has nothing in it - not a test, not a call.
+using SyncFn = void (*)(void* ctx);
+struct SyncedHandler {
+    WindowHandler inner;
+    SyncFn sync;
+    void* sync_ctx;
+    static uint32_t read32(void* self, uint32_t offset) {
+        auto* h = static_cast<SyncedHandler*>(self);
+        h->sync(h->sync_ctx);
+        return h->inner.read32(h->inner.ctx, offset);
+    }
+    static void write32(void* self, uint32_t offset, int64_t raw_value, uint32_t atomic_type) {
+        auto* h = static_cast<SyncedHandler*>(self);
+        h->sync(h->sync_ctx);
+        h->inner.write32(h->inner.ctx, offset, raw_value, atomic_type);
+    }
+    WindowHandler wrap(const WindowHandler& original, SyncFn fn, void* ctx) {
+        inner = original;
+        sync = fn;
+        sync_ctx = ctx;
+        return WindowHandler{&SyncedHandler::read32, &SyncedHandler::write32, this};
+    }
+};
+
 class WindowMap {
 public:
     static constexpr int kMaxWindows = 128;
@@ -63,7 +88,7 @@ public:
             slot = count_++;
             keys_[slot] = key;
         }
-        handlers_[slot] = handler;
+        handlers_[slot] = synced_ ? wrapped_[slot].wrap(handler, sync_fn_, sync_ctx_) : handler;
         return slot;
     }
 
@@ -71,16 +96,35 @@ public:
     bool detach(uint32_t address) noexcept {
         const int slot = find(address >> kWindowShift);
         if (slot == kNoWindow) return false;
+        const bool was_synced = synced_;
+        if (was_synced) remove_sync();
         --count_;
         keys_[slot] = keys_[count_];  // keep the table dense: move the last window into the hole
         handlers_[slot] = handlers_[count_];
         last_ = 0;
+        if (was_synced) install_sync(sync_fn_, sync_ctx_, wrapped_);
         return true;
     }
 
     void clear() noexcept {
         count_ = 0;
         last_ = 0;
+    }
+
+    // Wrap every handler (and every one attached while wrapped) with `fn`; `remove_sync()` gives the originals back. Not nested: wrapping again replaces the first. The wrappers live in
+    // `storage` (`kMaxWindows` of them, the caller's: the table itself stays as small as it was, which the hot path of the single-core loop is sensitive to).
+    void install_sync(SyncFn fn, void* ctx, SyncedHandler* storage) noexcept {
+        if (synced_) remove_sync();
+        synced_ = true;
+        wrapped_ = storage;
+        for (int i = 0; i < count_; ++i) handlers_[i] = wrapped_[i].wrap(handlers_[i], fn, ctx);
+        sync_fn_ = fn;
+        sync_ctx_ = ctx;
+    }
+    void remove_sync() noexcept {
+        if (!synced_) return;
+        synced_ = false;
+        for (int i = 0; i < count_; ++i) handlers_[i] = wrapped_[i].inner;
     }
 
     int count() const noexcept { return count_; }
@@ -119,6 +163,10 @@ private:
 
     uint32_t keys_[kMaxWindows]{};
     WindowHandler handlers_[kMaxWindows]{};
+    SyncedHandler* wrapped_ = nullptr;
+    bool synced_ = false;
+    SyncFn sync_fn_ = nullptr;
+    void* sync_ctx_ = nullptr;
     int count_ = 0;
     mutable int last_ = 0;  // a cache, so lookups stay const
 };

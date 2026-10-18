@@ -37,6 +37,8 @@ public:
         cpu_ = cpu;
         port_.init(ports, block);
     }
+    // Core 1's NMI mask lives in core 1 (`PROC1_NMI_MASK`); the register still keeps what was written, as before.
+    void bind_core1(Cpu* cpu1) noexcept { cpu1_ = cpu1; }
 
 
     uint32_t proc1_nmi_mask = 0;
@@ -50,6 +52,7 @@ public:
         using namespace syscfg_regs;
         cpu_->interrupt_nmi_mask = 0;
         proc1_nmi_mask = 0;
+        if (cpu1_ != nullptr) cpu1_->interrupt_nmi_mask = 0;
         proc_config = PROC_CONFIG_RESET;
         proc_in_sync_bypass = 0;
         proc_in_sync_bypass_hi = 0;
@@ -79,7 +82,10 @@ public:
         const uint32_t v = static_cast<uint32_t>(value);
         switch (offset) {
             case PROC0_NMI_MASK: cpu_->interrupt_nmi_mask = v; break;
-            case PROC1_NMI_MASK: proc1_nmi_mask = v; break;
+            case PROC1_NMI_MASK:
+                proc1_nmi_mask = v;
+                if (cpu1_ != nullptr) cpu1_->interrupt_nmi_mask = v;
+                break;
             case PROC_CONFIG: proc_config = (proc_config & ~PROC_CONFIG_WRITABLE) | (v & PROC_CONFIG_WRITABLE); break;
             case PROC_IN_SYNC_BYPASS: proc_in_sync_bypass = v & PROC_IN_SYNC_BYPASS_MASK; break;
             case PROC_IN_SYNC_BYPASS_HI: proc_in_sync_bypass_hi = v & PROC_IN_SYNC_BYPASS_HI_MASK; break;
@@ -97,6 +103,7 @@ public:
 
 private:
     Cpu* cpu_ = nullptr;
+    Cpu* cpu1_ = nullptr;
 };
 
 }  // namespace rp2040core

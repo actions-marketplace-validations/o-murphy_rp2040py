@@ -26,6 +26,8 @@
 
 namespace rp2040core {
 
+constexpr uint32_t kSioIrqProc0 = 15;  // SIO_IRQ_PROC0; SIO_IRQ_PROC1 is the next
+
 enum SioWarn : uint32_t {
     kSioWarnFifo = 0,          // "Inter-core FIFO (0x50-0x58) is not implemented. core1/_thread is unsupported (see docs/records/0053-...)"
     kSioWarnReadInvalid = 1,   // "Read from invalid SIO address: {offset:x}"
@@ -41,6 +43,8 @@ struct SioHost {
     uint32_t (*qspi_in)(void* ctx) = nullptr;                           // GPIO_HI_IN: the 6 QSPI pins'
     bool (*update_pins)(void* ctx, uint32_t pin_mask, bool qspi) = nullptr;  // these pins' (the QSPI bank's if `qspi`) SIO-driven state changed; false: it failed
     void (*add_cycles)(void* ctx, uint32_t cycles) = nullptr;           // charge the CPU
+    // Core 1 is launched (the last word of the boot ROM's handshake arrived over the FIFO, `multicore` mode): reset it to `vtor`, `sp`, `pc` and let it run. False: it failed.
+    bool (*launch_core1)(void* ctx, uint32_t vtor, uint32_t sp, uint32_t pc) = nullptr;
     void* ctx = nullptr;
 };
 
@@ -91,8 +95,22 @@ public:
     SioBlock& operator=(const SioBlock&) = delete;
 
     void init(const ChipPorts* ports, uint32_t block, const SioHost& host) noexcept {
-        port_.init(ports, block);
+        port_.init(ports, block, kSioIrqProc0);  // the FIFO lines are SIO_IRQ_PROC0 (15) and SIO_IRQ_PROC1 (16)
         host_ = host;
+    }
+
+    // The inter-core FIFOs (datasheet 2.3.1.4) are off by default: the registers warn and read as 0xFFFFFFFF, as the Python reference still does (record 0053; the reference grows them in P2 of
+    // record 0104). `set_multicore(true)` turns on the real ones and the high-level answer of the boot ROM's launch handshake for core 1.
+    void set_multicore(bool on) noexcept { multicore_ = on; }
+    bool multicore() const noexcept { return multicore_; }
+    // Core 1 goes back to its boot state (PSM, a chip reset): the FIFOs are emptied and the handshake starts over. False: a line could not be updated.
+    bool reset_core1() noexcept {
+        fifo_[0].clear();
+        fifo_[1].clear();
+        roe_[0] = roe_[1] = wof_[0] = wof_[1] = false;
+        launch_seq_ = 0;
+        core1_launched_ = false;
+        return update_fifo_irqs();
     }
 
     // The registers the rest of the chip (and tests) read and write directly, as plain attributes of the Python block.
@@ -111,6 +129,7 @@ public:
         spin_lock = 0;
         core_[0].reset();
         core_[1].reset();
+        (void)reset_core1();
     }
 
     // The hardware divider: recomputes quotient/remainder from the current operands and charges 8 CPU cycles.
@@ -173,6 +192,7 @@ public:
             case DIV_REMAINDER: return static_cast<double>(active().div_remainder);
             case DIV_CSR: return active().div_csr;
             case FIFO_ST: case FIFO_WR: case FIFO_RD:
+                if (multicore_) return fifo_read(offset);
                 port_.warn(kSioWarnFifo, offset, 0);
                 return 4294967295.0;
             default: break;
@@ -218,6 +238,7 @@ public:
             spin_lock &= ~(1u << ((offset - SPINLOCK0) / 4));
             return true;
         }
+        if (multicore_ && (offset == FIFO_ST || offset == FIFO_WR)) return fifo_write(offset, static_cast<uint32_t>(value));
         const uint32_t prev_value = gpio_value, prev_oe = gpio_output_enable;
         const uint32_t prev_qspi_value = qspi_gpio_value, prev_qspi_oe = qspi_gpio_output_enable;
         const uint32_t masked = static_cast<uint32_t>(value) & GPIO_MASK;
@@ -296,6 +317,86 @@ private:
         return false;
     }
 
+    // ---- the FIFOs: `fifo_[0]` carries core 0 -> core 1, `fifo_[1]` core 1 -> core 0; a core writes its own and reads the other's -------------------------------------------------------------
+    struct Fifo {
+        uint32_t data[8];
+        uint32_t head = 0, count = 0;
+        bool push(uint32_t word) noexcept {
+            if (count == 8) return false;
+            data[(head + count++) & 7] = word;
+            return true;
+        }
+        bool pop(uint32_t* word) noexcept {
+            if (count == 0) return false;
+            *word = data[head];
+            head = (head + 1) & 7;
+            --count;
+            return true;
+        }
+        void clear() noexcept { head = count = 0; }
+    };
+    uint32_t fifo_status(uint32_t core) const noexcept {
+        return (roe_[core] ? 8u : 0u) | (wof_[core] ? 4u : 0u) | (fifo_[core].count < 8 ? 2u : 0u) | (fifo_[1 - core].count != 0 ? 1u : 0u);
+    }
+    // The IRQ of each core is the OR of VLD, ROE and WOF of its FIFO_ST; a line is told only when it changes.
+    bool update_fifo_irqs() noexcept {
+        for (uint32_t core = 0; core < 2; ++core) {
+            const bool level = (fifo_status(core) & 0b1101u) != 0;
+            if (level != fifo_irq_[core]) {
+                fifo_irq_[core] = level;
+                if (!port_.irq(level, core)) return false;
+            }
+        }
+        return true;
+    }
+    double fifo_read(uint32_t offset) noexcept {
+        using namespace sio_regs;
+        const uint32_t core = initiator();
+        if (offset == FIFO_ST) return fifo_status(core);
+        if (offset == FIFO_WR) {  // write-only
+            port_.warn(kSioWarnReadInvalid, offset, 0);
+            return 4294967295.0;
+        }
+        uint32_t word = 0;
+        if (!fifo_[1 - core].pop(&word)) roe_[core] = true;  // a read of an empty FIFO is ignored, and remembered
+        (void)update_fifo_irqs();
+        return word;
+    }
+    bool fifo_write(uint32_t offset, uint32_t value) noexcept {
+        using namespace sio_regs;
+        const uint32_t core = initiator();
+        if (offset == FIFO_ST) {  // writing anything clears the two sticky flags
+            roe_[core] = wof_[core] = false;
+            return update_fifo_irqs();
+        }
+        if (core == 0 && !core1_launched_ && host_.launch_core1 != nullptr) return boot_rom_answer(value);
+        if (!fifo_[core].push(value)) wof_[core] = true;  // a write to a full FIFO is ignored, and remembered
+        return update_fifo_irqs();
+    }
+    // Core 1 is still in the boot ROM (asleep until the mailbox wakes it): the ROM echoes every word of core 0's handshake and starts over on a wrong one; the last word starts core 1 at the
+    // vector table, stack and entry it was told (datasheet 2.8.2: 0, 0, 1, vector table, sp, entry). The bits of the real ROM are replaced by this answer, never visible but in the FIFO.
+    bool boot_rom_answer(uint32_t word) noexcept {
+        static const uint32_t expected[3] = {0, 0, 1};
+        if (launch_seq_ < 3) {
+            if (word == expected[launch_seq_]) {
+                ++launch_seq_;
+            } else {
+                launch_seq_ = word == 0 ? 1 : 0;  // a wrong word starts over - and a 0 is the first word of the sequence core 0 begins again with
+            }
+        } else if (word == 0) {
+            launch_seq_ = 1;  // core 0 restarts (it drains before a 0)
+        } else {
+            launch_words_[launch_seq_ - 3] = word;  // the vector table, the stack pointer, the entry: any value
+            ++launch_seq_;
+        }
+        fifo_[1].push(word);  // the echo (core 0 drains before a 0 and waits for each echo: there is room)
+        if (!update_fifo_irqs()) return false;
+        if (launch_seq_ < 6) return true;
+        launch_seq_ = 0;
+        core1_launched_ = true;
+        return host_.launch_core1(host_.ctx, launch_words_[0], launch_words_[1], launch_words_[2]);
+    }
+
     uint32_t initiator() const noexcept { return initiator_ != nullptr ? (*initiator_ & 1u) : 0u; }
     SioCoreState& active() noexcept { return core_[initiator()]; }
 
@@ -303,6 +404,11 @@ private:
     SioHost host_;
     SioCoreState core_[2];
     const uint8_t* initiator_ = nullptr;
+    bool multicore_ = false;
+    Fifo fifo_[2];
+    bool roe_[2] = {false, false}, wof_[2] = {false, false}, fifo_irq_[2] = {false, false};
+    uint32_t launch_seq_ = 0, launch_words_[3] = {0, 0, 0};
+    bool core1_launched_ = false;
 };
 
 }  // namespace rp2040core

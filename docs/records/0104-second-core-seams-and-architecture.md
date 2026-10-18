@@ -188,6 +188,8 @@ The maintainer's suggestion of 2026-10-18: extend the coverage of MicroPython's 
 
 ## Progress log
 
+- 2026-10-18 (baseline): MicroPython 1.29.0's `tests/thread/*.py` through `tests/micropython_official/run_suite.sh` on the current single-core build: **0 passed, 0 failed, 0 hung, 33 skipped** (every file skips itself with "needs core 1", the suite's own `_thread` check). So the baseline is "nothing runs": core 1 is what turns these from SKIP into PASS/FAIL, and the first real failures will be new information, not regressions. Command: `PER_TEST_TIMEOUT=60 bash tests/micropython_official/run_suite.sh <micropython v1.29.0 checkout> 1.29.0 out.md "thread/*.py"` (about a minute). To wire into CI as a report-only group (P3), add a group with `globs: "thread/*.py"` to `ci-micropython-official.yml`.
+
 - 2026-10-18 (decided): the maintainer accepted the accuracy contract and chose **F2 as the main scheduler, A as the strict mode** (D6). Recorded under "What is decided"; the instruction-level bounds of 0105 added to the contract as item 3. Nothing built; P0 and everything after it still wait for an explicit go-ahead.
 
 - 2026-10-18 (accuracy, on the maintainer's word): a third round with a **test of the clock inside a quantum** (W5) found that F is *not* accurate for anything that reads time (87 % of TIMER readings wrong at a 1024-cycle quantum); **F2** (every device access also brings the clock to the core's time) matches A reading for reading. The accuracy contract and the device-access-trace test are written above.

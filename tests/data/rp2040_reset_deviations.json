@@ -402,14 +402,6 @@
 "reason": "the QSPI pins' input levels (SS is pulled up); the SVD's reset column is a placeholder 0"
 },
 {
-"name": "SIO.FIFO_ST",
-"address": 3489661008,
-"ours": 15,
-"svd": 2,
-"category": "unimplemented",
-"reason": "not implemented (the DMA sniffer; the inter-core FIFO, which needs core 1): the read warns and returns all ones"
-},
-{
 "name": "PPB.SYST_RVR",
 "address": 3758153748,
 "ours": 16777215,

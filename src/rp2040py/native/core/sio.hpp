@@ -101,8 +101,8 @@ public:
         host_ = host;
     }
 
-    // The inter-core FIFOs (datasheet 2.3.1.4) are off by default: the registers warn and read as 0xFFFFFFFF, as the Python reference still does (record 0053; the reference grows them in P2 of
-    // record 0104). `set_multicore(true)` turns on the real ones and the high-level answer of the boot ROM's launch handshake for core 1.
+    // The inter-core FIFOs (datasheet 2.3.1.4) and the high-level answer of the boot ROM's launch handshake for core 1 are on (record 0104; the Python reference has them too). `set_multicore(false)`
+    // gives back the old stub - the registers warn and read as 0xFFFFFFFF (record 0053) - for a test of that.
     void set_multicore(bool on) noexcept { multicore_ = on; }
     bool multicore() const noexcept { return multicore_; }
     // Core 1 has come out of reset (PSM.FRCE_OFF PROC1 cleared) and the boot ROM it runs has drained its mailbox: it pushes a 0 to core 0 (and a SEV after it), which `multicore_reset_core1()`
@@ -415,7 +415,7 @@ private:
     SioHost host_;
     SioCoreState core_[2];
     const uint8_t* initiator_ = nullptr;
-    bool multicore_ = false;
+    bool multicore_ = true;
     Fifo fifo_[2];
     bool roe_[2] = {false, false}, wof_[2] = {false, false}, fifo_irq_[2] = {false, false};
     uint32_t launch_seq_ = 0, launch_words_[3] = {0, 0, 0};

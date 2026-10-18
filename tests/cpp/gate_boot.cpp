@@ -89,7 +89,7 @@ int main(int argc, char** argv) {
         return true;
     };
     mcu.build(host);
-    if (const char* core1 = std::getenv("RP2040PY_CORE1"); core1 != nullptr && core1[0] == '1') mcu.set_core1_enabled(true);  // the second core (record 0104): off unless asked for
+    if (const char* core1 = std::getenv("RP2040PY_CORE1"); core1 != nullptr && core1[0] == '0') mcu.set_core1_enabled(false);  // the second core (record 0104) is on; 0 gives back the old stub
     mcu.set_crystal_hz(12e6);  // the Pico's crystal: the board's, a parameter of the world
     if (!mcu.reset(false, true)) {  // a power-on reset: everything, the flash kept
         std::fprintf(stderr, "reset failed\n");

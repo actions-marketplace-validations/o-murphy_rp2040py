@@ -80,6 +80,17 @@ cdef void _ports_warn(void* chip, uint32_t block, uint32_t kind, uint32_t offset
         park_error(error)
 
 
+cdef bool _ports_irq(void* chip, uint32_t line, bool level) noexcept:
+    # a block made on its own (a stand-in chip, a test): the FIFO lines go to the chip's Python `set_interrupt`, as a pure-Python SIO does
+    cdef RPSIO sio = <RPSIO> chip
+    try:
+        sio.rp2040.set_interrupt(line, True if level else False)
+    except BaseException as error:
+        park_error(error)
+        return False
+    return True
+
+
 cdef class _InterpolatorView:
     """One of the C++ interpolators with the attribute names of the pure `interpolator.Interpolator`."""
 
@@ -194,6 +205,7 @@ cdef class RPSIO:
             host.ctx = <void*> self
             self._ports.chip = <void*> self
             self._ports.warn = _ports_warn
+            self._ports.irq = _ports_irq
             self._ports.failed = pending_flag()
             self._own.init(&self._ports, 0, host)
         self._interp0 = _InterpolatorView(self, 0)

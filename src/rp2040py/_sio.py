@@ -131,9 +131,9 @@ class RPSIO:
     def __init__(self, rp2040: "RP2040"):
         self.rp2040 = rp2040
         self._core1 = _CoreState()  # core 1's divider and interpolators, while core 0's are in the attributes below (and the other way round during an access by core 1)
-        # The inter-core FIFOs (datasheet 2.3.1.4) are off by default, as the stub they replace was: the registers warn and read as 0xFFFFFFFF. `multicore` turns on the real ones and the
-        # boot ROM's launch handshake, answered here (record 0104, D7 b). `_fifo[0]` carries core 0 -> core 1, `_fifo[1]` core 1 -> core 0.
-        self.multicore = False
+        # The inter-core FIFOs (datasheet 2.3.1.4) and the boot ROM's launch handshake, answered here (record 0104, D7 b); `multicore = False` gives back the old stub (the registers warn and read as
+        # 0xFFFFFFFF) for a test of that. `_fifo[0]` carries core 0 -> core 1, `_fifo[1]` core 1 -> core 0.
+        self.multicore = True
         self._fifo: list[list[int]] = [[], []]
         self._roe = [False, False]
         self._wof = [False, False]
@@ -248,7 +248,9 @@ class RPSIO:
             self._roe[core] = self._wof[core] = False
             self._update_fifo_irqs()
             return
-        if core == 0 and not self._core1_launched:
+        if (
+            core == 0 and not self._core1_launched and hasattr(self.rp2040, "launch_core1")
+        ):  # (a chip that cannot launch core 1 has no boot ROM to answer)
             self._boot_rom_answer(value & 0xFFFFFFFF)
             return
         if len(self._fifo[core]) < 8:

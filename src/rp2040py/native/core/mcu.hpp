@@ -716,8 +716,7 @@ public:
     }
 
     // ---- core 1 (record 0104, P1) ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------
-    // Off by default: the inter-core FIFO registers warn and read as 0xFFFFFFFF as before, and nothing can launch core 1. A host that wants the second core turns it on (the Python reference grows it
-    // in P2; until then a chip whose shells compare with the reference leaves it off).
+    // On by default: the inter-core FIFOs and the launch handshake work. `set_core1_enabled(false)` gives back the old stub (the registers warn and read as 0xFFFFFFFF, nothing can launch core 1).
     void set_core1_enabled(bool on) noexcept { sio_.set_multicore(on); }
     // Core 1 starts at the vector table, stack and entry core 0 sent it (the handshake of datasheet 2.8.2, answered by the SIO). The batch ends at its next iteration (`clk_changed_`, the flag the loop
     // already tests) so that `run()` picks the loop for two cores for the next one.

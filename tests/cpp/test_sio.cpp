@@ -136,6 +136,7 @@ int main() {
     CHECK(env.warns == 1 && env.warn_kind[0] == kSioFailDivideByZero);
     CHECK(env.cycles == cycles_before && sio.read32(DIV_QUOTIENT) == quotient_before);
     env.warns = 0;
+    sio.set_multicore(false);  // (the FIFOs are on by default; switched off, the registers are the old stub)
 
     // Registers the block does not know warn with the unmasked value, and the FIFO warns as "not implemented".
     CHECK(sio.read32(0x200) == 0xFFFFFFFFu && env.warns == 1 && env.warn_kind[0] == kSioWarnReadInvalid);

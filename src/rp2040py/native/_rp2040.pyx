@@ -1560,7 +1560,7 @@ cdef class RP2040:
             raise_if_pending()
 
     def set_core1_enabled(self, on):
-        """The inter-core FIFOs and the boot ROM's launch handshake (which the SIO answers): off by default, as the stub they replace was."""
+        """The inter-core FIFOs and the boot ROM's launch handshake (which the SIO answers): on by default; off gives back the old stub (the registers warn and read as 0xFFFFFFFF)."""
         self._mcu.set_core1_enabled(True if on else False)
 
     @property

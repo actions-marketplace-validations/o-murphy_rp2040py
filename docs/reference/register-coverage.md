@@ -106,9 +106,9 @@ Stubs in this block: SCR (SLEEPONEXIT, SLEEPDEEP, SEVONPEND) and the MPU (CTRL, 
 | `0x044` | GPIO_HI_OE_SET | Acts |  |
 | `0x048` | GPIO_HI_OE_CLR | Acts |  |
 | `0x04c` | GPIO_HI_OE_XOR | Acts |  |
-| `0x050` | FIFO_ST | Absent |  |
-| `0x054` | FIFO_WR | Absent |  |
-| `0x058` | FIFO_RD | Absent |  |
+| `0x050` | FIFO_ST | Acts | the inter-core FIFO status (VLD, RDY, ROE, WOF): record 0104 |
+| `0x054` | FIFO_WR | Acts | the outgoing FIFO; core 0's words are answered by the boot ROM's launch handshake until core 1 runs |
+| `0x058` | FIFO_RD | Acts | the incoming FIFO |
 | `0x05c` | SPINLOCK_ST | Acts |  |
 | `0x060` | DIV_UDIVIDEND | Acts |  |
 | `0x064` | DIV_UDIVISOR | Acts |  |

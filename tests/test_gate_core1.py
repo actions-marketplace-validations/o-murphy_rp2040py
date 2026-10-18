@@ -42,18 +42,23 @@ def harness(tmp_path_factory):
 @pytest.mark.parametrize("quantum", ["16", "1"])
 def test_micropython_runs_a_thread_on_core_1(harness, quantum):
     exe, rom, flash = harness
-    done = gate_boot.run(exe, rom, flash, EXPECTED, env={"RP2040PY_CORE1": "1", "RP2040PY_QUANTUM": quantum})
+    done = gate_boot.run(exe, rom, flash, EXPECTED, env={"RP2040PY_QUANTUM": quantum})
     assert done.stdout.startswith("ABC"), done.stdout  # the thread was started and the main thread went on
     # the chip asked the world for nothing but the bytes it printed: no warning (the FIFO registers are implemented now)
     callbacks = gate_boot.callbacks(done)
     assert len(callbacks) == 1 and callbacks[0].startswith("callback uart_byte="), done.stderr
 
 
-def test_without_the_second_core_thread_start_does_not_return(harness):
+def test_with_the_second_core_switched_off_thread_start_does_not_return(harness):
     exe, rom, flash = harness
-    # the default: the FIFO registers are the old stub, the handshake never completes - what the pure-Python reference still does
+    # switched off: the FIFO registers are the old stub, the handshake never completes
     done = gate_boot.subprocess.run(
-        [str(exe), str(rom), str(flash), "20", EXPECTED], capture_output=True, text=True, check=False, timeout=600
+        [str(exe), str(rom), str(flash), "20", EXPECTED],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=600,
+        env={**gate_boot.os.environ, "RP2040PY_CORE1": "0"},
     )
     assert done.stdout == "A"
     assert "callback warn block=" in done.stderr

@@ -773,7 +773,7 @@ class RP2040:
         self.cores[core].set_interrupt(irq, value)
 
     def set_core1_enabled(self, on: bool) -> None:
-        """The inter-core FIFOs and the boot ROM's launch handshake (which the SIO answers): off by default, as the stub they replace was."""
+        """The inter-core FIFOs and the boot ROM's launch handshake (which the SIO answers): on by default; off gives back the old stub (the registers warn and read as 0xFFFFFFFF)."""
         self.sio.multicore = bool(on)
 
     def send_event(self, core: int) -> None:

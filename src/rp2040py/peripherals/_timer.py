@@ -143,6 +143,19 @@ class RPTimer(BasePeripheral):
             return self._frozen_micros
         return self._base_micros + (self.clock.ticks - self._epoch_ticks) / (1000 * TICKS_PER_NANO) * self._scale()
 
+    def _counts_until(self, target: int) -> float:
+        """Counts until the count next reaches `target`, the fraction kept: the count is `floor(micros)`, so an alarm is due when `micros` gets to `target`, not when its whole part gets to `target - 1`
+        (it used to wait for `int(target - micros)` and fired up to a whole count early, with TIMELR still `target - 1`). A multiple of 2**32 apart is the same count, as on the 32-bit register."""
+        remaining = target - self._micros()
+        whole = math.floor(remaining)
+        return float(_to_uint32(whole)) + (remaining - whole)
+
+    def _arm_clock_alarm(self, alarm: "RPTimerAlarm") -> None:
+        """(Re)schedules `alarm`'s clock alarm for the moment the count reaches its target: rounded UP to a tick, never early (a zero wait stays zero, as it always did)."""
+        counts = self._counts_until(alarm.target_micros)
+        ticks = math.ceil(self._nanos_for(counts) * TICKS_PER_NANO - 1e-6) if counts > 0 else 0
+        alarm.clock_alarm.schedule_ticks(max(ticks, 0))
+
     def _nanos_for(self, counts: float) -> float:
         """Simulated nanoseconds until the count has advanced by `counts` (at the current tick)."""
         return counts * 1000.0 / self._scale()
@@ -200,7 +213,6 @@ class RPTimer(BasePeripheral):
         if offset in ALARM_REGS:
             alarm_index = (offset - ALARM0) // 4
             alarm = self.alarms[alarm_index]
-            delta_micros = _to_uint32(value - self._micros())
             alarm.armed = True
             # ALARMn is a 32-bit register: keep what a read of it would return, not the raw Python int the caller passed
             # (a negative or wider one made the bus's 32-bit read-back raise OverflowError).
@@ -208,7 +220,7 @@ class RPTimer(BasePeripheral):
             if (
                 not self._frozen()
             ):  # the count is frozen: the alarm is armed and waits for PAUSE to be cleared / the tick to run
-                alarm.clock_alarm.schedule(self._nanos_for(delta_micros))
+                self._arm_clock_alarm(alarm)
 
         elif offset == ARMED:
             for alarm in self.alarms:
@@ -278,10 +290,15 @@ class RPTimer(BasePeripheral):
     def _reschedule_armed_alarms(self) -> None:
         for alarm in self.alarms:
             if alarm.armed:
-                alarm.clock_alarm.schedule(self._nanos_for(_to_uint32(alarm.target_micros - self._micros())))
+                self._arm_clock_alarm(alarm)
 
     def _fire_alarm(self, index: int) -> None:
         alarm = self.alarms[index]
+        if (
+            0.0 < self._counts_until(alarm.target_micros) < 1.0
+        ):  # the tick it was rounded to still leaves the count a fraction short (floating-point): wait for it
+            self._arm_clock_alarm(alarm)
+            return
         self._disarm_alarm(alarm)
         self._int_raw |= alarm.bit_value
         self._check_interrupts()

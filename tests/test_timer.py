@@ -142,3 +142,22 @@ def test_dbgpause_is_a_two_bit_register_that_resets_to_both_bits_set(rp2040_fact
     assert rp2040.read_uint32(DBGPAUSE) == 0x6
     rp2040.write_uint32(DBGPAUSE, 0x2)
     assert rp2040.read_uint32(DBGPAUSE) == 0x2
+
+
+def test_alarm_never_fires_before_the_count_reaches_its_target(rp2040_factory):
+    """With the count at a fraction of a microsecond (a PAUSE at 0.5 us), an alarm used to wait for the truncated difference and raised its interrupt while TIMELR was still target - 1 (record 0105)."""
+    from rp2040py.clock.simulation_clock import SimulationClock
+
+    clock = SimulationClock()
+    rp2040 = rp2040_factory(clock)
+    start_tick(rp2040)
+    clock.tick(500)
+    rp2040.write_uint32(0x40054030, 1)  # PAUSE
+    rp2040.write_uint32(0x40054030, 0)
+    rp2040.write_uint32(0x40054010, 100)  # ALARM0
+    for _ in range(400):
+        clock.tick(500)
+        if rp2040.read_uint32(INTR) & 1:
+            break
+    assert rp2040.read_uint32(INTR) & 1
+    assert rp2040.read_uint32(0x4005400C) >= 100  # TIMELR

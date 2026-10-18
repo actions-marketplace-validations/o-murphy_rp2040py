@@ -115,10 +115,9 @@ public:
             case ALARM0: case ALARM1: case ALARM2: case ALARM3: {
                 const int index = static_cast<int>((offset - ALARM0) / 4);
                 // The due time is computed from the unmasked value (as the Python block does); the register keeps 32 bits.
-                const uint32_t delta_micros = to_uint32(static_cast<double>(value) - micros());
                 armed_[index] = true;
                 target_[index] = static_cast<uint32_t>(value);
-                if (!frozen()) clock_->schedule(&alarms_[index], nanos_for(static_cast<double>(delta_micros)));  // a frozen count: armed, and waiting for PAUSE to clear / the tick to run
+                if (!frozen()) arm_clock_alarm(index);  // a frozen count: armed, and waiting for PAUSE to clear / the tick to run
                 return kWriteHandled;
             }
             case ARMED:
@@ -212,6 +211,36 @@ private:
     bool frozen() const noexcept { return paused_ || tick_hz_ == 0.0; }
     // Counts per microsecond of simulated time: the tick is nominally 1 MHz (one count per microsecond).
     double scale() const noexcept { return tick_hz_ / 1e6; }
+    // floor() for any finite double, without libm (a TIMEHW write can put the count beyond int64, where every double is a whole number anyway).
+    static double floor_of(double value) noexcept {
+        if (value >= 4503599627370496.0 || value <= -4503599627370496.0) return value;
+        double whole = static_cast<double>(static_cast<int64_t>(value));  // truncates toward zero
+        if (whole > value) whole -= 1.0;
+        return whole;
+    }
+    // Counts until the count next reaches `target`, the fraction kept: the count is floor(micros), so an alarm is due when `micros` gets to `target`, not when its whole part gets to `target - 1`
+    // (it used to wait for the truncated difference and fired up to a whole count early, with TIMELR still `target - 1`). A multiple of 2^32 apart is the same count, as on the 32-bit register.
+    double counts_until(uint32_t target) const noexcept {
+        const double remaining = static_cast<double>(target) - micros();
+        const double whole = floor_of(remaining);
+        return static_cast<double>(to_uint32(whole)) + (remaining - whole);
+    }
+    // (Re)schedules alarm `index` for the moment the count reaches its target: rounded UP to a tick, never early (a zero wait stays zero).
+    void arm_clock_alarm(int index) noexcept {
+        const double counts = counts_until(target_[index]);
+        int64_t ticks = 0;
+        if (counts > 0.0) {
+            const double exact = nanos_for(counts) * static_cast<double>(kTicksPerNano) - 1e-6;
+            if (exact >= static_cast<double>(kMaxTicks)) {
+                ticks = kMaxTicks;
+            } else {
+                ticks = static_cast<int64_t>(exact);
+                if (static_cast<double>(ticks) < exact) ++ticks;  // ceil
+                if (ticks < 0) ticks = 0;
+            }
+        }
+        clock_->schedule_ticks(&alarms_[index], ticks);
+    }
     // Simulated nanoseconds until the count has advanced by `counts` (at the current tick).
     double nanos_for(double counts) const noexcept { return counts * 1000.0 / scale(); }
     // This block's own count - one per tick - since its epoch, not the simulation's clock. Every read and every
@@ -274,7 +303,7 @@ private:
 
     void reschedule_armed_alarms() noexcept {
         for (int i = 0; i < kAlarms; ++i) {
-            if (armed_[i]) clock_->schedule(&alarms_[i], nanos_for(static_cast<double>(to_uint32(static_cast<double>(target_[i]) - micros()))));
+            if (armed_[i]) arm_clock_alarm(i);
         }
     }
 
@@ -295,6 +324,11 @@ private:
     static bool on_alarm(void* ctx) noexcept {
         Slot* slot = static_cast<Slot*>(ctx);
         TimerBlock* self = slot->block;
+        const double short_by = self->counts_until(self->target_[slot->index]);
+        if (short_by > 0.0 && short_by < 1.0) {  // the tick it was rounded to still leaves the count a fraction short (floating-point): wait for it
+            self->arm_clock_alarm(slot->index);
+            return true;
+        }
         self->disarm(slot->index);
         self->int_raw_ |= 1u << slot->index;
         return self->check_interrupts();

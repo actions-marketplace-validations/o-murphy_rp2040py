@@ -20,6 +20,7 @@ pytestmark = pytest.mark.skipif(
     native_disabled(), reason="RP2040PY_SKIP_CYTHON=1: the facade gives the chip pure-Python PIO blocks"
 )
 
+from rp2040py import _execute_batch as _pure_batch_module
 from rp2040py._execute_batch import execute_batch as pure_execute_batch
 from rp2040py.native._simulator import execute_batch as native_execute_batch
 from rp2040py.simulator import Simulator
@@ -220,9 +221,12 @@ def test_clearing_the_real_io_flag_restores_the_unpaced_jump_in_both_loops():
 
 @pytest.mark.parametrize("tick_batch", [1, 16])
 @pytest.mark.parametrize("clk_sys", [125e6, 133e6, 48e6])
-def test_a_running_pio_gets_the_same_cycles_from_many_short_idle_jumps_in_both_loops(tick_batch, clk_sys):
+def test_a_running_pio_gets_the_same_cycles_from_many_short_idle_jumps_in_both_loops(tick_batch, clk_sys, monkeypatch):
     """The idle jump hands the PIO the cycles it covers, with the fraction of a cycle carried to the next jump (record 0105, finding 2). The default 125 MHz has no fraction, so the clocks that do
     (133 MHz is 120.30 ticks per cycle, 48 MHz 333.33) are what holds the two loops to the same carry."""
+    monkeypatch.setattr(
+        _pure_batch_module, "_BATCH_YIELD_BUDGET_SECONDS", 1e9
+    )  # (a slow runner would end a batch early, and the carry is per batch)
     results = []
     for loop in (pure_execute_batch, native_execute_batch):
         simulator, _log, run = _rig(loop, [opcode_wfi(), BKPT], idle=True)

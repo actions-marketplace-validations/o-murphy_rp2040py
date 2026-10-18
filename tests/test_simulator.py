@@ -19,6 +19,7 @@ import time
 
 from utils.emscripten import needs_fine_clock
 
+from rp2040py import _execute_batch as _execute_batch_module
 from rp2040py.rp2040 import RP2040
 from rp2040py.simulator import Simulator
 
@@ -234,9 +235,13 @@ def test_pacing_keeps_up_with_real_time_on_a_platform_with_a_coarse_timer():
     assert 0.1 < paced < 0.6, paced
 
 
-def test_a_pio_behind_many_short_idle_jumps_keeps_pace_with_a_clock_that_is_not_a_whole_number_of_ticks_per_cycle():
+def test_a_pio_behind_many_short_idle_jumps_keeps_pace_with_a_clock_that_is_not_a_whole_number_of_ticks_per_cycle(
+    monkeypatch,
+):
     """133 MHz is 120.30 ticks per cycle. The idle jump hands the PIO the cycles it covers, and flooring each jump on its own dropped the fraction every time (8 of 8.31 cycles for a 1000-tick jump:
     the PIO ran 4 % slow against the clock). The fraction is now carried, as the CPU's own time carries it (record 0105, finding 2)."""
+    # The pure-Python loop gives a batch up after 5 ms of wall time; on a slow runner (Windows CI) that ends this one before its 500 jumps, and the carry is per batch. The test is about the carry.
+    monkeypatch.setattr(_execute_batch_module, "_BATCH_YIELD_BUDGET_SECONDS", 1e9)
     chip = RP2040()
     chip.clk_sys = 133e6
     simulator = Simulator(rp2040=chip)

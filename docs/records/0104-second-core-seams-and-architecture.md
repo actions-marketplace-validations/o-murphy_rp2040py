@@ -37,9 +37,9 @@ What a second core touches today (counts and places are from the tree at `830244
 | The PPB | `core/ppb.hpp`, one `PpbBlock` with `Cpu* cpu_` | SysTick (a timer and its alarm), SCR, the MPU registers; NVIC reads and writes go to `cpu_` | one per core (SysTick, SCR, MPU and the NVIC window are banked) |
 | SIO | `core/sio.hpp` | one `SioBlock`: spinlocks, GPIO, the **divider**, **two interpolators**, `CPUID` constant 0; the FIFO registers warn (`kSioWarnFifo`) | per core: `CPUID`, divider, both interpolators, the two FIFOs and their IRQ lines; shared: spinlocks, GPIO |
 | Cycles charged by SIO | `Mcu::sio_add_cycles` (`mcu.hpp:801`) | `cpu.cycles += ...` | the cycles of the *initiating* core |
-| IRQ delivery | `Mcu::set_interrupt` (`mcu.hpp:527`), reached by every block through `ChipPorts::irq` | one line into `cpu` | the same line into both NVICs (the chip routes every peripheral IRQ to both cores); IO_BANK0 has separate PROC0 / PROC1 `INTE` / `INTF` / `INTS` sets and so a *different level per core*; the SIO FIFO IRQs are per core (their exact routing to be read in datasheet 2.3.2 - **not yet verified**) |
+| IRQ delivery | `Mcu::set_interrupt` (`mcu.hpp:527`), reached by every block through `ChipPorts::irq` | one line into `cpu` | **datasheet 2.3.2:** every NVIC has the same interrupts routed to it, *except* the GPIO ones - `IO_IRQ_BANK0` (13) and `IO_IRQ_QSPI` (14) are one per bank *per core*, independent (IO_BANK0's `PROC0_*` / `PROC1_*` sets), so those two get a level per core. `SIO_IRQ_PROC0` / `PROC1` (15, 16) are ordinary system lines that reach both NVICs and carry the FIFO state of core 0 and core 1 respectively (the OR of that core's `VLD`, `ROE`, `WOF`). Every other line goes to both cores. |
 | SYSCFG | `core/syscfg.hpp` | `PROC0_NMI_MASK` is the C++ `Cpu`'s own `interrupt_nmi_mask`; `PROC1_NMI_MASK` is stored | `PROC1_NMI_MASK` to core 1's `Cpu` |
-| `SEV` | `cpu_ops.hpp:522` | sets the event register of the executing core only (the comment says "every PE": true with one) | every present core |
+| `SEV` | `cpu_ops.hpp:522` | sets the event register of the executing core (record 0050) | also the other core's: **datasheet 2.3.3** - the event signals are cross-wired, an event sent by one processor is received on the other; the flag is sticky (both `SEV` then both `WFE` wake at once) |
 | The batch loop | `core/batch.hpp`, `run_batch(Cpu&, Clock&, ...)`, one caller, `Mcu::run` | one core, one instruction per iteration, the clock ticked per instruction (`tick_batch == 1`), PIO stepped by the instruction's cycles | a loop for two cores sharing one clock; PIO and DMA stepped by the *clock's* delta, not by one core's cycles |
 | Reset | `Mcu::reset`, PSM, RESETS | PSM has no PROC1 handling; `leave_reset` puts core 0 at the flash entry | core 1 held (inactive) until launched; `PSM.FRCE_OFF` / `FRCE_ON` for `PROC1` |
 | The Python reference | `_rp2040.py`, `_execute_batch.py`, `_sio.py`, `peripherals/_ppb.py`, `peripherals/_syscfg.py`, `device/base_device.py`, `cli/__init__.py`, `gdb/gdb_server.py`, `native/_rp2040.pyx`, `_ppb.pyx`, `_sio.pyx` | **33 uses of `.core` in 11 files**; one `core` | `core` stays core 0 (no API break); a `cores` sequence; the reference has the same dual loop (the oracle needs it) |
@@ -58,13 +58,13 @@ D1-D5 and D7-D11 are the parts that hold whichever way the scheduling question i
 
 **D3 - the PPB and the per-core SIO state are `[2]`.** `PpbBlock ppb_[2]` (each owns its SysTick, SCR and MPU, and points at its own `Cpu`); `SioBlock` gets a `PerCore core_[2]` (divider, interpolators, FIFO ends); the bus slot's handler picks `[initiator]`. With one core the index is the constant 0 and the cost is one indexed load on an SIO or PPB access, not on any other access.
 
-**D4 - IRQ delivery is by core.** `ChipPorts::irq(line, level)` keeps its signature for the blocks that do not care (every peripheral: delivered to both NVICs, which is what the chip does; core 1's pending bits are therefore faithful from reset); a per-core entry (`irq_core(core, line, level)`) serves IO_BANK0 (a level per core from `PROC0_INTS` / `PROC1_INTS`) and the SIO FIFO lines. IRQ events are rare (not per instruction): the second store costs nothing measurable.
+**D4 - IRQ delivery is by core only where the chip makes it so.** `ChipPorts::irq(line, level)` keeps its signature: every system line is delivered to both NVICs, which is what the chip does (datasheet 2.3.2), so core 1's pending bits are faithful from reset, and the FIFO lines 15 / 16 are ordinary lines driven by each core's `FIFO_ST`. Only `IO_IRQ_BANK0` and `IO_IRQ_QSPI` get a per-core entry (`irq_core(core, line, level)`), the level computed from `PROC0_INTS` or `PROC1_INTS`. IRQ events are rare (not per instruction): the second store costs nothing measurable. Each core also has its own NMI mask (`PROC0_NMI_MASK`, `PROC1_NMI_MASK`; the 26 lines are masked, ORed into the core's NMI).
 
 **D5 - two batch loops, chosen once per batch.** `run_batch` (the single-core loop) is **not touched**. A separate `run_batch_dual` serves the time core 1 is running; `Mcu::run` chooses between them at the start of a batch (one cold branch per batch, not per instruction). Switching *during* a batch reuses the exit flag the loop already tests every iteration (`clk_changed_`, the one that ends a batch when `clk_sys` changes): launching core 1 raises it, the batch returns, the next `run` picks the dual loop. The single-core loop therefore gains no instruction.
 
 **D6 - the scheduling of the two cores: open** - see the next section.
 
-**D7 - core 1 is launched by a high-level emulation of the boot ROM's handshake.** Core 1 stays inactive (and free) until core 0 pushes the six words `0, 0, 1, vector_table, sp, pc` through the SIO FIFO, in that order (the sequence `multicore_launch_core1` and MicroPython's `_thread` use); then `cpu1` is reset, given the stack pointer and the entry point (and its VTOR), marked active, and the batch-exit flag raised. The real boot ROM on core 1 (exact, but needs the ROM image and a reset flow the emulator skips today - `leave_reset` goes straight to the flash entry) is a later option, not the first step. `multicore_reset_core1` and the FIFO drain / `PSM` `PROC1` reset return core 1 to inactive.
+**D7 - how core 1 is launched: two options, to be chosen.** What the chip does (datasheet 2.8.1 / 2.8.2): after reset *both* cores enter the boot ROM at the same place; both read `SIO.CPUID`; core 1 goes to sleep (`WFE` with `SCR.SLEEPDEEP`) and stays there until woken through the mailbox; the launch is a **lockstep, echoing state machine** over the two FIFOs - core 0 sends `0, 0, 1, vector_table, sp, entry` (draining its read FIFO and executing `SEV` before a `0`), core 1 echoes every word back, a wrong echo restarts the sequence, and it may be run at any point after core 1 has been reset. So a launch emulation must *answer*, not just watch. (a) **Run the real boot ROM on core 1** - exact, restarts and resets included, no emulation code; needs the ROM image (it is in the package, `BOOTROM_B1`) and `WFE` / `SLEEPDEEP` / `SEV` right; a host without the image (the wasm PoC passes none) cannot. (b) **A high-level responder in the SIO**: while core 1 is inactive, each word core 0 writes to the 0-to-1 FIFO is echoed into the 1-to-0 FIFO, a wrong word or a `0` restarts, the last word starts core 1 (reset, `VTOR`, `SP`, `PC`, active, the batch-exit flag raised). Likely both: (a) when the ROM is there, (b) otherwise. `multicore_reset_core1`, the FIFO drain and `PSM` (`FRCE_OFF` / `FRCE_ON` have a `PROC1` bit 16 next to `PROC0` bit 15) return core 1 to its boot state.
 
 **D8 - the FIFOs are what the datasheet says.** Two 8-entry, 32-bit FIFOs (core 0 to core 1 and back); `FIFO_ST` (`VLD`, `RDY`, `WOF`, `ROE`), `FIFO_WR`, `FIFO_RD`, the per-core IRQ; the stub warning (`kSioWarnFifo`) goes away. Spinlocks stay shared; `CPUID` reads the initiator; the divider's and the interpolators' cycles are charged to the initiating core.
 
@@ -86,9 +86,50 @@ The problem: the cores share one clock, and every instruction of either can chan
 | **D. Cooperative / coroutine** | each core a resumable task, a scheduler picks by time (the form A or C takes in an `async` host, or in the Python reference as generators) | fits the `asyncio` model of 0025 / 0026 on the Python side | not a different semantics from A or C, a different mechanism; per-instruction `await` is far too slow in Python, so it can only sit at the quantum boundary |
 | **E. Run until a shared access** | run a core until it touches something the other can observe (the SIO FIFO, `SEV`, a spinlock, an alarm due), then switch | the fewest switches | shared RAM is observable too (a flag polled in RAM) and cannot be detected for free, so a bound on the run is still needed: it falls back to C |
 
-**My hypothesis, untested:** C (a quantum bounded by the next alarm) is likely the cheapest and A the most faithful, and the difference may be small; but I do not know, and the answer depends on how often real firmware (MicroPython's `_thread`, CoreMark) lets one core wait for the other.
+**The first prototype round (below) found:** C is the cheapest and A the most faithful, and the difference is not small - exact scheduling costs 10-31 % per instruction, a quantum costs nothing but delays cross-core visibility in proportion to its length; E (below) is the untested candidate that should have both. The answer still depends on how often real firmware (MicroPython's `_thread`, CoreMark) synchronises through the SIO rather than through shared RAM.
 
 **How to choose - by measurement, before P1:** a throwaway prototype of the candidates in the bare-core harness (a scratch file, not in the product tree), driven by (1) two copies of the synthetic loop of `scripts/bench/synthetic.py` on both cores (the cost per instruction against the single-core 59 Minstr/s of the C++ build), (2) a FIFO ping-pong between the cores (the cost when they wait for each other), (3) core 0 busy and core 1 waiting (the cost of the idle one), (4) the accuracy side: a PIO program and a timer alarm whose timing a core observes. The numbers go here; then D6 is decided. Whichever candidate wins, D5 holds: a separate loop for two cores, chosen once per batch, with the single-core loop untouched.
+
+## Checked against the datasheet (2026-10-18, RP2040 datasheet, build 2026-10)
+
+What the datasheet says that bears on this design, and what in this record it changed.
+
+- **2.3.1 SIO.** Every IOPORT access takes **exactly one cycle**; a main-bus load or store takes two and may wait longer because of contention from other bus masters. **To check in the emulator:** how many cycles `execute()` charges for a load or store to the SIO window - not read yet. The contention itself is not modelled (0098 lists it) and will make a loaded dual-core run faster than silicon where both cores hit the same SRAM bank.
+- **2.3.1.1 `CPUID`.** 0 on core 0, 1 on core 1; "both cores start running simultaneously".
+- **2.3.1.3 spinlocks.** 32, shared; **if both cores claim the same lock in the same cycle, core 0 wins** - the tie rule used by the local-time candidate (ties to core 0).
+- **2.3.1.4 FIFOs.** Two, 32 bits x 8 entries (core 0 to 1 and core 1 to 0). `FIFO_ST`: `VLD`, `RDY`, sticky `ROE` (read while empty) and `WOF` (written while full); a write when full or a read when empty changes no state. The IRQ of a core is the OR of its `VLD`, `ROE`, `WOF`; `ROE` / `WOF` are cleared by writing any value to `FIFO_ST`. The IRQs are system IRQs 15 and 16.
+- **2.3.1.5 / 2.3.1.6.** One divider and two interpolators **per core**.
+- **2.3.2 interrupts.** See the IRQ row of the audit: all lines to both NVICs, except `IO_IRQ_BANK0` / `IO_IRQ_QSPI`; an NMI mask per core; a caution that with the watchdog armed and bits in the core 1 NMI mask, `RESETS` (and so `SYSCFG`) belong in the watchdog reset list - the reset cascade of `Mcu` will need that.
+- **2.3.3 events.** Cross-wired, sticky (see the `SEV` row).
+- **2.8.1 / 2.8.2 boot and launch.** See D7: this **corrected** an earlier version of this record, which had the launch as "watch for the six words"; the handshake echoes.
+- **PSM.** `FRCE_ON` / `FRCE_OFF` have `PROC1` (bit 16) and `PROC0` (bit 15): core 1 can be forced off and on.
+
+Not yet read: 2.4 (the PPB is per core, SysTick included), 2.7 (the hardware reset sequence), the debug chapter (which core a debugger addresses), 2.11 (sleep: both cores asleep and the DMA idle lets the chip sleep, which is the idle jump with two cores).
+
+## The prototype, first round (P0.5, 2026-10-18)
+
+`scripts/bench/two_core/proto.cpp` (the harness: two `Cpu` on the `Mcu`'s bus and clock, one loop per candidate) and `gen.py` (the Thumb programs). Not product code; the loops are *minimal* (an instruction, the clock, no PIO / DMA / yield checks), so the absolute figures are higher than the product's (the single-core minimal loop is 83 Minstr/s where the product's `run_batch` is 59-60 on the same compiler): **read the ratios, not the figures.** 64 simulated ms per run (8 M cycles), best of 3, the sandbox's 2.8 GHz Xeon; "Minstr/s" counts the instructions of both cores. The baseline: one core, one clock tick per instruction (today's shape), **83.4 (g++) / 82.8 (clang)**.
+
+| Candidate | two busy cores, g++ / clang | one busy, one asleep, g++ / clang | ping-pong through shared RAM: Minstr/s g++ / clang, and round trips per simulated ms |
+|---|---|---|---|
+| A local time, per instruction | 75.0 / 56.9 | 74.9 / 75.7 | 70.7 / 50.0, **6579** |
+| A' local time, burst | 64.7 / 54.5 | 76.3 / 74.8 | 55.8 / 50.8, 6579 |
+| B strict alternation | 91.4 / 97.6 | 69.7 / 80.6 | 94.3 / 92.2, 5682 - **wrong**: the cores' own times drift apart (up to 1.09 M cycles) |
+| C quantum 16 cycles | 100.7 / 78.8 | 96.2 / 76.6 | 92.4 / 75.5, **7812** |
+| C quantum 64 | 96.5 / 90.3 | 97.7 / 92.9 | 96.7 / 86.5, **2000** |
+| C quantum 256 | 100.4 / 94.6 | 102.3 / 95.3 | 100.4 / 90.5, **500** |
+| C quantum 1024 | 102.7 / 94.3 | 102.2 / 96.1 | 101.0 / 89.8, **125** |
+
+What it says (and its limits):
+1. **Exact scheduling (A) costs 10 % (g++) to 31 % (clang) per instruction over the one-core minimal loop**, and clang is the compiler the wasm module has to use. A' (running a burst) is *not* better than A when the cores run at the same rate: they alternate nearly every instruction anyway.
+2. **A quantum (C) is cheaper than the one-core loop** (up to 1.2x), because the clock is ticked once per quantum instead of once per instruction - the batching the product turns off on purpose (alarm precision) pays here, since the quantum is cut at the next alarm and so alarms stay exact.
+3. **But a quantum delays what one core sees of the other** in proportion to its length: the ping-pong rate is 6579 per simulated ms exact, 7812 at 16 cycles, and falls to 2000, 500 and 125 at 64, 256 and 1024. For firmware that polls shared RAM with no help from the SIO, a long quantum makes every hand-off cost a quantum of simulated time. The alarm probe (how far a core's time is from the alarm when it fires) reads <= 1 cycle for every candidate and does **not** tell them apart, because the quantum is cut at alarms - the cross-core delay is the real accuracy measure.
+4. **An asleep core costs about 10 % under A** and nothing under C.
+5. **B is out**: its time model is wrong.
+
+**Not measured, and why it matters:** the synchronisation that SDK-style firmware actually uses goes through the SIO (FIFO, spinlocks) and through events (`SEV` / `WFE`), not through polling shared RAM. A candidate **E - a quantum that ends early at an SIO or event access** (the SIO is already a dedicated bus slot, so flagging it is free for every other access) should keep C's cost and give the exactness where firmware synchronises. It could not be prototyped here because the FIFO is still a stub; a spinlock ping-pong could stand in for it. Also not measured: wasm, the product's loop with PIO / DMA stepping, a real IRQ.
+
+**Reading so far (a recommendation, not a decision):** E - a quantum bounded by the next alarm and cut at SIO / event accesses - is the best path on the evidence, A (exact, kept as a mode for the oracle and for strict timing) the fallback, and B, A' and a long fixed quantum on its own are out. Open before deciding: the E prototype with spinlocks, the effect on wasm, and whether the reference can implement the same rule for the lockstep oracle (a quantum loop is the easiest to write identically in Python).
 
 ## Phases
 
@@ -104,7 +145,7 @@ The maintainer's suggestion of 2026-10-18: extend the coverage of MicroPython's 
 
 ## Risks and open questions
 
-1. **The IRQ routing per core** (SIO_IRQ_PROC0 / PROC1, and which lines each core sees) must be read in datasheet 2.3.2 and the SIO chapter before P1; the table above says "not yet verified" where it is.
+1. **Resolved by the datasheet** (2.3.2, see "Checked against the datasheet"): only the two GPIO lines are per core.
 2. **Time with two cores in the PIO and the DMA** (D6): the reference steps them by "the instruction's cycles"; stepping them by the clock's delta must give identical results in the single-core case - a test for P0/P1 before the dual loop is trusted.
 3. **Idle with one core waiting** and the other running (the existing idle jump is for one core).
 4. **The debug hooks** (`on_break`, `log`, `bl_taken`, the GDB stub): which core.
@@ -115,4 +156,5 @@ The maintainer's suggestion of 2026-10-18: extend the coverage of MicroPython's 
 
 ## Progress log
 
+- 2026-10-18 (later): **checked against the datasheet** (it corrected the IRQ routing - only the two GPIO lines are per core - the `SEV` rule - cross-wired - and the launch - an echoing handshake, D7) and **the first prototype round** (the table above; E proposed, not yet measured).
 - 2026-10-18: written (documentation only): the change of order, the audit of the tree, proposals D1-D11, the phases and their acceptance, the check through MicroPython's own suite. **Corrected the same day on the maintainer's word:** the scheduling of the two cores had been written as decided (local-time, one after the other); it is not - only "no OS thread" is. It is now an open question with candidates and a measurement plan (P0.5).

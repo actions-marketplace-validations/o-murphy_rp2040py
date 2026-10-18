@@ -12,19 +12,18 @@ Raspberry Pi Pico (RP2040) Emulator in Python — started as a port of [rp2040js
 
 See [docs/reference/porting-checklist.md](docs/reference/porting-checklist.md) for the file-by-file port status against upstream rp2040js.
 
-> [!IMPORTANT]
-> **Single-core only.** rp2040py emulates `core0`; there is no `core1`, and SIO's inter-core FIFO
-> registers (`FIFO_ST`/`FIFO_WR`/`FIFO_RD`) are *recognised but non-functional*. The three
-> addresses are named rather than falling through as unknown, so a read logs `"Inter-core FIFO
-> (0x50-0x58) is not implemented. core1/_thread is unsupported"` and returns all-ones; a write is
-> still on the generic path, logging `"Write to invalid SIO address"` before the value is
-> discarded. `CPUID` always reads `0`. Firmware that starts the second core
-> (`multicore_launch_core1()`, MicroPython's `_thread`) will not work. This is deliberate rather
-> than pending: adding the FIFO registers *without* a second core to answer them would turn today's
-> loud failure into a silent infinite hang inside `multicore_fifo_pop_blocking()`, which is strictly
-> worse — see [docs/records/0053](docs/records/0053-core1-and-inter-core-fifo.md) for what building
-> it properly involves. Single-core firmware — the default for MicroPython, CircuitPython, Kaluma
-> and the pico-examples — is unaffected.
+> [!NOTE]
+> **Both cores are emulated.** Core 1 is on by default, in the compiled and the pure-Python build alike:
+> the inter-core FIFOs, the launch handshake the boot ROM answers (`multicore_launch_core1()` works, and an
+> entry function that returns parks the core as the ROM does), `SEV`/`WFE` across the cores, each core's own
+> divider, interpolators, `CPUID`, NVIC and SysTick. Both run on the caller's thread (no OS thread per core),
+> in quanta of 16 cycles with every device access a synchronisation point, so data the cores exchange through
+> RAM can show up to a quantum late; `chip.quantum_cycles = 1` makes the order exact. MicroPython's `_thread`
+> works (the `thread/` tests of MicroPython's own suite run in CI), and [CoreMark runs on both
+> cores](demo/coremark_dual_core.py). To leave core 1 off (the old behaviour: the FIFO registers warn and read
+> all-ones), pass `--no-core1` or set `RP2040PY_CORE1=0`. Not done yet: the per-core GPIO interrupt lines
+> (`IO_BANK0` `PROC1_*`), core 1 under the GDB server and under the wasm module. See
+> [docs/records/0104](docs/records/0104-second-core-seams-and-architecture.md).
 
 ## Quick start
 
@@ -577,8 +576,8 @@ extension points themselves.
 ## Performance
 
 The emulator core is also available as a compiled extension (`rp2040py.native`): the Cortex-M0+
-core, the bus, the clock and the peripherals (SIO, timer, pins, PIO, DMA, SSI, UART, SPI, I2C, ADC,
-CYW43 gSPI) are C++17 behind thin Cython shells, and the batch execution loop runs entirely in C++
+core, the bus, the clock and every peripheral (SIO, timer, pins, PIO, DMA, SSI, UART, SPI, I2C, ADC,
+PWM, USB, the clock tree, CYW43 gSPI, ...) are C++17 behind thin Cython shells (the C++ core even boots MicroPython on its own, with no Python), and the batch execution loop runs entirely in C++
 ([docs/records/0096-cpp-mcu-core.md](docs/records/0096-cpp-mcu-core.md)). Against the pure-Python
 build that is roughly **100x** to the first line of MicroPython's output (table in the tip above), and
 it is where rp2040py sits ahead of rp2040js. The pure-Python implementations stay in the tree as the
@@ -610,6 +609,7 @@ measure of instruction throughput. [`demo/coremark_single_thread.py`](demo/corem
 
 - The score is the same in all three (1.99 CoreMark/MHz at 125 MHz), so the builds agree on what the firmware computes.
 - The native extension is ~167x faster than pure CPython and ~5x faster than PyPy; PyPy is ~31x faster than pure CPython.
+- **Two cores.** [`demo/coremark_dual_core.py`](demo/coremark_dual_core.py) builds a patched CoreMark that really uses both cores (the upstream release with a second core, v1.0.7, does not benchmark anything) and runs it: a valid result with equal CRCs on both cores, 491 CoreMark against 237 for the single-core build. One thread executes the two cores in turn, so the wall time per simulated second is ~2.2x that of one busy core: in a cloud container the native build ran one busy core at ~0.62x of real time and two at ~0.28x.
 - On a busy core the native build runs at roughly 0.4x of real time. The "~100x" above is a figure for idle time, not for instruction
   throughput - do not read it as the speed of a busy core.
 - One run per variant on one machine, not an average: treat the factors as an order of magnitude. The pure-CPython run was cut at the
@@ -671,6 +671,7 @@ embedding the emulator as a library (rp2040js's own primary use case, e.g. insid
   [Bootrom revisions](#bootrom-revisions) below - auto-downloaded and cached the same way firmware
   images are. rp2040js ships exactly one hardcoded bootrom build (`demo/bootrom.ts`, revision B1),
   with no way to select a different revision at all.
+- **Both cores** (`multicore_launch_core1()`, MicroPython's `_thread`, CoreMark on two cores), with a two-core lockstep oracle holding the compiled and the pure-Python loops identical - see the note at the top and [docs/records/0104](docs/records/0104-second-core-seams-and-architecture.md).
 - **An optional native-compiled backend** (`rp2040py.native`, Cython) for when pure-Python
   instruction dispatch is the bottleneck - see [Performance](#performance) above - alongside a
   pure-Python universal wheel for environments that can't load compiled extensions at all (e.g.

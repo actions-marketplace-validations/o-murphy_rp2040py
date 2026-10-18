@@ -127,6 +127,7 @@ def _run_batch(simulator: "Simulator", tick_batch: int, changed: list[bool]) -> 
     # instruction path as always, just with the redundant branch below.
     pending_cycles = 0
     pending_count = 0
+    idle_carry = 0.0  # idle time, in ticks, not yet handed to the PIO as whole cycles
     tick_budget = clock.ticks_to_next_alarm if clock.has_scheduled_alarm else None
     while i < 1000000 and not simulator.stopped and not changed[0]:
         # Checked every _TIME_CHECK_INTERVAL iterations regardless of idle/busy - not just
@@ -186,7 +187,11 @@ def _run_batch(simulator: "Simulator", tick_batch: int, changed: list[bool]) -> 
             # frozen solid whenever the CPU parks in WFI with an empty alarm queue could never
             # make the progress that would let the CPU wake up again - which is exactly how a
             # DMA-fed state machine is driven with no ARM program loaded (tests/test_pio.py).
-            cycles = int(idle_ticks / ticks_per_cycle) or 1
+            # The fraction of a cycle a jump leaves is carried to the next jump, as the CPU's own time carries it (`advance_cycles`): flooring each jump on its own dropped it every time (record 0105, finding 2).
+            idle_carry += idle_ticks
+            cycles = int(idle_carry / ticks_per_cycle)
+            idle_carry -= cycles * ticks_per_cycle
+            cycles = cycles or 1
             if tick_batch > 1:
                 tick_budget = clock.ticks_to_next_alarm if clock.has_scheduled_alarm else None
         else:

@@ -56,8 +56,8 @@ and `reference/` for those). The structure itself is decided in
 
 ### In progress / Proposed
 
-- [ ] [0105] the time architecture: an audit of the clock, the tick generators and who counts what | audit done; fixed: TIMER alarm fired early, PIO lost the fraction of a cycle on idle jumps, TIMER count is an integer; Timer32 (SysTick, PWM) and PIO derived from the clock proposed, not started
-- [ ] [0104] the second core: the audit of the seams and an architecture that costs nothing while core 1 is off | P0 (the seams) and P1 (core 1 in the C++ core, off by default; MicroPython `_thread` runs on it) done and measured; P2 (reference, oracle, shells; core 1 on by default, `--no-core1` / `RP2040PY_CORE1=0` to switch it off) done; open: `thread/disable_irq.py` hang, the CoreMark dual-core demo (upstream v1.0.7 is broken, a patched build is needed), per-core GPIO IRQs, GDB/wasm - the plan is in the record's "Next steps" - core 1 is now required (`_thread`, CoreMark 1.0.4+); the seams audited, the scheduling is decided (F2 main, A strict) and the accuracy contract accepted, 2026-10-18; order: seams, then core 1, then 0103's Python layer and the wider ABI
+- [ ] [0105] the time architecture: an audit of the clock, the tick generators and who counts what | audit done, TIMER/PIO fixes landed; `Timer32` and PIO-from-clock still proposed
+- [ ] [0104] the second core: seams, architecture, core 1 in the C++ core and the reference | P0-P2 done, core 1 on by default; open: `disable_irq.py` hang, dual-core CoreMark demo, per-core GPIO IRQs
 - [ ] [0103] a wasm backend: toolchain, packaging, backend selection and testing | in progress - the headless proof of concept is built and measured: the module imports nothing, `ziglang` is in `[build-system].requires`, the module is in every wheel, MicroPython boots under `wasmhost` and the PoC runs in Pyodide; wasm runs at 0.4-0.6x of the Cython build and 90-145x the pure-Python one (the synthetic loop; clang's inlining was the gap, fixed by hints in the source); next: `RP2040PY_BACKEND` (cython -> wasm -> python) and a backend axis in the tests
 - [ ] [0102] a C ABI around the core, for wasm (and, later, cffi) | first slice built inside [0103] (boot, run, run_n, the ROM / flash / SRAM / UART0 buffers, registers; imports nothing); the host callbacks - pins, UART input, I2C / SPI devices, ADC, USB - are not designed; cffi is a later consumer, not part of it
 - [ ] [0101] the chip's reset values, read on a real board | proposed, waiting for a board - the 56 registers on which a fresh chip is meant to differ from the SVD, to be measured; nothing changes in the chip until then
@@ -74,7 +74,7 @@ and `reference/` for those). The structure itself is decided in
 - [ ] [0061] one firmware command with `--family` | deferred, documented - step 1 is nearly free since [0059]
 - [ ] [0064] read-only state server (WebSocket/Socket.IO) + web visualizer | deferred, documented - the watching half of [0060]; blocked on devices describing themselves ([0049])
 - [ ] [0060] external I/O bridges (web viewer, host GPIO) | deferred, documented - names the wall-clock ceiling a pin-level bridge cannot escape
-- [ ] [0053] second core (core1) + inter-core FIFO | proposed, now required - core1 and the real FIFO unbuilt; the addendum settles that no OS thread is used; the audit and the open scheduling question are in [0104]
+- [ ] [0053] second core (core1) + inter-core FIFO | superseded in practice by [0104] (built there); kept for the execution-model addendum
 - [ ] [0048] CYW43 step 4 NAT bridge (supersedes [0045]) | 4a-4e merged and live-verified; open only for its own gaps - backpressure, AP mode, multi-guest, IPv6
 
 ### Implemented

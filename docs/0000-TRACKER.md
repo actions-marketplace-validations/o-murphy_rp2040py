@@ -57,7 +57,7 @@ and `reference/` for those). The structure itself is decided in
 ### In progress / Proposed
 
 - [ ] [0105] the time architecture: an audit of the clock, the tick generators and who counts what | audit done, TIMER/PIO fixes landed; `Timer32` and PIO-from-clock still proposed
-- [ ] [0104] the second core: seams, architecture, core 1 in the C++ core and the reference | P0-P2 done, core 1 on by default; open: `disable_irq.py` hang, dual-core CoreMark demo, per-core GPIO IRQs
+- [ ] [0104] the second core: seams, architecture, core 1 in the C++ core and the reference | P0-P2 done, core 1 on by default, `thread/` 24 of 33, dual-core CoreMark demo; open: per-core GPIO IRQs, GDB/wasm
 - [ ] [0103] a wasm backend: toolchain, packaging, backend selection and testing | in progress - the headless proof of concept is built and measured: the module imports nothing, `ziglang` is in `[build-system].requires`, the module is in every wheel, MicroPython boots under `wasmhost` and the PoC runs in Pyodide; wasm runs at 0.4-0.6x of the Cython build and 90-145x the pure-Python one (the synthetic loop; clang's inlining was the gap, fixed by hints in the source); next: `RP2040PY_BACKEND` (cython -> wasm -> python) and a backend axis in the tests
 - [ ] [0102] a C ABI around the core, for wasm (and, later, cffi) | first slice built inside [0103] (boot, run, run_n, the ROM / flash / SRAM / UART0 buffers, registers; imports nothing); the host callbacks - pins, UART input, I2C / SPI devices, ADC, USB - are not designed; cffi is a later consumer, not part of it
 - [ ] [0101] the chip's reset values, read on a real board | proposed, waiting for a board - the 56 registers on which a fresh chip is meant to differ from the SVD, to be measured; nothing changes in the chip until then

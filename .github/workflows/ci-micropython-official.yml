@@ -57,6 +57,10 @@ jobs:
             push: "import/*:"
             exclude: "import/import_file.py"
             strict: true
+          # The second core (record 0104): MicroPython's threads run on core 1. Report only: 23 of 33 pass, 9 skip themselves, and thread/disable_irq.py hangs (open, see the record).
+          - name: thread/ (the second core)
+            globs: "thread/*.py"
+            core1: "1"
           - name: CPU - float, inline assembly
             globs: "float/*.py inlineasm/thumb/*.py"
           - name: CPU - basics a-l
@@ -88,6 +92,7 @@ jobs:
         env:
           STRICT: ${{ matrix.group.strict && '1' || '0' }}
           PUSH: ${{ matrix.group.push }}
+          CORE1: ${{ matrix.group.core1 }}  # "1": run the files that use `_thread` (skipped in the groups that gate the build)
           EXCLUDE: ${{ matrix.group.exclude }}
           PER_TEST_TIMEOUT: "90"  # a CI runner is slower than a workstation: the stochastic basics/class_setname_hazard_rand.py took longer than 45 s there
         run: |

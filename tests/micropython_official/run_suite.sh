@@ -8,6 +8,7 @@
 #
 # usage: run_suite.sh <micropython checkout> <image tag> <output .md> [test glob relative to tests/ ...]
 #        (default globs: ports/rp2/*.py extmod/machine_*.py; GROUP_TITLE names the group in the summary; STRICT=1 gates, see above)
+#        CORE1=1 runs the files that use `_thread` (skipped otherwise: see below).
 #        RETRY_HANG=0 turns off the one retry a hanging file gets (default 1): see the loop.
 #        EXCLUDE="io/file1.py ..." marks tests that cannot pass on a board for a reason that is not the emulator's as SKIP (platform), and never runs them.
 #        PUSH="io/data: import/*:" copies those paths (relative to tests/, "src:destination on the board") onto the board after every emulator start: the tests that open
@@ -71,15 +72,15 @@ pass=0 fail=0 skip=0 hang=0
 shopt -s nullglob
 for t in $(for g in "${GLOBS[@]}"; do ls $g 2>/dev/null; done | sort); do
   log=$WORK/$(echo "$t" | tr / _).log
-  # `_thread` starts the second core (multicore_launch_core1 waits for the bootrom FIFO handshake): the emulator has no core 1 yet (record 0096, dual-core seams), so
-  # the file would only hang until the timeout and cost an emulator restart
+  # `_thread` starts the second core (multicore_launch_core1 waits for the bootrom FIFO handshake). The emulator has core 1 now (record 0104), but the groups that gate the build were
+  # decided without it: a file that uses `_thread` is skipped there unless CORE1=1 (the report-only `thread/` group sets it).
   case " ${EXCLUDE:-} " in
     *" $t "*)
       echo "| $t | :fast_forward: SKIP (platform, see the workflow) |" >>"$ROWS"
       echo "| $t | :fast_forward: SKIP (platform, see the workflow) |" >>"$BAD"
       echo "$t: SKIP (platform)"; skip=$((skip + 1)); continue ;;
   esac
-  if grep -q "_thread" "$t"; then
+  if [ "${CORE1:-0}" != 1 ] && grep -q "_thread" "$t"; then
     echo "| $t | :fast_forward: SKIP (needs core 1) |" >>"$ROWS"
     echo "| $t | :fast_forward: SKIP (needs core 1) |" >>"$BAD"
     echo "$t: SKIP (needs core 1)"; skip=$((skip + 1)); continue

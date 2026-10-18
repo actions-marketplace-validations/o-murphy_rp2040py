@@ -275,10 +275,10 @@ MUTATIONS: dict[str, tuple[str, str, int]] = {
         1,
     ),
     "systick_target_one": ("self.systick_alarm.target = 0", "self.systick_alarm.target = 1", 1),
-    "systick_pends_wrong": ("self.rp2040.core.pending_systick = True", "self.rp2040.core.pending_pend_sv = True", 1),
+    "systick_pends_wrong": ("self.core.pending_systick = True", "self.rp2040.core.pending_pend_sv = True", 1),
     "systick_no_interrupts_updated": (
-        "                self.rp2040.core.pending_systick = True\n                self.rp2040.core.interrupts_updated = True\n",
-        "                self.rp2040.core.pending_systick = True\n",
+        "                self.core.pending_systick = True\n                self.core.interrupts_updated = True\n",
+        "                self.core.pending_systick = True\n",
         1,
     ),
     "reset_reload_zero": ("self.write_uint32(SYST_RVR, 0xFFFFFF)", "self.write_uint32(SYST_RVR, 0)", 1),

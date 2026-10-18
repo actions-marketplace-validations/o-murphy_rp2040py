@@ -120,7 +120,11 @@ class RPWatchdog(BasePeripheral):
             self.timer.frequency = hz * TICKS_PER_COUNT  # decremented twice per tick (errata RP2040-E1)
         self.timer.enable = self._enable and hz > 0
         self.alarm.enable = self._enable and hz > 0
-        for name in ("timer", "ppb"):  # the tick is the TIMER's reference and SysTick's "external reference clock"
+        for name in (
+            "timer",
+            "ppb",
+            "ppb1",
+        ):  # the tick is the TIMER's reference and SysTick's "external reference clock" (of each core)
             consumer = getattr(self.rp2040, name, None)
             if consumer is not None:
                 consumer.tick_changed(hz)

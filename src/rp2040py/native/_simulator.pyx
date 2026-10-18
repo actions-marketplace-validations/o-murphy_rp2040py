@@ -94,6 +94,7 @@ def execute_batch(simulator: object, tick_batch: int) -> None:
     params.yield_budget_seconds = BATCH_YIELD_BUDGET_SECONDS
     params.check_interval = TIME_CHECK_INTERVAL
     params.paced_idle_nanos = PACED_IDLE_NANOS
+    params.quantum_cycles = rp2040.quantum_cycles  # two cores only: the cycles a core runs ahead of the other between synchronisation points (1: the exact scheduler)
 
     if rp2040._mcu.run(params, &result) == kBatchFault:
         raise_if_pending()

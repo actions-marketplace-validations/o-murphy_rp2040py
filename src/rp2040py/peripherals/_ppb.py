@@ -7,6 +7,7 @@ from rp2040py.utils.bit import u32
 from rp2040py.utils.timer32 import Timer32, Timer32PeriodicAlarm, TimerMode
 
 if TYPE_CHECKING:
+    from rp2040py._cortex_m0_core import CortexM0Core
     from rp2040py.rp2040 import RP2040
 
 __all__ = (
@@ -117,8 +118,9 @@ class RPPPB(BasePeripheral):
     Included peripheral: NVIC, SysTick timer
     """
 
-    def __init__(self, rp2040: "RP2040", name: str):
+    def __init__(self, rp2040: "RP2040", name: str, core: "CortexM0Core | None" = None):
         super().__init__(rp2040, name)
+        self._core = core  # the core this PPB belongs to (core 1's has its own PPB); None: the chip's `core`, looked up when used
         # Systick
         self.systick_count_flag = False
         self.systick_clk_source = False
@@ -137,8 +139,8 @@ class RPPPB(BasePeripheral):
             # The counter is a cycle RELOAD .. 1, 0 - the timer's TOP is RELOAD - so it comes round to RELOAD by itself
             self.systick_count_flag = True
             if self.systick_int_enable:
-                self.rp2040.core.pending_systick = True
-                self.rp2040.core.interrupts_updated = True
+                self.core.pending_systick = True
+                self.core.interrupts_updated = True
 
         self.systick_alarm = Timer32PeriodicAlarm(self.systick_timer, _on_systick_alarm)
 
@@ -158,6 +160,10 @@ class RPPPB(BasePeripheral):
         self.tick_hz = tick_hz
         self._retune_systick()
 
+    @property
+    def core(self) -> "CortexM0Core":
+        return self._core if self._core is not None else self.rp2040.core
+
     def _retune_systick(self) -> None:
         frequency = self.clk_sys if self.systick_clk_source else self.tick_hz
         if frequency and self.systick_timer.frequency != frequency:
@@ -165,7 +171,13 @@ class RPPPB(BasePeripheral):
         self.systick_timer.enable = self.systick_enable and frequency > 0  # a stopped reference clock stops the counter
 
     def _default_system_reset_request(self) -> None:
-        self.rp2040.core.reset()
+        if (
+            self._core is not None
+        ):  # core 1's own: it goes back to the state of a core held in reset; core 0 and the entry point are not its business
+            self._core.reset_state()
+            self.reset()
+            return
+        self.core.reset()
         self.reset()
         self.rp2040.leave_reset()
 
@@ -180,7 +192,7 @@ class RPPPB(BasePeripheral):
         self.systick_timer.set(0xFFFFFF)
 
     def read_uint32(self, offset: int) -> int:
-        core = self.rp2040.core
+        core = self.core
 
         if offset == CPUID:
             return 0x410CC601  # Verified against actual hardware
@@ -267,7 +279,7 @@ class RPPPB(BasePeripheral):
         return super().read_uint32(offset)
 
     def write_uint32(self, offset: int, value: int) -> None:
-        core = self.rp2040.core
+        core = self.core
 
         hardware_interrupt_mask = (1 << MAX_HARDWARE_IRQ) - 1
 

@@ -554,9 +554,13 @@ public:
     }
     RP2040PY_NOINLINE bool set_interrupt_slow(uint32_t irq, bool level) noexcept {
         if (irq_hook_ != nullptr) return irq_hook_(irq_hook_ctx_, irq, level);
-        // Every NVIC has the same system interrupts routed to it (datasheet 2.3.2) - except the two GPIO ones, which are one per bank PER CORE and are delivered by `set_interrupt_core()`.
+        return set_interrupt_unhooked(irq, level);
+    }
+    // The line to the cores, whatever hook is installed (what a hook that spies on the lines calls to let one through). Every NVIC has the same system interrupts routed to it (datasheet 2.3.2) -
+    // except the two GPIO ones, which are one per bank PER CORE and are delivered by `set_interrupt_core()`; core 1 is reached once it runs.
+    bool set_interrupt_unhooked(uint32_t irq, bool level) noexcept {
         if (!cpu.set_interrupt(irq, level)) return false;
-        return irq == kIrqIoBank0 || irq == kIrqIoQspi || cpu1.set_interrupt(irq, level);
+        return !cpu1_running_ || irq == kIrqIoBank0 || irq == kIrqIoQspi || cpu1.set_interrupt(irq, level);
     }
     // Core 1 starts to take the system lines. Until then nothing reaches it (the RTC and friends re-announce their lines a half-million times through an idle boot, and any extra work per
     // announcement shows): its pending bits are, at the start, those core 0 has now - a line's pending bit is its level here - without the two per-core GPIO lines.
@@ -723,7 +727,7 @@ public:
         cpu1.registers[13] = sp & 0xFFFFFFFCu;
         cpu1.registers[15] = pc & 0xFFFFFFFEu;
         start_core1_interrupts();
-        clk_changed_ = 1;
+        end_batch();
         return true;
     }
     // Core 1 goes back to the boot ROM (PSM.FRCE_OFF PROC1, `multicore_reset_core1()`): it stops, its FIFOs are emptied and a new handshake is needed.
@@ -732,7 +736,13 @@ public:
         irq_slow_ = irq_hook_ != nullptr ? 1 : 0;
         cpu1.reset_state();
         (void)sio_.reset_core1();
+        end_batch();
+    }
+    // Ends the batch in progress at its next iteration, so that `run()` can pick the other loop for the next one: the flag the loop already tests - the chip's own, and the host's if it gave one
+    // (`set_clk_changed_flag`; the host's must be writable, as the Simulator's byte is).
+    void end_batch() noexcept {
         clk_changed_ = 1;
+        if (host_.clk_changed != nullptr) *const_cast<volatile uint8_t*>(host_.clk_changed) = 1;
     }
 
 private:

@@ -135,6 +135,10 @@ cdef extern from "mcu.hpp" namespace "rp2040core":
         Clock& clock() noexcept
         void use_clock(Clock* clock) noexcept
         bool set_interrupt(uint32_t irq, bool level) noexcept
+        bool set_interrupt_unhooked(uint32_t irq, bool level) noexcept
+        Cpu& core(uint8_t index) noexcept
+        void set_core1_enabled(bool on) noexcept
+        bool core1_running() noexcept
         void set_irq_hook(McuIrqHook hook, void* ctx) noexcept
         bool set_dreq(uint32_t number, bool asserted) noexcept
         void attach_dma(DmaBlock* dma) noexcept

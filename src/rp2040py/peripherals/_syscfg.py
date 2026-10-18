@@ -33,6 +33,7 @@ class RP2040SysCfg(BasePeripheral):
     def __init__(self, rp2040, name) -> None:  # type: ignore[no-untyped-def]
         super().__init__(rp2040, name)
         self.proc1_nmi_mask = 0
+        self.rp2040.core1.interrupt_nmi_mask = 0
         self.proc_config = PROC_CONFIG_RESET
         self.proc_in_sync_bypass = 0
         self.proc_in_sync_bypass_hi = 0
@@ -71,6 +72,7 @@ class RP2040SysCfg(BasePeripheral):
             self.rp2040.core.interrupt_nmi_mask = value
         elif offset == PROC1_NMI_MASK:
             self.proc1_nmi_mask = value & 0xFFFFFFFF
+            self.rp2040.core1.interrupt_nmi_mask = self.proc1_nmi_mask  # core 1's NMI mask lives in core 1
         elif offset == PROC_CONFIG:
             self.proc_config = (self.proc_config & ~PROC_CONFIG_WRITABLE) | (value & PROC_CONFIG_WRITABLE)
         elif offset == PROC_IN_SYNC_BYPASS:

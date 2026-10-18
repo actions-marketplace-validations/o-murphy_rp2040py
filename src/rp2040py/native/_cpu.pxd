@@ -27,7 +27,7 @@ cdef extern from "cpu.hpp" namespace "rp2040core":
         uint32_t registers[16]
         uint32_t banked_sp
         uint64_t cycles
-        bool event_registered, waiting
+        bool event_registered, waiting, event_wait
         bool n, c, z, v
         uint32_t break_rewind
         bool pm
@@ -43,6 +43,7 @@ cdef extern from "cpu.hpp" namespace "rp2040core":
         Cpu() noexcept
         void init(Bus* bus, const CpuHost& host, uint32_t max_hardware_irq) noexcept
         bool reset() noexcept
+        void reset_state() noexcept
         uint32_t apsr() noexcept
         void set_apsr(uint32_t value) noexcept
         uint32_t x_psr() noexcept

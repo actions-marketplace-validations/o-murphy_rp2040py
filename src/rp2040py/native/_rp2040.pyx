@@ -658,6 +658,9 @@ cdef class RP2040:
         self._attach_memory_regions()
         self._window_owners = {}
         self.core = CortexM0Core(self)
+        self.core1 = CortexM0Core(self, 1)  # the second core (record 0104): the chip's C++ `cpu1`, not run until a launch
+        self.cores = (self.core, self.core1)
+        self.quantum_cycles = 16  # two cores only (record 0104): 16 is the F2 scheduler, 1 the exact one
 
     cdef void _attach_memory_regions(self):
         """Hands the C++ memory map pointers into the four buffers above (record 0096, Phase 1, D2).
@@ -1553,7 +1556,16 @@ cdef class RP2040:
         return <size_t> &self._mcu
 
     def _native_set_interrupt(self, irq: int, value: bool) -> None:
-        self.core.set_interrupt(irq, value)
+        if not self._mcu.set_interrupt_unhooked(<uint32_t> irq, True if value else False):  # (not through a hook: a spy calls this to let the line through) every NVIC (core 1's once it runs) gets the system lines; waking a core took an exception that failed
+            raise_if_pending()
+
+    def set_core1_enabled(self, on):
+        """The inter-core FIFOs and the boot ROM's launch handshake (which the SIO answers): off by default, as the stub they replace was."""
+        self._mcu.set_core1_enabled(True if on else False)
+
+    @property
+    def core1_running(self):
+        return self._mcu.core1_running()
 
     @property
     def set_interrupt(self):

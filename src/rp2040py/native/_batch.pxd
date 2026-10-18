@@ -31,6 +31,7 @@ cdef extern from "batch.hpp" namespace "rp2040core":
         double yield_budget_seconds
         int check_interval
         double paced_idle_nanos
+        int quantum_cycles
 
     cdef const int kStopFault
     cdef const int kStopCeiling

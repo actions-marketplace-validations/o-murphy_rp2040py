@@ -168,7 +168,9 @@ cdef class RPClocks:
             else self._block.add_sys_sink(_ppb_python_sink, <void*> self)
         )
         # core 1's own SysTick (the chip builds it, the Python layer has no view of it yet): the tree feeds it as it feeds core 0's
-        ok = ok and self._block.add_sys_sink(ppb_sys_sink, <void*> <size_t> rp2040._native_ppb_address(1))
+        core1_ppb_address = getattr(rp2040, "_native_ppb_address", None)  # (a stand-in chip of a test has no second core)
+        if core1_ppb_address is not None:
+            ok = ok and self._block.add_sys_sink(ppb_sys_sink, <void*> <size_t> core1_ppb_address(1))
         ok = ok and (
             self._block.add_sys_sink(pwm_sys_sink, <void*> (<RPPWM> pwm)._block)
             if isinstance(pwm, RPPWM)

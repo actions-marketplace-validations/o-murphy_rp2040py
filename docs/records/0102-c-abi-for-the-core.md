@@ -1,6 +1,6 @@
 # 0102 - a C ABI around the core, for wasm (and, later, cffi)
 
-Status: proposed (2026-10-16), **documentation only - nothing designed in detail, nothing built.** Companion to [0096](0096-cpp-mcu-core.md): this is the "host interface" of its gate G6 and the entry point of its Phase 6 (wasm). Written down on the maintainer's call ("for wasm"); per `CLAUDE.md` a note about what should eventually happen is not a go-ahead to implement it.
+Status: proposed (2026-10-16); **a first slice is built inside [0103](0103-wasm-backend.md) (2026-10-17/18): `native/wasm/rp2040_wasm.cpp`, the headless subset. The rest - the host callbacks - is documentation only, nothing designed in detail.** Companion to [0096](0096-cpp-mcu-core.md): this is the "host interface" of its gate G6 and the entry point of its Phase 6 (wasm). Written down on the maintainer's call ("for wasm"); per `CLAUDE.md` a note about what should eventually happen is not a go-ahead to implement it.
 
 ## Why
 
@@ -37,3 +37,4 @@ The core is C++17 (classes, templates, no exceptions/RTTI/STL). A wasm module ca
 ## Progress log
 
 - 2026-10-16: proposed (documentation only).
+- 2026-10-18: **A first slice is built, inside 0103.** `src/rp2040py/native/wasm/rp2040_wasm.cpp` exports `rp2040_rom` / `rp2040_flash` / `rp2040_sram` / `rp2040_uart` (pointers into the module's own memory), `rp2040_erase_flash`, `rp2040_boot` (a build on the first call, a power-on reset after), `rp2040_run` / `rp2040_run_n`, `rp2040_register` / `rp2040_set_register`, and the UART0 bytes, the dropped count and the warning count out; the module imports nothing. Of the open questions: (1) none yet - the only host callback, `uart_byte`, is answered inside the module, so the struct-or-functions choice is not forced; (4) the file sits in `native/wasm/`, a sibling of `core/`, by the layout rule, awaiting the maintainer's word. Still undesigned: pins, UART input, I2C / SPI devices, ADC, USB, the clock tree hooks - every callback of `McuHost` the module does not answer itself.

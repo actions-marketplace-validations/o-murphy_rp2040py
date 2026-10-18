@@ -50,16 +50,22 @@ public:
     MemoryMap mem;
     WindowMap windows;
 
+    // Which core is making the access: 0 or 1 (record 0104, D2). The scheduler writes it when it changes core, never per access; the SIO and the PPB - the only blocks banked per core -
+    // read it, and RAM, flash and every other window never look at it. Always 0 while core 1 is not running.
+    uint8_t initiator = 0;
+
     void init(const BusHost& host) noexcept { host_ = host; }
     // The handlers get the offset inside their block: the address minus 0xD0000000 for SIO, `address & 0xFFF` for the PPB.
     void set_sio(const WindowHandler& handler) noexcept { sio_ = handler; has_sio_ = handler.read32 && handler.write32; }
-    void set_ppb(const WindowHandler& handler) noexcept { ppb_ = handler; has_ppb_ = handler.read32 && handler.write32; }
+    // One handler for both cores until `set_ppb_core()` gives core 1 its own (the PPB's SysTick, SCR, MPU and NVIC window are banked: record 0104, D3); the access picks `ppb_[initiator]`.
+    void set_ppb(const WindowHandler& handler) noexcept { ppb_[0] = ppb_[1] = handler; has_ppb_ = handler.read32 && handler.write32; }
+    void set_ppb_core(uint8_t core, const WindowHandler& handler) noexcept { ppb_[core & 1] = handler; }
 
     RP2040PY_ALWAYS_INLINE uint32_t read32(uint32_t addr) noexcept {
         if (addr & 0x3) warn(kBusWarnUnalignedRead, addr);
         uint32_t word;
         if (mem.read32(addr, &word) != kNotHandled) return word;
-        if (has_ppb_ && (addr >> 12) == kPpbKey) return ppb_.read32(ppb_.ctx, addr & 0xFFF);
+        if (has_ppb_ && (addr >> 12) == kPpbKey) return ppb_[initiator].read32(ppb_[initiator].ctx, addr & 0xFFF);
         if (has_sio_ && addr - kSioBase < kSioSpan) return sio_.read32(sio_.ctx, addr - kSioBase);
         if (windows.read32(addr, &word) != kNoWindow) return word;
         warn(kBusWarnInvalidRead, addr);
@@ -90,7 +96,7 @@ public:
         } else if (has_sio_ && addr - kSioBase < kSioSpan) {
             sio_.write32(sio_.ctx, addr - kSioBase, value, kAtomicNormal);
         } else if (has_ppb_ && (addr >> 12) == kPpbKey) {
-            ppb_.write32(ppb_.ctx, addr & 0xFFF, value, kAtomicNormal);
+            ppb_[initiator].write32(ppb_[initiator].ctx, addr & 0xFFF, value, kAtomicNormal);
         } else if (windows.write32(addr, value) == kNoWindow) {
             warn(kBusWarnUndefinedWrite, addr);
         }
@@ -122,7 +128,7 @@ private:
     }
 
     BusHost host_;
-    WindowHandler sio_{}, ppb_{};
+    WindowHandler sio_{}, ppb_[2]{};
     bool has_sio_ = false, has_ppb_ = false;
 };
 

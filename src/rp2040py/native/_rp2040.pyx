@@ -1510,8 +1510,8 @@ cdef class RP2040:
     def _native_sio_address(self):
         return <size_t> &self._mcu.sio()
 
-    def _native_ppb_address(self):
-        return <size_t> &self._mcu.ppb()
+    def _native_ppb_address(self, core=0):
+        return <size_t> &self._mcu.ppb(<uint8_t> core)
 
     def _native_watchdog_address(self):
         return <size_t> &self._mcu.watchdog()

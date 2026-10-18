@@ -65,9 +65,28 @@ constexpr uint32_t QSPI_MASK = 0x3F;       // GPIO_HI_OUT / GPIO_HI_OE: the six 
 constexpr int64_t INTERP_ADD_MASK = 0xFFFFFF;  // INTERPx_ACCUMy_ADD is 23:0 (datasheet, and SIO_INTERP0_ACCUM0_ADD_BITS 0x00ffffff in pico-sdk's sio.h)
 }  // namespace sio_regs
 
+// What SIO keeps PER CORE (datasheet 2.3.1: each processor has its own divider, its own two interpolators and its own end of each FIFO); the spinlocks and the GPIO registers are shared.
+// Core 1's copy is idle until core 1 runs (record 0104, D3). The FIFOs will join these in P1.
+struct SioCoreState {
+    int64_t div_dividend = 0, div_divisor = 0, div_remainder = 0;  // reset: the datasheet's 0
+    double div_quotient = 0;
+    uint32_t div_csr = 1;  // DIV_CSR.READY resets to 1
+    Interpolator interp[2] = {Interpolator(0), Interpolator(1)};
+
+    void reset() noexcept {
+        div_dividend = 0;
+        div_divisor = 0;
+        div_quotient = 0;
+        div_remainder = 0;
+        div_csr = 1;
+        interp[0].reset();
+        interp[1].reset();
+    }
+};
+
 class SioBlock {
 public:
-    SioBlock() noexcept : interp_{Interpolator(0), Interpolator(1)} {}
+    SioBlock() noexcept = default;
     SioBlock(const SioBlock&) = delete;
     SioBlock& operator=(const SioBlock&) = delete;
 
@@ -78,47 +97,46 @@ public:
 
     // The registers the rest of the chip (and tests) read and write directly, as plain attributes of the Python block.
     uint32_t gpio_value = 0, gpio_output_enable = 0, qspi_gpio_value = 0, qspi_gpio_output_enable = 0;
-    int64_t div_dividend = 0, div_divisor = 0, div_remainder = 0;  // reset: the datasheet's 0
-    double div_quotient = 0;
-    uint32_t div_csr = 1, spin_lock = 0;  // DIV_CSR.READY resets to 1
+    uint32_t spin_lock = 0;
 
-    Interpolator& interp(int index) noexcept { return interp_[index]; }
+    // Core `index`'s divider and interpolators. `interp()` is core 0's, which is what the shells and the tests look at.
+    SioCoreState& core(int index) noexcept { return core_[index & 1]; }
+    Interpolator& interp(int index) noexcept { return core_[0].interp[index]; }
+
+    // Which core is accessing: the bus's `initiator` byte, read on every divider, interpolator and CPUID access (null: always core 0, a block made without a bus).
+    void bind_initiator(const uint8_t* initiator) noexcept { initiator_ = initiator; }
 
     void reset() noexcept {
         gpio_value = gpio_output_enable = qspi_gpio_value = qspi_gpio_output_enable = 0;
-        div_dividend = 0;
-        div_divisor = 0;
-        div_quotient = 0;
-        div_remainder = 0;
-        div_csr = 1;
         spin_lock = 0;
-        interp_[0].reset();
-        interp_[1].reset();
+        core_[0].reset();
+        core_[1].reset();
     }
 
     // The hardware divider: recomputes quotient/remainder from the current operands and charges 8 CPU cycles.
     // Returns false when the divide failed (see kSioFailDivideByZero).
     bool update_hardware_divider(bool signed_division) noexcept {
+        SioCoreState& c = active();
         using interp_detail::s32;
         using interp_detail::u32;
-        if (div_divisor != 0 && (signed_division ? s32(div_divisor) : u32(div_divisor)) == 0) {
-            port_.warn(kSioFailDivideByZero, 0, div_divisor);
+        if (c.div_divisor != 0 && (signed_division ? s32(c.div_divisor) : u32(c.div_divisor)) == 0) {
+            port_.warn(kSioFailDivideByZero, 0, c.div_divisor);
             return false;
         }
-        if (div_divisor == 0) {
-            div_quotient = div_dividend > 0 ? -1.0 : 1.0;
-            div_remainder = div_dividend;
+        if (c.div_divisor == 0) {
+            c.div_quotient = c.div_dividend > 0 ? -1.0 : 1.0;
+            c.div_remainder = c.div_dividend;
         } else if (signed_division) {
-            const int64_t dividend = s32(div_dividend), divisor = s32(div_divisor);
-            div_quotient = static_cast<double>(dividend) / static_cast<double>(divisor);
+            const int64_t dividend = s32(c.div_dividend), divisor = s32(c.div_divisor);
+            c.div_quotient = static_cast<double>(dividend) / static_cast<double>(divisor);
             // JS `%`: truncating remainder, sign of the dividend - computed as the Python does, a - b*int(a/b).
-            div_remainder = dividend - divisor * static_cast<int64_t>(static_cast<double>(dividend) / static_cast<double>(divisor));
+            c.div_remainder = dividend - divisor * static_cast<int64_t>(static_cast<double>(dividend) / static_cast<double>(divisor));
         } else {
-            const int64_t dividend = u32(div_dividend), divisor = u32(div_divisor);
-            div_quotient = static_cast<double>(dividend) / static_cast<double>(divisor);
-            div_remainder = dividend % divisor;
+            const int64_t dividend = u32(c.div_dividend), divisor = u32(c.div_divisor);
+            c.div_quotient = static_cast<double>(dividend) / static_cast<double>(divisor);
+            c.div_remainder = dividend % divisor;
         }
-        div_csr = 0b11;
+        c.div_csr = 0b11;
         if (host_.add_cycles) host_.add_cycles(host_.ctx, 8);
         return true;
     }
@@ -145,15 +163,15 @@ public:
             case GPIO_HI_OUT_SET: case GPIO_HI_OUT_CLR: case GPIO_HI_OUT_XOR:
             case GPIO_HI_OE_SET: case GPIO_HI_OE_CLR: case GPIO_HI_OE_XOR:
                 return 0;  // the Python block has a TODO "verify with silicone" here: the write-only aliases read as 0
-            case CPUID: return 0;  // always core 0
+            case CPUID: return initiator();
             case SPINLOCK_ST: return spin_lock;
-            case DIV_UDIVIDEND: case DIV_SDIVIDEND: return static_cast<double>(div_dividend);
-            case DIV_UDIVISOR: case DIV_SDIVISOR: return static_cast<double>(div_divisor);
+            case DIV_UDIVIDEND: case DIV_SDIVIDEND: return static_cast<double>(active().div_dividend);
+            case DIV_UDIVISOR: case DIV_SDIVISOR: return static_cast<double>(active().div_divisor);
             case DIV_QUOTIENT:
-                div_csr &= ~0b10u;
-                return div_quotient;
-            case DIV_REMAINDER: return static_cast<double>(div_remainder);
-            case DIV_CSR: return div_csr;
+                active().div_csr &= ~0b10u;
+                return active().div_quotient;
+            case DIV_REMAINDER: return static_cast<double>(active().div_remainder);
+            case DIV_CSR: return active().div_csr;
             case FIFO_ST: case FIFO_WR: case FIFO_RD:
                 port_.warn(kSioWarnFifo, offset, 0);
                 return 4294967295.0;
@@ -162,7 +180,7 @@ public:
         for (int i = 0; i < 2; ++i) {
             const uint32_t base = i == 0 ? INTERP0 : INTERP1;
             if (offset < base || offset >= base + 0x40) continue;
-            Interpolator& ip = interp_[i];
+            Interpolator& ip = active().interp[i];
             switch (offset - base) {
                 case I_ACCUM0: return static_cast<double>(ip.accum0);
                 case I_ACCUM1: return static_cast<double>(ip.accum1);
@@ -223,12 +241,12 @@ public:
             case GPIO_HI_OE_SET: qspi_gpio_output_enable |= qspi_masked; break;
             case GPIO_HI_OE_CLR: qspi_gpio_output_enable &= inverted; break;
             case GPIO_HI_OE_XOR: qspi_gpio_output_enable ^= qspi_masked; break;
-            case DIV_UDIVIDEND: div_dividend = value; if (!update_hardware_divider(false)) return false; break;
-            case DIV_SDIVIDEND: div_dividend = value; if (!update_hardware_divider(true)) return false; break;
-            case DIV_UDIVISOR: div_divisor = value; if (!update_hardware_divider(false)) return false; break;
-            case DIV_SDIVISOR: div_divisor = value; if (!update_hardware_divider(true)) return false; break;
-            case DIV_QUOTIENT: div_quotient = static_cast<double>(value); div_csr = 0b11; break;
-            case DIV_REMAINDER: div_remainder = value; div_csr = 0b11; break;
+            case DIV_UDIVIDEND: active().div_dividend = value; if (!update_hardware_divider(false)) return false; break;
+            case DIV_SDIVIDEND: active().div_dividend = value; if (!update_hardware_divider(true)) return false; break;
+            case DIV_UDIVISOR: active().div_divisor = value; if (!update_hardware_divider(false)) return false; break;
+            case DIV_SDIVISOR: active().div_divisor = value; if (!update_hardware_divider(true)) return false; break;
+            case DIV_QUOTIENT: active().div_quotient = static_cast<double>(value); active().div_csr = 0b11; break;
+            case DIV_REMAINDER: active().div_remainder = value; active().div_csr = 0b11; break;
             default:
                 if (!write_interpolator(offset, value)) {
                     port_.warn(kSioWarnWriteInvalid, offset, value);
@@ -258,7 +276,7 @@ private:
         for (int i = 0; i < 2; ++i) {
             const uint32_t base = i == 0 ? INTERP0 : INTERP1;
             if (offset < base || offset >= base + 0x40) continue;
-            Interpolator& ip = interp_[i];
+            Interpolator& ip = active().interp[i];
             switch (offset - base) {
                 case I_ACCUM0: ip.accum0 = value; break;
                 case I_ACCUM1: ip.accum1 = value; break;
@@ -278,9 +296,13 @@ private:
         return false;
     }
 
+    uint32_t initiator() const noexcept { return initiator_ != nullptr ? (*initiator_ & 1u) : 0u; }
+    SioCoreState& active() noexcept { return core_[initiator()]; }
+
     BlockPort port_;
     SioHost host_;
-    Interpolator interp_[2];
+    SioCoreState core_[2];
+    const uint8_t* initiator_ = nullptr;
 };
 
 }  // namespace rp2040core

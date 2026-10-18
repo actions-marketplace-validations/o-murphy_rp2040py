@@ -32,11 +32,15 @@ cdef extern from "sio.hpp" namespace "rp2040core":
         void set_base01(int64_t value) noexcept
         void reset() noexcept
 
-    cdef cppclass SioBlock:
-        uint32_t gpio_value, gpio_output_enable, qspi_gpio_value, qspi_gpio_output_enable
+    cdef cppclass SioCoreState:
         int64_t div_dividend, div_divisor, div_remainder
         double div_quotient
-        uint32_t div_csr, spin_lock
+        uint32_t div_csr
+
+    cdef cppclass SioBlock:
+        uint32_t gpio_value, gpio_output_enable, qspi_gpio_value, qspi_gpio_output_enable
+        uint32_t spin_lock
+        SioCoreState& core(int index) noexcept
         SioBlock() noexcept
         void init(const ChipPorts* ports, uint32_t block, const SioHost& host) noexcept
         void reset() noexcept

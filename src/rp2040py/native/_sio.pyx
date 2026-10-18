@@ -258,43 +258,43 @@ cdef class RPSIO:
 
     @property
     def div_dividend(self):
-        return self._block.div_dividend
+        return self._block.core(0).div_dividend
 
     @div_dividend.setter
     def div_dividend(self, value):
-        self._block.div_dividend = <int64_t> value
+        self._block.core(0).div_dividend = <int64_t> value
 
     @property
     def div_divisor(self):
-        return self._block.div_divisor
+        return self._block.core(0).div_divisor
 
     @div_divisor.setter
     def div_divisor(self, value):
-        self._block.div_divisor = <int64_t> value
+        self._block.core(0).div_divisor = <int64_t> value
 
     @property
     def div_quotient(self):
-        return self._block.div_quotient
+        return self._block.core(0).div_quotient
 
     @div_quotient.setter
     def div_quotient(self, value):
-        self._block.div_quotient = <double> value
+        self._block.core(0).div_quotient = <double> value
 
     @property
     def div_remainder(self):
-        return self._block.div_remainder
+        return self._block.core(0).div_remainder
 
     @div_remainder.setter
     def div_remainder(self, value):
-        self._block.div_remainder = <int64_t> value
+        self._block.core(0).div_remainder = <int64_t> value
 
     @property
     def div_csr(self):
-        return self._block.div_csr
+        return self._block.core(0).div_csr
 
     @div_csr.setter
     def div_csr(self, value):
-        self._block.div_csr = <uint32_t> (<int64_t> value)
+        self._block.core(0).div_csr = <uint32_t> (<int64_t> value)
 
     @property
     def spin_lock(self):

@@ -110,6 +110,12 @@ public:
         return true;
     }
 
+    // Back to the power-on state with no bus access (no vector fetch): what a core that is not running - core 1 until it is launched - is kept in.
+    void reset_state() noexcept { clear_state(); }
+
+    // The other core, if there is one: `SEV` sets its event register too (datasheet 2.3.3: the event signals are cross-wired between the two processors). Null on a single core.
+    Cpu* peer = nullptr;
+
     // ---- register views with the Python properties' masking ---------------------------------------------------------------
     uint32_t apsr() const noexcept {
         return (n ? 0x80000000u : 0) | (z ? 0x40000000u : 0) | (c ? 0x20000000u : 0) | (v ? 0x10000000u : 0);

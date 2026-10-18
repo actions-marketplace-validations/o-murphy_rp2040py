@@ -440,6 +440,51 @@ int main() {
         m.bus.write32(0x40058000 + 0x2C, 12 | (1u << 9));  // WATCHDOG.TICK: 12 cycles of clk_ref, enabled -> 1 MHz
         CHECK(m.timer().tick_hz() == 1e6 && m.ppb().tick_hz() == 1e6);  // the TIMER and SysTick follow it in C++ ...
         CHECK(world.ticks >= 1 && world.last_tick == 1e6);              // ... and then the host hears of it
+        CHECK(m.ppb(1).tick_hz() == 1e6);  // core 1's SysTick is fed the tick as well (the watchdog tells each core's PPB)
+
+        // The second core's seams (record 0104, P0): present, inactive, and reached only through the bus's `initiator`.
+        {
+            CHECK(m.cpu1.initialised() && &m.core(0) == &m.cpu && &m.core(1) == &m.cpu1 && m.bus.initiator == 0);
+            // CPUID is the initiator; the divider and the interpolators are per core.
+            CHECK(m.bus.read32(0xD0000000 + 0x000) == 0);
+            m.bus.initiator = 1;
+            CHECK(m.bus.read32(0xD0000000 + 0x000) == 1);
+            m.bus.write32(0xD0000000 + 0x60, 100);  // DIV_UDIVIDEND
+            m.bus.write32(0xD0000000 + 0x64, 7);    // DIV_UDIVISOR
+            CHECK(m.bus.read32(0xD0000000 + 0x70) == 14);  // DIV_QUOTIENT: core 1's own result
+            const uint64_t cycles0 = m.cpu.cycles, cycles1 = m.cpu1.cycles;
+            m.bus.write32(0xD0000000 + 0x64, 9);  // another divide: its cycles go to the initiating core
+            CHECK(m.cpu1.cycles > cycles1 && m.cpu.cycles == cycles0);
+            m.bus.initiator = 0;
+            CHECK(m.bus.read32(0xD0000000 + 0x60) == 0 && m.bus.read32(0xD0000000 + 0x70) == 0);  // core 0's divider was never written
+            // The PPB window is banked: core 1's SysTick reload is not core 0's.
+            m.bus.write32(0xE000E014, 0x1234);  // SYST_RVR on core 0
+            m.bus.initiator = 1;
+            CHECK(m.bus.read32(0xE000E014) != 0x1234);
+            m.bus.write32(0xE000E014, 0x4321);
+            CHECK(m.bus.read32(0xE000E014) == 0x4321);
+            m.bus.initiator = 0;
+            CHECK(m.bus.read32(0xE000E014) == 0x1234);
+            // A system interrupt reaches both NVICs; a GPIO bank one reaches the core it is for.
+            CHECK((m.cpu1.pending_interrupts & (1u << 5)) == 0 && !m.core1_running());
+            CHECK(m.set_interrupt(5, true) && (m.cpu.pending_interrupts & (1u << 5)) && !(m.cpu1.pending_interrupts & (1u << 5)));  // (not delivered while core 1 is not running ...)
+            m.start_core1_interrupts();
+            CHECK(m.core1_running() && (m.cpu1.pending_interrupts & (1u << 5)));  // ... but it starts with the levels the lines have
+            CHECK(m.set_interrupt(5, false) && !(m.cpu.pending_interrupts & (1u << 5)) && !(m.cpu1.pending_interrupts & (1u << 5)));
+            CHECK(m.set_interrupt(5, true) && (m.cpu1.pending_interrupts & (1u << 5)));
+            CHECK(m.set_interrupt(5, false) && !(m.cpu1.pending_interrupts & (1u << 5)));
+            CHECK(m.set_interrupt(kIrqIoBank0, true) && (m.cpu.pending_interrupts & (1u << kIrqIoBank0)) && !(m.cpu1.pending_interrupts & (1u << kIrqIoBank0)));
+            CHECK(m.set_interrupt_core(1, kIrqIoBank0, true) && (m.cpu1.pending_interrupts & (1u << kIrqIoBank0)));
+            CHECK(m.set_interrupt(kIrqIoBank0, false) && m.set_interrupt_core(1, kIrqIoBank0, false));
+            // SEV on one core sets the other's event register (datasheet 2.3.3).
+            m.cpu1.event_registered = false;
+            static uint8_t sev_ram[16] = {0x40, 0xBF};  // sev
+            m.bus.mem.attach({0x30000000, 16, 16, 0xFFFFFFFF, sev_ram, kSubWord});
+            m.cpu.registers[15] = 0x30000000;
+            const int sev_cycles = m.cpu.execute();
+            CHECK(sev_cycles >= 0 && m.cpu1.event_registered);
+            m.cpu1.event_registered = false;
+        }
         m.bus.write32(0xE000ED0C, 0x05FA0004);  // AIRCR: VECTKEY | SYSRESETREQ
         CHECK(world.resets == 1);
 

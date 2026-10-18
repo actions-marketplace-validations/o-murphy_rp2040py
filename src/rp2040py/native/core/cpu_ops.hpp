@@ -523,6 +523,7 @@ RP2040PY_OP(op_sev) {
     RP2040PY_UNUSED_OPERANDS;
     // ARMv6-M (B1.5.18): SEV sets the Event Register of every PE, including the one executing it (record 0050).
     core.event_registered = true;
+    if (core.peer != nullptr) core.peer->event_registered = true;  // (a sticky flag: the other core's next WFE does not sleep)
     core.log(kCpuLogSev, 0, 0, 0);
     RP2040PY_CHECK_FAILED();
     return 1;

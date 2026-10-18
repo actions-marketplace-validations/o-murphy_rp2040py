@@ -121,7 +121,7 @@ constexpr uint32_t kUsbBase = 0x50110000, kIrqUsb = 5;  // USBCTRL_REGS_BASE, US
 constexpr uint32_t kXipCtrlBase = 0x14000000, kSsiBase = 0x18000000, kXipAuxBase = 0x50400000, kIrqXip = 6, kDreqXipStream = 37, kDreqXipSsiTx = 38;  // XIP_CTRL_BASE, XIP_SSI_BASE, XIP_AUX_BASE, XIP_IRQ, DREQ_XIP_STREAM / _SSITX (DREQ_XIP_SSIRX, 39, follows it)
 constexpr uint32_t kPio0Base = 0x50200000, kPio1Base = 0x50300000, kIrqPio0 = 7, kIrqPio1 = 9;  // PIO0_BASE, PIO1_BASE, PIO0_IRQ_0, PIO1_IRQ_0
 constexpr uint32_t kIoBank0Base = 0x40014000, kIoQspiBase = 0x40018000, kPadsBank0Base = 0x4001C000, kPadsQspiBase = 0x40020000;
-constexpr uint32_t kIrqIoBank0 = 13;  // IO_IRQ_BANK0
+constexpr uint32_t kIrqIoBank0 = 13, kIrqIoQspi = 14;  // IO_IRQ_BANK0, IO_IRQ_QSPI
 constexpr uint32_t kWatchdogBase = 0x40058000, kDmaBase = 0x50000000;
 constexpr uint32_t kIrqDma[2] = {11, 12};
 constexpr uint32_t kMaxHardwareIrq = 25;  // the highest NVIC line the chip wires (RTC_IRQ)
@@ -180,6 +180,7 @@ public:
         clocks_.detach();
         watchdog_.detach();
         ppb_.detach();
+        ppb1_.detach();
         own_dma_.detach();
         rosc_.detach();
         timer_.detach();
@@ -208,6 +209,14 @@ public:
             cpu_host.failed = host.failed;
             cpu.init(&bus, cpu_host, kMaxHardwareIrq);
         }
+        if (!cpu1.initialised()) {  // core 1: present from the start, never run until it is launched (record 0104, P0); it shares the bus and the opcode table
+            CpuHost cpu_host;
+            cpu_host.failed = host.failed;
+            cpu1.init(&bus, cpu_host, kMaxHardwareIrq);
+            cpu1.reset_state();
+        }
+        cpu.peer = &cpu1;
+        cpu1.peer = &cpu;
         // The clock tree (CLOCKS, both PLLs, the crystal and the ring oscillator): built before the blocks that run from it. The PLLs take the crystal from the tree, the oscillators and the PLL
         // registers tell the tree when they change, and the tree reads both oscillators off their blocks. The crystal's frequency is the board's: `set_crystal_hz()`.
         PllHost ps;
@@ -269,6 +278,7 @@ public:
         sh.add_cycles = sio_add_cycles;
         sh.ctx = this;
         sio_.init(&ports_, kMcuBlockSio, sh);
+        sio_.bind_initiator(&bus.initiator);  // the divider, interpolators and CPUID are per core: the bus says which
         bus.set_sio(sio_.window_handler());
         for (uint32_t b = 0; b < 2; ++b) {
             PinBank& bank = pins(b);
@@ -301,6 +311,8 @@ public:
         pp.ctx = this;
         ppb_.init(&cpu, clock_, &ports_, kMcuBlockPpb, pp, clocks_.clk_sys(), kMaxHardwareIrq);
         bus.set_ppb(ppb_.window_handler());
+        ppb1_.init(&cpu1, clock_, &ports_, kMcuBlockPpb, pp, clocks_.clk_sys(), kMaxHardwareIrq);  // core 1's own SysTick / SCR / MPU / NVIC window, reached when the bus's initiator is 1
+        bus.set_ppb_core(1, ppb1_.window_handler());
 
         WatchdogHost wd;
         wd.trigger = watchdog_trigger;
@@ -447,6 +459,9 @@ public:
             resets_wdsel = kResetsBitsMask;
         }
         if (!cpu.reset()) return false;
+        cpu1_running_ = false;
+        irq_slow_ = irq_hook_ != nullptr ? 1 : 0;
+        cpu1.reset_state();  // (core 1 is not running: its state goes back to power-on without a vector fetch)
         if (!reset_step(kMcuBlockPpb, world)) return false;
         if ((psm_wdsel & kPsmWdselSio) != 0 && !reset_step(kMcuBlockSio, world)) return false;
         if ((psm_wdsel & kPsmWdselClocks) != 0 && !reset_step(kMcuBlockClocks, world)) return false;
@@ -499,6 +514,7 @@ public:
     SioBlock& sio() noexcept { return sio_; }
     PwmBlock& pwm() noexcept { return pwm_; }
     PpbBlock& ppb() noexcept { return ppb_; }
+    PpbBlock& ppb(uint8_t core) noexcept { return core != 0 ? ppb1_ : ppb_; }
     WatchdogBlock& watchdog() noexcept { return watchdog_; }
     DmaBlock& dma() noexcept { return own_dma_; }
     ClocksBlock& clocks() noexcept { return clocks_; }
@@ -513,7 +529,10 @@ public:
 
     // The parts the chip owns. A host fills the bus's memory map and window table and calls `cpu.init(&bus, host, max_irq)` itself until the host interface does it.
     Cpu cpu;
+    Cpu cpu1;  // core 1: initialised by build(), inactive (nothing steps it) until a launch makes it run
     Bus bus;
+    // The core by number (0 or 1).
+    Cpu& core(uint8_t index) noexcept { return index != 0 ? cpu1 : cpu; }
 
     // The clock the chip runs on: its own, or the one the host gave it. Re-point whenever the host replaces it (a stale pointer is the only way to misuse this class).
     Clock& clock() noexcept { return *clock_; }
@@ -525,11 +544,33 @@ public:
     // False: waking the core took an exception and its bus access failed (the host has parked its error).
     using IrqHook = bool (*)(void* ctx, uint32_t irq, bool level);
     bool set_interrupt(uint32_t irq, bool level) noexcept {
-        return irq_hook_ != nullptr ? irq_hook_(irq_hook_ctx_, irq, level) : cpu.set_interrupt(irq, level);
+        if (irq_slow_ == 0) return cpu.set_interrupt(irq, level);  // (the one test the line has always paid: a hook, or - new - a running core 1, takes the longer way)
+        return set_interrupt_slow(irq, level);
+    }
+    RP2040PY_NOINLINE bool set_interrupt_slow(uint32_t irq, bool level) noexcept {
+        if (irq_hook_ != nullptr) return irq_hook_(irq_hook_ctx_, irq, level);
+        // Every NVIC has the same system interrupts routed to it (datasheet 2.3.2) - except the two GPIO ones, which are one per bank PER CORE and are delivered by `set_interrupt_core()`.
+        if (!cpu.set_interrupt(irq, level)) return false;
+        return irq == kIrqIoBank0 || irq == kIrqIoQspi || cpu1.set_interrupt(irq, level);
+    }
+    // Core 1 starts to take the system lines. Until then nothing reaches it (the RTC and friends re-announce their lines a half-million times through an idle boot, and any extra work per
+    // announcement shows): its pending bits are, at the start, those core 0 has now - a line's pending bit is its level here - without the two per-core GPIO lines.
+    void start_core1_interrupts() noexcept {
+        cpu1.pending_interrupts = cpu.pending_interrupts & ~((1u << kIrqIoBank0) | (1u << kIrqIoQspi));
+        cpu1.interrupts_updated = true;
+        cpu1_running_ = true;
+        irq_slow_ = 1;
+    }
+    bool core1_running() const noexcept { return cpu1_running_; }
+    // One core's own line (IO_IRQ_BANK0 / IO_IRQ_QSPI carry a different level on each core).
+    bool set_interrupt_core(uint8_t index, uint32_t irq, bool level) noexcept {
+        if (irq_hook_ != nullptr && index == 0) return irq_hook_(irq_hook_ctx_, irq, level);
+        return core(index).set_interrupt(irq, level);
     }
     void set_irq_hook(IrqHook hook, void* ctx) noexcept {
         irq_hook_ = hook;
         irq_hook_ctx_ = ctx;
+        irq_slow_ = (hook != nullptr || cpu1_running_) ? 1 : 0;
     }
 
     // The DMA requests (step 2c). Every block with a DREQ calls this (directly, through the adapters below, once its shell has bound it) and it reaches the DMA block the host
@@ -642,6 +683,7 @@ public:
     void bind_tree_sinks() noexcept {
         clocks_.clear_sinks();
         (void)clocks_.add_sys_sink(ppb_sys_sink, &ppb_);
+        (void)clocks_.add_sys_sink(ppb_sys_sink, &ppb1_);  // the tree feeds each core's SysTick itself
         (void)clocks_.add_sys_sink(pwm_sys_sink, &pwm_);
         (void)clocks_.add_sys_sink(dma_sys_sink, &own_dma_);
         (void)clocks_.add_sys_sink(sys_changed_sink, this);
@@ -666,7 +708,7 @@ private:
     bool reset_step(McuBlock block, uint64_t world) noexcept {
         if ((world >> block & 1u) != 0) return host_world_.reset_block == nullptr || host_world_.reset_block(host_world_.ctx, block);
         switch (block) {
-            case kMcuBlockPpb: ppb_.reset(); return true;
+            case kMcuBlockPpb: ppb_.reset(); ppb1_.reset(); return true;
             case kMcuBlockSio: sio_.reset(); return true;
             case kMcuBlockClocks: clocks_.reset(); return clocks_.reset_tree();
             case kMcuBlockIoBank0:
@@ -798,7 +840,10 @@ private:
         }
         return true;
     }
-    static void sio_add_cycles(void* chip, uint32_t cycles) noexcept { static_cast<Mcu*>(chip)->cpu.cycles += cycles; }
+    static void sio_add_cycles(void* chip, uint32_t cycles) noexcept {
+        Mcu* m = static_cast<Mcu*>(chip);
+        m->core(m->bus.initiator).cycles += cycles;  // the initiating core pays (always core 0 until core 1 runs)
+    }
     // The pin banks' host: `ctx` is a `McuInstance` (the bank).
     static bool pin_source(void* ctx, uint32_t source, uint32_t* out) noexcept {
         const McuInstance* i = static_cast<const McuInstance*>(ctx);
@@ -859,6 +904,7 @@ private:
         Mcu* m = static_cast<Mcu*>(chip);
         m->timer_.tick_changed(tick_hz);
         m->ppb_.tick_changed(tick_hz);
+        m->ppb1_.tick_changed(tick_hz);
         return m->host_world_.watchdog_tick == nullptr || m->host_world_.watchdog_tick(m->host_world_.ctx, tick_hz);
     }
     static double tree_xosc_hz(void* chip) noexcept {
@@ -972,6 +1018,8 @@ private:
     PwmBlock pwm_;
     McuInstance pio_ctx_[2];
     SsiBlock ssi_;
+    bool cpu1_running_ = false;
+    uint8_t irq_slow_ = 0;  // nonzero: an IRQ hook is installed or core 1 is running, so `set_interrupt` does more than hand the line to core 0
     volatile uint8_t clk_changed_ = 0;  // raised by the tree when clk_sys changes (`run_at_sys_clock()`)
     UsbBlock usb_;
     uint8_t* usb_dpram_ = nullptr;
@@ -981,6 +1029,7 @@ private:
     bool ssi_world_ = false;
     SioBlock sio_;
     PpbBlock ppb_;
+    PpbBlock ppb1_;  // core 1's
     WatchdogBlock watchdog_;
     DmaBlock own_dma_;  // (`dma_` is the block the requests go to: this one, unless the host attached another)
     AdcBlock adc_;

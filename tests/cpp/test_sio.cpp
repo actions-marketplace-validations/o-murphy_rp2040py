@@ -161,7 +161,7 @@ int main() {
     // reset() puts everything back, including the interpolators.
     sio.reset();
     CHECK(sio.read32(GPIO_OE) == 0 && sio.read32(INTERP0 + I_ACCUM0) == 0 && sio.read32(SPINLOCK_ST) == 0);
-    CHECK(sio.read32(DIV_CSR) == 1 && sio.div_divisor == 0);   // datasheet: DIV_CSR.READY resets to 1, DIV_xDIVISOR to 0
+    CHECK(sio.read32(DIV_CSR) == 1 && sio.core(0).div_divisor == 0);   // datasheet: DIV_CSR.READY resets to 1, DIV_xDIVISOR to 0
 
     // Datasheet audit: the QSPI output registers are 6 bits, the interpolators' ACCUMn_ADD 24 bits, FORCE_MSB a field of each lane's own CTRL and not part of what POP writes back.
     sio.write32(GPIO_HI_OUT, 0xFFFFFFFFu);

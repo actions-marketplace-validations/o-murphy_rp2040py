@@ -92,10 +92,15 @@ RP2040_EXPORT(rp2040_boot) int32_t rp2040_boot() {
 }
 
 // The core's registers (0-12, 13 = SP, 14 = LR, 15 = PC): a host that starts a program somewhere other than the flash entry (a benchmark in SRAM, a test) sets PC and SP, and reads the result back.
-RP2040_EXPORT(rp2040_register) uint32_t rp2040_register(uint32_t index) { return index < 16 ? g_mcu.cpu.registers[index] : 0; }
-RP2040_EXPORT(rp2040_set_register) void rp2040_set_register(uint32_t index, uint32_t value) {
-    if (index < 16) g_mcu.cpu.registers[index] = value;
+// The registers of core `core` (0 or 1; record 0104). `rp2040_register` / `rp2040_set_register` are core 0's, the ones every existing host uses; core 1 exists from the start and stays inactive until a launch.
+RP2040_EXPORT(rp2040_core_register) uint32_t rp2040_core_register(uint32_t core, uint32_t index) {
+    return core < 2 && index < 16 ? g_mcu.core(static_cast<uint8_t>(core)).registers[index] : 0;
 }
+RP2040_EXPORT(rp2040_core_set_register) void rp2040_core_set_register(uint32_t core, uint32_t index, uint32_t value) {
+    if (core < 2 && index < 16) g_mcu.core(static_cast<uint8_t>(core)).registers[index] = value;
+}
+RP2040_EXPORT(rp2040_register) uint32_t rp2040_register(uint32_t index) { return rp2040_core_register(0, index); }
+RP2040_EXPORT(rp2040_set_register) void rp2040_set_register(uint32_t index, uint32_t value) { rp2040_core_set_register(0, index, value); }
 
 // Exactly `count` instructions at most (a host that knows how long its program is runs no more: the rest of a slice would execute whatever follows the program), capped at a million. Returns the
 // instructions run, or -1 when the core faulted.

@@ -7,21 +7,9 @@ from libcpp cimport bool as cppbool
 from rp2040py.native._window_map cimport WindowHandler
 
 cdef extern from "psm.hpp" namespace "rp2040core":
-    cdef const uint32_t kPsmWarnRead
-    cdef const uint32_t kPsmWarnReadAtomicArea
-    cdef const uint32_t kPsmWarnWrite
-
-    ctypedef void (*PsmWarnFn)(void* ctx, uint32_t kind, uint32_t offset, int64_t value)
-
-    cdef cppclass PsmHost:
-        PsmHost() noexcept
-        PsmWarnFn warn
-        void* ctx
-        const int* failed
 
     cdef cppclass PsmBlock:
         PsmBlock() noexcept
-        void init(const PsmHost& host) noexcept
         int64_t raw_write_value() noexcept
         uint32_t frce_on
         uint32_t frce_off
@@ -32,8 +20,7 @@ cdef extern from "psm.hpp" namespace "rp2040core":
         WindowHandler window_handler() noexcept
 
 cdef class RPPSM:
-    cdef PsmBlock* _block  # the chip's (`Mcu` builds it), or `_own` for a block made directly (a stand-in chip, a test)
-    cdef PsmBlock _own
+    cdef PsmBlock* _block  # the chip's own (core/mcu.hpp): this object is its Python view
     cdef public bint _from_mcu
     cdef public object rp2040
     cdef public object name

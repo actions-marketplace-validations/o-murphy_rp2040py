@@ -7,25 +7,11 @@ register access never enters Python. What stays Python is the edge: the logger. 
 """
 
 from libc.stdint cimport int64_t, uint32_t
-from libcpp cimport bool as cppbool
 
-from rp2040py.native._pending cimport park_error, pending_flag, raise_if_pending
+from rp2040py.native._pending cimport raise_if_pending
 from rp2040py.native._window_map cimport WindowHandler
 
 __all__ = ("RPBUSCTRL",)
-
-cdef void _warn_trampoline(void* ctx, uint32_t kind, uint32_t offset, int64_t value) noexcept:
-    cdef RPBUSCTRL block = <RPBUSCTRL> ctx
-    try:
-        if kind == kBusctrlWarnRead:
-            block.warn(f"Unimplemented peripheral read from 0x{offset:x}")
-        elif kind == kBusctrlWarnReadAtomicArea:
-            block.warn("Unimplemented read from peripheral in the atomic operation region")
-        else:
-            block.warn(f"Unimplemented peripheral write to 0x{offset:x}: 0x{value:x}")
-    except BaseException as error:
-        park_error(error)
-
 
 cdef class _FourRegisters:
     """The reference's `perf_ctr` / `perf_sel` lists as a view of the C++ arrays: indexable, assignable (tests poke `busctrl.perf_ctr[1] = 99`) and equal to a list of the same values."""
@@ -58,7 +44,6 @@ cdef class _FourRegisters:
 
 cdef class RPBUSCTRL:
     def __init__(self, rp2040, name):
-        cdef BusctrlHost host
         cdef _FourRegisters view
         self.rp2040 = rp2040
         self.name = name
@@ -68,11 +53,9 @@ cdef class RPBUSCTRL:
             # the chip's C++ `Mcu` has built the block already - with its window on the bus - and this object is the Python view of it
             self._block = <BusctrlBlock*> <size_t> address()
         else:
-            host.warn = _warn_trampoline
-            host.ctx = <void*> self
-            host.failed = pending_flag()
-            self._block = &self._own
-            self._own.init(host)
+            raise TypeError(
+                "the native block is a view of the chip's C++ `Mcu` block: RPBUSCTRL is built by a native chip (the pure-Python chip has the pure-Python peripherals)"
+            )
         self.voltage_select = 0  # kept for the reference's attribute set; nothing reads it
         view = _FourRegisters.__new__(_FourRegisters)
         view._words = self._block.perf_ctr
@@ -88,15 +71,6 @@ cdef class RPBUSCTRL:
     @bus_priority.setter
     def bus_priority(self, value):
         self._block.bus_priority = <uint32_t> (value & 0xFFFFFFFF)
-
-    def _warn_kind(self, kind, offset, value):
-        """A register access the block does not implement, as the logger's message (the chip's host calls this for the block it built)."""
-        if kind == kBusctrlWarnRead:
-            self.warn(f"Unimplemented peripheral read from 0x{offset:x}")
-        elif kind == kBusctrlWarnReadAtomicArea:
-            self.warn("Unimplemented read from peripheral in the atomic operation region")
-        else:
-            self.warn(f"Unimplemented peripheral write to 0x{offset:x}: 0x{value:x}")
 
     def read_uint32(self, offset):
         cdef uint32_t value = self._block.read(<uint32_t> offset)

@@ -15,14 +15,14 @@ Two things this script does that a plain `rp2040py micropython --image ...` woul
   match the banner's own sentence ("Iterations/Sec is the main benchmark result...") and stop
   before the benchmark has run.
 
-The default image is protik09/CoreMark-RP2040 **v1.0.0**, the single-core build. Later releases
-(v1.0.4 .. v1.0.7 as of 2026-10) run the iterations on core 1 as well and hang here: the emulator
-has no second core yet (docs/records/0096-cpp-mcu-core.md). Note the cache is keyed by the asset's
-file name, which every release of that repository shares (`Coremark-RP2040.uf2`) - delete the
-cached file before switching to another release's URL.
+The default image is protik09/CoreMark-RP2040 **v1.0.0**, the single-core build (v1.0.4 - v1.0.6 are
+one identical single-core binary too). v1.0.7, the only release with a second core, does not benchmark
+anything (its `core_start_parallel` is broken): for both cores see `coremark_dual_core.py`. Note the
+cache is keyed by the asset's file name, which every release of that repository shares
+(`Coremark-RP2040.uf2`) - delete the cached file before switching to another release's URL.
 
-The run takes a few minutes of wall time: the benchmark needs ~12 s of simulated chip time and the
-emulator runs a busy core at roughly 0.1-0.2x real time.
+The run takes about half a minute of wall time: the benchmark needs ~12 s of simulated chip time and
+the native build runs one busy core at roughly 0.6x real time (measured in a cloud container, 2026-10-18).
 """
 
 import os

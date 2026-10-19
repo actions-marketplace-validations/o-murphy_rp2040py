@@ -52,6 +52,8 @@ static Clock clk;
 static Bus bus;
 static DmaBlock dma;
 
+static constexpr uint32_t kTestBlock = 42, kTestIrq = 30;  // the id the block reports its warnings under; DMA_IRQ_0, distinct from the usual numbers to prove the base is used
+
 static bool on_irq(void*, uint32_t line, bool level) {
     const int call = env.irqs;
     if (env.irqs < 512) {
@@ -69,7 +71,8 @@ static double on_clk_sys(void*) {
     ++env.clk_calls;
     return env.clk_sys;
 }
-static void on_warn(void*, uint32_t kind, uint32_t offset, int64_t) {
+static void on_warn(void*, uint32_t block, uint32_t kind, uint32_t offset, int64_t) {
+    CHECK(block == kTestBlock);
     if (env.warns < 64) {
         env.warn_kind[env.warns] = kind;
         env.warn_offset[env.warns] = offset;
@@ -160,14 +163,13 @@ int main() {
     bus.init(host);
     bus.mem.attach({kRam, sizeof ram, sizeof ram, 0xFFFFFFFF, ram, kSubWord});
     bus.windows.attach(kProbe, {probe_read, probe_write, nullptr});
+    ChipPorts ports;
+    ports.irq = on_irq;
+    ports.warn = on_warn;
+    ports.failed = &env.failed;
     DmaHost dma_host;
-    dma_host.irq = on_irq;
     dma_host.clk_sys = on_clk_sys;
-    dma_host.warn = on_warn;
-    dma_host.failed = &env.failed;
-    dma_host.lines[0] = 30;  // distinct from the usual numbers, to prove the mapping is used
-    dma_host.lines[1] = 31;
-    dma.init(&bus, &clk, dma_host);
+    dma.init(&bus, &clk, &ports, kTestBlock, kTestIrq, dma_host);
     bus.windows.attach(kDmaBase, dma.window_handler());
 
     // ---- a plain 32-bit copy on PERMANENT: one clk_sys cycle a word (the host keeps `transfer_ns` = 1e9 / clk_sys) -------------
@@ -347,7 +349,7 @@ int main() {
         failing.clk_sys = Fail::clk;
         DmaBlock other;
         Clock other_clock;
-        other.init(&bus, &other_clock, failing);
+        other.init(&bus, &other_clock, &ports, kTestBlock, kTestIrq, failing);
         (void)other.write_atomic(TIMER0, (1u << 16) | 1u, kAtomicNormal);
         (void)other.write_atomic(READ_ADDR, kRam, kAtomicNormal);
         (void)other.write_atomic(TRANS_COUNT, 2, kAtomicNormal);
@@ -408,9 +410,11 @@ int main() {
     settle();
     CHECK(dma.int_raw == 0x1 && !(reg(7, CTRL_TRIG) & BUSY) && !clk.has_alarm());
 
-    // ---- reset: BUSY survives, the DREQs survive, everything else goes ------------------------------------------------
+    // ---- reset: the DREQs survive, every register of the channels goes (datasheet 2.5.7: the reset values, CHAIN_TO 0 for every channel) ------
     fresh();
     cwr(7, TRANS_COUNT, 3);
+    cwr(7, READ_ADDR, 0x20001000);
+    cwr(7, WRITE_ADDR, 0x20002000);
     cwr(7, CTRL_TRIG, ctrl_word(2, true, true, 5, 7));  // BUSY, waiting for a DREQ nobody raises
     CHECK(reg(7, CTRL_TRIG) & BUSY);
     (void)dma.set_dreq(11);
@@ -420,10 +424,10 @@ int main() {
     dma.int_raw = 0x40;
     env.irqs = 0;
     CHECK(dma.reset());
-    CHECK((reg(7, CTRL_TRIG) & BUSY) && (reg(7, CTRL_TRIG) & 0xFFFFFF) == (7u << 11));
+    CHECK(reg(7, CTRL_TRIG) == 0);  // not BUSY, not enabled, CHAIN_TO 0
+    CHECK(reg(7, READ_ADDR) == 0 && reg(7, WRITE_ADDR) == 0 && reg(7, TRANS_COUNT) == 0 && reg(7, DBG_TCR) == 0 && !clk.has_alarm());
     CHECK(dma.dreq(11) && dma.int_raw == 0 && dma.read(INTE0) == 0 && dma.read(INTF1) == 0 && dma.read(TIMER2) == 0);
     CHECK(env.irqs == 2 && !env.irq_level[0] && !env.irq_level[1]);
-    CHECK(reg(7, TRANS_COUNT) == 3 && reg(7, DBG_TCR) == 3);  // the live count and the reload value are left alone
 
     // ---- the interrupt registers ------------------------------------------------------------------------------------
     fresh();
@@ -472,11 +476,11 @@ int main() {
     CHECK(!(reg(3, CTRL_TRIG) & BUSY) && !(reg(3, CTRL_TRIG) & (READ_ERROR | WRITE_ERROR)));
     // unimplemented registers warn; reads give all ones, with the second warning in the atomic area
     dma.read(0x438);
-    CHECK(env.warns == 1 && env.warn_kind[0] == kDmaWarnRead && env.warn_offset[0] == 0x438);
+    CHECK(env.warns == 1 && env.warn_kind[0] == kRegWarnRead && env.warn_offset[0] == 0x438);
     env.warns = 0;
-    CHECK(dma.read(0x1438) == 0xFFFFFFFFu && env.warns == 2 && env.warn_kind[0] == kDmaWarnRead && env.warn_kind[1] == kDmaWarnReadAtomicArea);
+    CHECK(dma.read(0x1438) == 0xFFFFFFFFu && env.warns == 2 && env.warn_kind[0] == kRegWarnRead && env.warn_kind[1] == kRegWarnReadAtomicArea);
     wr(0x434, 5);
-    CHECK(env.warns == 3 && env.warn_kind[2] == kDmaWarnWrite && env.warn_offset[2] == 0x434);
+    CHECK(env.warns == 3 && env.warn_kind[2] == kRegWarnWrite && env.warn_offset[2] == 0x434);
 
     // ---- failures stop a transfer where the reference's exception would -------------------------------------------------
     fresh();

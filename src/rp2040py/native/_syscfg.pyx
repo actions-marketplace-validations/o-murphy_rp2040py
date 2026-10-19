@@ -9,31 +9,15 @@ table (see `_native_window`), so a register access never enters Python. What sta
 """
 
 from libc.stdint cimport int64_t, uint32_t
-from libcpp cimport bool as cppbool
 
-from rp2040py.native._cpu cimport Cpu
-from rp2040py.native._pending cimport park_error, pending_flag, raise_if_pending
+from rp2040py.native._pending cimport park_error, raise_if_pending
 from rp2040py.native._window_map cimport WindowHandler
 
 __all__ = ("RP2040SysCfg",)
 
 
-cdef void _warn_trampoline(void* ctx, uint32_t kind, uint32_t offset, int64_t value) noexcept:
-    cdef RP2040SysCfg block = <RP2040SysCfg> ctx
-    try:
-        if kind == kSyscfgWarnRead:
-            block.warn(f"Unimplemented peripheral read from 0x{offset:x}")
-        elif kind == kSyscfgWarnReadAtomicArea:
-            block.warn("Unimplemented read from peripheral in the atomic operation region")
-        else:
-            block.warn(f"Unimplemented peripheral write to 0x{offset:x}: 0x{value:x}")
-    except BaseException as error:
-        park_error(error)
-
-
 cdef class RP2040SysCfg:
     def __init__(self, rp2040, name):
-        cdef SyscfgHost host
         address = getattr(rp2040, "_native_syscfg_address", None)
         self._from_mcu = address is not None
         if address is not None:
@@ -42,33 +26,13 @@ cdef class RP2040SysCfg:
             self.name = name
             self._block = <SyscfgBlock*> <size_t> address()
             return
-        native_cpu_address = getattr(rp2040.core, "_native_cpu_address", None)
-        if native_cpu_address is None:
-            raise TypeError(
-                "the native SYSCFG works on the native core's C++ CPU state (PROC0_NMI_MASK); "
-                f"{type(rp2040).__name__} with {type(rp2040.core).__name__} is not that "
-                "(use the pure-Python peripherals/_syscfg.RP2040SysCfg with it)"
-            )
-        self.rp2040 = rp2040
-        self.name = name
-        host.warn = _warn_trampoline
-        host.ctx = <void*> self
-        host.failed = pending_flag()
-        self._block = &self._own
-        self._own.init(<Cpu*> (<size_t> native_cpu_address()), host)
+        raise TypeError(
+            "the native block is a view of the chip's C++ `Mcu` block: RP2040SysCfg is built by a native chip (the pure-Python chip has the pure-Python peripherals)"
+        )
 
     @property
     def raw_write_value(self):
         return self._block.raw_write_value()
-
-    def _warn_kind(self, kind, offset, value):
-        """A register access the block does not implement, as the logger's message (the chip's host calls this for the block it built)."""
-        if kind == kSyscfgWarnRead:
-            self.warn(f"Unimplemented peripheral read from 0x{offset:x}")
-        elif kind == kSyscfgWarnReadAtomicArea:
-            self.warn("Unimplemented read from peripheral in the atomic operation region")
-        else:
-            self.warn(f"Unimplemented peripheral write to 0x{offset:x}: 0x{value:x}")
 
     def read_uint32(self, offset):
         cdef uint32_t value = self._block.read(<uint32_t> offset)

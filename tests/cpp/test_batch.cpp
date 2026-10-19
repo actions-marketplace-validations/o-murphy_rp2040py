@@ -35,6 +35,13 @@ static bool alarm_fire(void*) noexcept {
     return true;
 }
 
+static Clock* rearm_clock = nullptr;
+static Alarm* rearm_alarm = nullptr;
+static bool alarm_rearm(void*) noexcept {
+    rearm_clock->link_ticks(rearm_alarm, 1000);  // 62.5 ns
+    return true;
+}
+
 int main() {
     Bus bus;
     bus.mem.attach({0x20000000, 4096, 4096, 0xFFFFFFFF, sram, kSubWord});
@@ -130,6 +137,28 @@ int main() {
     pio_calls = 0;
     pio_cycles = 0;
     CHECK(run_batch(cpu3, clock3, host, params) == 0 && clock3.nanos() == 8000.0 && pio_calls == 1 && pio_cycles == 1);
+
+    // A clock that is not a whole number of ticks per cycle (133 MHz: 120.30): many short idle jumps hand the PIO the cycles they cover IN TOTAL, the fraction of each carried to the next
+    // (flooring every jump on its own gave 8 of 8.31 cycles per jump, and the PIO ran 4 % slow against the clock - record 0105).
+    Cpu cpu5;
+    cpu5.init(&bus, {}, 25);
+    cpu5.waiting = true;
+    Clock clock5;
+    Alarm alarm5;
+    alarm5.fire = alarm_rearm;
+    rearm_clock = &clock5;
+    rearm_alarm = &alarm5;
+    clock5.link_ticks(&alarm5, 1000);
+    BatchParams params5;
+    params5.cycle_nanos = 1e9 / 133e6;
+    params5.instruction_ceiling = 1000;
+    pio_stopped = 0;
+    pio_calls = 0;
+    pio_cycles = 0;
+    CHECK(run_batch(cpu5, clock5, host, params5) == 0);
+    const double expected = static_cast<double>(clock5.ticks()) / (params5.cycle_nanos * static_cast<double>(kTicksPerNano));
+    CHECK(clock5.ticks() == 1000 * 1000);
+    CHECK(static_cast<double>(pio_cycles) > expected - 1.0 && static_cast<double>(pio_cycles) <= expected);
 
     // The real-time budget ends a batch early (checked every `check_interval` iterations).
     Cpu cpu4;

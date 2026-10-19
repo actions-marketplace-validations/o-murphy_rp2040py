@@ -1,5 +1,6 @@
 [build-system]
-requires = ["setuptools", "setuptools-scm", "cython>=3.2.9", "wheel"]
+# ziglang compiles the wasm module of record 0103 (build_wasm.py, called from setup.py's build_py). Pinned below 0.17: 0.17.0 is only partly uploaded to PyPI (no Windows wheels).
+requires = ["setuptools", "setuptools-scm", "cython>=3.2.9", "wheel", "ziglang>=0.16.0,<0.17"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -117,6 +118,19 @@ include = ["rp2040py*"]
 # includes it via that git integration, which is why this went unnoticed until a non-git install
 # path exercised it.
 "rp2040py.utils" = ["firmware_specs.json"]
+# The wasm module (built from rp2040py/native/wasm/rp2040_wasm.cpp by setup.py's build_py; not tracked by git, so listed here).
+"rp2040py.native.wasm" = ["*.wasm"]
+
+[tool.uv]
+# Rebuild the editable install (and so the wasm module) when its sources or the build hooks change, not only when pyproject.toml does.
+cache-keys = [
+    { file = "pyproject.toml" },
+    { file = "setup.py" },
+    { file = "build_wasm.py" },
+    { file = "src/rp2040py/native/wasm/*.cpp" },
+    { file = "src/rp2040py/native/core/*.hpp" },
+    { git = { commit = true } },
+]
 
 [tool.setuptools_scm]
 root = "."
@@ -139,13 +153,13 @@ test-requires = "pytest pytest-xdist"
 # cibuildwheel runs tests from a scratch directory (not the repo checkout) so only the built
 # wheel's contents are ever imported - {project} is substituted with the repo root so pytest can
 # still find the test suite itself (tests/ isn't part of the wheel).
-test-command = "pytest {project}/tests"
+test-command = "pytest {project}/tests --oracle=smoke"
 
 [tool.cibuildwheel.android]
 test-extras = ""
 test-requires = "pytest"
 test-sources = ["tests", "pyproject.toml"]
-test-command = "python -m pytest -o addopts=-rf tests"
+test-command = "python -m pytest -o addopts=-rf tests --oracle=off"
 build = "cp313-android_* cp314-android_* cp315-android_*"
 
 [tool.cibuildwheel.pyodide]
@@ -158,7 +172,7 @@ test-requires = "pytest"
 # loudly here rather than be left out of the command. record 0096's thread-free engine is the fix for the "no pthreads" problem that kept this platform disabled; the native
 # extension compiles and loads for wasm32-emscripten (not a silent pure-Python fallback). wasm32 is a 32-bit address space whose memory never shrinks, so it shares the 32-bit
 # targets' memory limits (see tests/conftest.py).
-test-command = "python -m pytest -o addopts=-rf {project}/tests"
+test-command = "python -m pytest -o addopts=-rf {project}/tests --oracle=off"
 
 [dependency-groups]
 dev = [
@@ -171,4 +185,6 @@ dev = [
     "littlefs-python>=0.18.0",
     "cython>=3.2.9",
     "pytest-xdist>=3.8.0",
+    "ziglang>=0.16.0,<0.17",
+    "wasmhost>=0.1.0",
 ]

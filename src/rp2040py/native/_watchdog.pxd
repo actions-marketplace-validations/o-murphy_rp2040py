@@ -4,26 +4,15 @@
 from libc.stdint cimport int64_t, uint32_t
 from libcpp cimport bool as cppbool
 
+from rp2040py.native._core_host cimport ChipPorts
 from rp2040py.native._clock cimport Clock
 from rp2040py.native._pwm cimport Timer32, Timer32PeriodicAlarm
 from rp2040py.native._window_map cimport WindowHandler
 
 cdef extern from "watchdog.hpp" namespace "rp2040core":
-    cdef const uint32_t kWatchdogWarnRead
-    cdef const uint32_t kWatchdogWarnReadAtomicArea
-    cdef const uint32_t kWatchdogWarnWrite
 
-    ctypedef void (*WatchdogWarnFn)(void* ctx, uint32_t kind, uint32_t offset, int64_t value)
     ctypedef cppbool (*WatchdogTriggerFn)(void* ctx)
     ctypedef cppbool (*WatchdogTickFn)(void* ctx, double tick_hz)
-
-    cdef cppclass WatchdogHost:
-        WatchdogHost() noexcept
-        WatchdogWarnFn warn
-        WatchdogTriggerFn trigger
-        WatchdogTickFn tick_changed
-        void* ctx
-        const int* failed
 
     cdef cppclass WatchdogBlock:
         Timer32 timer
@@ -38,7 +27,6 @@ cdef extern from "watchdog.hpp" namespace "rp2040core":
         cppbool pause_dbg1
         cppbool pause_jtag
         WatchdogBlock() noexcept
-        void init(Clock* clock, const WatchdogHost& host) noexcept
         void detach() noexcept
         int64_t raw_write_value() noexcept
         cppbool fire_timeout() noexcept
@@ -52,8 +40,7 @@ cdef extern from "watchdog.hpp" namespace "rp2040core":
 
 cdef class RPWatchdog:
     cdef public bint _from_mcu  # this is the view of the `Mcu`'s block
-    cdef WatchdogBlock* _block  # the chip's (`Mcu` builds and wires it), or `_own` for a block made directly (a stand-in chip, a test)
-    cdef WatchdogBlock _own
+    cdef WatchdogBlock* _block  # the chip's own (core/mcu.hpp): this object is its Python view
     cdef public object rp2040
     cdef public object name
     cdef public object clock

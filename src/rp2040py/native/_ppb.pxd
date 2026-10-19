@@ -4,24 +4,16 @@
 from libc.stdint cimport int64_t, uint32_t
 from libcpp cimport bool as cppbool
 
+from rp2040py.native._core_host cimport ChipPorts
 from rp2040py.native._clock cimport Clock
 from rp2040py.native._cpu cimport Cpu
 from rp2040py.native._pwm cimport Timer32, Timer32PeriodicAlarm
 from rp2040py.native._window_map cimport WindowHandler
 
 cdef extern from "ppb.hpp" namespace "rp2040core":
-    cdef const uint32_t kPpbWarnRead
-    cdef const uint32_t kPpbWarnWrite
 
-    ctypedef void (*PpbWarnFn)(void* ctx, uint32_t kind, uint32_t offset, int64_t value)
 
     ctypedef void (*PpbSystemResetFn)(void* ctx)
-
-    cdef cppclass PpbHost:
-        PpbHost() noexcept
-        PpbWarnFn warn
-        PpbSystemResetFn system_reset_request
-        void* ctx
 
     cdef cppclass PpbBlock:
         Timer32 timer
@@ -37,7 +29,6 @@ cdef extern from "ppb.hpp" namespace "rp2040core":
         uint32_t mpu_rbar[8]
         uint32_t mpu_rasr[8]
         PpbBlock() noexcept
-        void init(Cpu* cpu, Clock* clock, const PpbHost& host, double clk_sys, uint32_t max_hardware_irq) noexcept
         void detach() noexcept
         void reset() noexcept
         double clk_sys() noexcept
@@ -51,8 +42,7 @@ cdef extern from "ppb.hpp" namespace "rp2040core":
         WindowHandler window_handler() noexcept
 
 cdef class RPPPB:
-    cdef PpbBlock* _block  # the chip's (`Mcu` builds and wires it), or `_own` for a block made directly (a stand-in chip, a test)
-    cdef PpbBlock _own
+    cdef PpbBlock* _block  # the chip's own (core/mcu.hpp): this object is its Python view
     cdef public bint _from_mcu  # this is the view of the `Mcu`'s block (the watchdog's tick reaches it in C++)
     cdef public object rp2040
     cdef public object name

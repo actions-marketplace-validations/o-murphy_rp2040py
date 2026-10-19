@@ -26,7 +26,7 @@ from rp2040py.native._rosc cimport RoscBlock
 from rp2040py.native._rtc cimport RtcBlock
 from rp2040py.native._sio cimport SioBlock
 from rp2040py.native._ssi cimport SsiBlock
-from rp2040py.native._usb cimport UsbBlock
+from rp2040py.native._usb cimport UsbBlock, UsbHost
 from rp2040py.native._xip_ctrl cimport XipBlock
 from rp2040py.native._spi cimport SpiBlock
 from rp2040py.native._syscfg cimport SyscfgBlock
@@ -83,6 +83,17 @@ cdef extern from "mcu.hpp" namespace "rp2040core":
     cdef const uint32_t kMcuBlockPsm
     cdef const uint32_t kMcuBlockResets
 
+    cdef cppclass McuMemory:
+        McuMemory() noexcept
+        uint8_t* rom
+        uint32_t rom_size
+        uint8_t* flash
+        uint32_t flash_size
+        uint8_t* sram
+        uint32_t sram_size
+        uint8_t* dpram
+        uint32_t dpram_size
+
     cdef cppclass McuHost:
         McuHost() noexcept
         McuWarnFn warn
@@ -109,6 +120,7 @@ cdef extern from "mcu.hpp" namespace "rp2040core":
         bool (*adc_read)(void* ctx, uint32_t channel) noexcept
         bool (*ssi_baudr)(void* ctx, double* value) noexcept
         bool (*clk_sys)(void* ctx, double* hz) noexcept
+        const UsbHost* usb_wire
         bool (*reset_block)(void* ctx, uint32_t block) noexcept
         bool (*usb_reset)(void* ctx) noexcept
         bool (*bus_reset)(void* ctx) noexcept
@@ -123,6 +135,10 @@ cdef extern from "mcu.hpp" namespace "rp2040core":
         Clock& clock() noexcept
         void use_clock(Clock* clock) noexcept
         bool set_interrupt(uint32_t irq, bool level) noexcept
+        bool set_interrupt_unhooked(uint32_t irq, bool level) noexcept
+        Cpu& core(uint8_t index) noexcept
+        void set_core1_enabled(bool on) noexcept
+        bool core1_running() noexcept
         void set_irq_hook(McuIrqHook hook, void* ctx) noexcept
         bool set_dreq(uint32_t number, bool asserted) noexcept
         void attach_dma(DmaBlock* dma) noexcept
@@ -152,6 +168,7 @@ cdef extern from "mcu.hpp" namespace "rp2040core":
         XipBlock& xip() noexcept
         UsbBlock& usb() noexcept
         void set_usb_dpram(uint8_t* data) noexcept
+        void set_memory(const McuMemory& memory) noexcept
         void set_flash(uint8_t* data, uint32_t size) noexcept
         void set_ssi_world(bool world) noexcept
         bool reset(bool from_watchdog, bool preserve_flash, uint32_t psm_wdsel, uint32_t resets_wdsel, uint64_t world) noexcept
@@ -159,6 +176,7 @@ cdef extern from "mcu.hpp" namespace "rp2040core":
         void leave_reset() noexcept
         PwmBlock& pwm() noexcept
         PpbBlock& ppb() noexcept
+        PpbBlock& ppb(uint8_t core) noexcept
         WatchdogBlock& watchdog() noexcept
         DmaBlock& dma() noexcept
         ClocksBlock& clocks() noexcept

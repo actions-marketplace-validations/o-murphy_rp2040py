@@ -20,6 +20,7 @@ static int failures = 0;
     } while (0)
 
 constexpr double SECOND = 1e9;
+constexpr uint32_t kTestIrqLine = 25;  // the line the block is given (RTC_IRQ)
 static const uint32_t kRegisters[] = {REG_CLKDIV_M1, REG_SETUP_0, REG_SETUP_1, REG_CTRL, REG_IRQ_SETUP_0, REG_IRQ_SETUP_1, REG_RTC_1, REG_RTC_0, REG_INTR, REG_INTE, REG_INTF, REG_INTS};
 static const uint32_t kReadOnly[] = {REG_RTC_1, REG_RTC_0, REG_INTR, REG_INTS};
 
@@ -29,11 +30,12 @@ struct Env {
     int warns = 0;
     int irq_calls = 0;
     bool irq_level = false;
+    uint32_t irq_line = 0;
     bool irq_fails = false;
     int failed = 0;
 };
 
-static void on_warn(void* ctx, uint32_t kind, uint32_t offset, int64_t value) {
+static void on_warn(void* ctx, uint32_t, uint32_t kind, uint32_t offset, int64_t value) {
     Env* env = static_cast<Env*>(ctx);
     if (env->warns < 8) {
         env->warn_kind[env->warns] = kind;
@@ -43,8 +45,9 @@ static void on_warn(void* ctx, uint32_t kind, uint32_t offset, int64_t value) {
     ++env->warns;
 }
 
-static bool on_irq(void* ctx, bool level) {
+static bool on_irq(void* ctx, uint32_t line, bool level) {
     Env* env = static_cast<Env*>(ctx);
+    env->irq_line = line;
     ++env->irq_calls;
     env->irq_level = level;
     if (env->irq_fails) {
@@ -61,13 +64,13 @@ struct Rig {
     Clock clk;
     RtcBlock block;
     Env env;
+    ChipPorts ports;
     Rig() {
-        RtcHost host;
-        host.warn = on_warn;
-        host.irq = on_irq;
-        host.ctx = &env;
-        host.failed = &env.failed;
-        block.init(&clk, host);
+        ports.warn = on_warn;
+        ports.irq = on_irq;
+        ports.chip = &env;
+        ports.failed = &env.failed;
+        block.init(&clk, &ports, 1, kTestIrqLine);
     }
     ~Rig() { block.detach(); }
     // What clocks_init and rtc_init do: clk_rtc = XOSC / 256, CLKDIV_M1 = clk_rtc - 1, so a second is a second.
@@ -331,10 +334,10 @@ static void test_reset_clears_the_block_and_keeps_clk_rtc() {
 
 static void test_unimplemented_offsets_warn() {
     Rig r;
-    CHECK(r.block.read(0x30) == 0xFFFFFFFFu && r.env.warns == 1 && r.env.warn_kind[0] == kRtcWarnRead && r.env.warn_offset[0] == 0x30);
+    CHECK(r.block.read(0x30) == 0xFFFFFFFFu && r.env.warns == 1 && r.env.warn_kind[0] == kRegWarnRead && r.env.warn_offset[0] == 0x30);
     CHECK(r.block.read(0x1000) == 0xFFFFFFFFu && r.env.warns == 2 && r.env.warn_offset[1] == 0x1000);  // exactly 0x1000 is not "in the atomic area" (> 0x1000)
-    CHECK(r.block.read(0x1034) == 0xFFFFFFFFu && r.env.warns == 4 && r.env.warn_kind[3] == kRtcWarnReadAtomicArea);
-    CHECK(r.block.write(0x40, 0x1234) && r.env.warns == 5 && r.env.warn_kind[4] == kRtcWarnWrite && r.env.warn_value[4] == 0x1234);
+    CHECK(r.block.read(0x1034) == 0xFFFFFFFFu && r.env.warns == 4 && r.env.warn_kind[3] == kRegWarnReadAtomicArea);
+    CHECK(r.block.write(0x40, 0x1234) && r.env.warns == 5 && r.env.warn_kind[4] == kRegWarnWrite && r.env.warn_value[4] == 0x1234);
 }
 
 static void test_alias_writes_decode_against_a_read_and_remember_the_raw_value() {

@@ -4,8 +4,8 @@
 from libc.stdint cimport int64_t, uint32_t
 from libcpp cimport bool as cppbool
 
-from rp2040py.native._mcu_irq cimport McuIrqLine
 
+from rp2040py.native._core_host cimport ChipPorts
 from rp2040py.native._window_map cimport WindowHandler
 
 cdef extern from "fifo.hpp" namespace "rp2040core":
@@ -21,30 +21,12 @@ cdef extern from "fifo.hpp" namespace "rp2040core":
         void reset() noexcept
 
 cdef extern from "i2c.hpp" namespace "rp2040core":
-    cdef const uint32_t kI2cWarnRead
-    cdef const uint32_t kI2cWarnReadAtomicArea
-    cdef const uint32_t kI2cWarnWrite
 
-    ctypedef cppbool (*I2cIrqFn)(void* ctx, cppbool level)
     ctypedef cppbool (*I2cStartFn)(void* ctx, cppbool repeated)
     ctypedef cppbool (*I2cConnectFn)(void* ctx, uint32_t address, uint32_t mode)
     ctypedef cppbool (*I2cWriteFn)(void* ctx, uint32_t value)
     ctypedef cppbool (*I2cReadFn)(void* ctx, cppbool ack)
     ctypedef cppbool (*I2cStopFn)(void* ctx)
-    ctypedef void (*I2cWarnFn)(void* ctx, uint32_t kind, uint32_t offset, int64_t value)
-
-    cdef cppclass I2cHost:
-        I2cHost() noexcept
-        I2cIrqFn irq
-        void* irq_ctx
-        I2cStartFn start
-        I2cConnectFn connect
-        I2cWriteFn write_byte
-        I2cReadFn read_byte
-        I2cStopFn stop
-        I2cWarnFn warn
-        void* ctx
-        const int* failed
 
     cdef cppclass I2cBlock:
         uint32_t state
@@ -77,7 +59,6 @@ cdef extern from "i2c.hpp" namespace "rp2040core":
         Fifo16 rx
         Fifo16 tx
         I2cBlock() noexcept
-        void init(const I2cHost& host) noexcept
         int64_t raw_write_value() noexcept
         uint32_t int_status() noexcept
         uint32_t master_bits() noexcept
@@ -96,9 +77,7 @@ cdef extern from "i2c.hpp" namespace "rp2040core":
 
 cdef class RPI2C:
     cdef public bint _from_mcu  # this is the view of the `Mcu`'s block
-    cdef McuIrqLine _irq_line  # the line straight to the chip, when it has one (core/mcu.hpp)
-    cdef I2cBlock* _block  # the chip's (`Mcu` builds and wires it), or `_own` for a block made directly (a stand-in chip, a test)
-    cdef I2cBlock _own
+    cdef I2cBlock* _block  # the chip's own (core/mcu.hpp): this object is its Python view
     cdef public object rp2040
     cdef public object name
     cdef public object irq

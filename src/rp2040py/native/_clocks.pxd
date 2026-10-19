@@ -4,6 +4,7 @@
 from libc.stdint cimport int64_t, uint32_t
 from libcpp cimport bool as cppbool
 
+from rp2040py.native._core_host cimport ChipPorts
 from rp2040py.native._clock cimport Clock
 from rp2040py.native._pll cimport PllBlock
 from rp2040py.native._rosc cimport RoscBlock
@@ -11,25 +12,12 @@ from rp2040py.native._xosc cimport XoscBlock
 from rp2040py.native._window_map cimport WindowHandler
 
 cdef extern from "clocks.hpp" namespace "rp2040core":
-    cdef const uint32_t kClocksWarnRead
-    cdef const uint32_t kClocksWarnReadAtomicArea
-    cdef const uint32_t kClocksWarnWrite
 
-    ctypedef void (*ClocksWarnFn)(void* ctx, uint32_t kind, uint32_t offset, int64_t value)
     ctypedef double (*ClockHzFn)(void* ctx)
     ctypedef cppbool (*ClockSinkFn)(void* ctx, double hz, double old)
 
-    cdef cppclass ClocksHost:
-        ClocksHost() noexcept
-        ClocksWarnFn warn
-        ClockHzFn xosc_hz
-        ClockHzFn rosc_hz
-        void* ctx
-        const int* failed
-
     cdef cppclass ClocksBlock:
         ClocksBlock() noexcept
-        void init(Clock* clock, const ClocksHost& host, PllBlock* pll_sys, PllBlock* pll_usb) noexcept
         void detach() noexcept
         void clear_sinks() noexcept
         void bind_xosc(const XoscBlock* block) noexcept
@@ -83,8 +71,7 @@ cdef extern from "clock_sinks.hpp" namespace "rp2040core":
 
 cdef class RPClocks:
     cdef public bint _from_mcu  # this is the view of the `Mcu`'s block
-    cdef ClocksBlock* _block  # the chip's (`Mcu` builds and wires it), or `_own` for a block made directly (a stand-in chip, a test)
-    cdef ClocksBlock _own
+    cdef ClocksBlock* _block  # the chip's own (core/mcu.hpp): this object is its Python view
     cdef public object rp2040
     cdef public object name
     cdef public object clock

@@ -15,13 +15,13 @@ The chip's C++ `Mcu` builds the block (record 0096, step 3a): its lines, its DRE
 """
 import asyncio
 
-from libc.stdint cimport int32_t, int64_t, uint32_t
-from libcpp cimport bool as cppbool
+from libc.stdint cimport int64_t, uint32_t
 
 from rp2040py.native._pending cimport raise_if_pending
 from rp2040py.native._window_map cimport WindowHandler
 
 from rp2040py.peripherals.pio_registers import DREQ_RX0, DREQ_RX1, DREQ_TX0, DREQ_TX1
+from rp2040py.native._register_warning import register_warning
 
 __all__ = ("RPPIO", "StateMachine")
 
@@ -505,16 +505,12 @@ cdef class RPPIO:
 
     def _warn_kind(self, kind, a, b):
         """A register access the block does not implement (or an invalid state machine register), as the logger's message (the chip's host calls this for the block it built)."""
-        if kind == kPioWarnRead:
-            self._warn(f"Unimplemented peripheral read from 0x{a:x}")
-        elif kind == kPioWarnReadAtomicArea:
-            self._warn("Unimplemented read from peripheral in the atomic operation region")
-        elif kind == kPioWarnWrite:
-            self._warn(f"Unimplemented peripheral write to 0x{a:x}: 0x{b:x}")
-        elif kind == kPioErrorSmRead:
+        if kind == kPioErrorSmRead:
             self.error(f"Read from invalid state machine register: {a}")
-        else:  # kPioErrorSmWrite
+        elif kind == kPioErrorSmWrite:
             self.error(f"Write to invalid state machine register: {a}")
+        else:
+            self._warn(register_warning(kind, a, b))
 
     def _world_started(self):
         """A CTRL write started a stopped block. Only run the first batch synchronously inline when no Simulator owns this RP2040
@@ -563,11 +559,11 @@ cdef class RPPIO:
 
     @property
     def raw_write_value(self):
-        return self._block.raw_write_value
+        return self._block.raw_write_value()
 
     @raw_write_value.setter
     def raw_write_value(self, value):
-        self._block.raw_write_value = value
+        self._block.set_raw_write_value(value)
 
     @property
     def stopped(self):

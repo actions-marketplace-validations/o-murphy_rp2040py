@@ -19,6 +19,7 @@ import time
 
 from utils.emscripten import needs_fine_clock
 
+from rp2040py import _execute_batch as _execute_batch_module
 from rp2040py.rp2040 import RP2040
 from rp2040py.simulator import Simulator
 
@@ -232,3 +233,37 @@ def test_pacing_keeps_up_with_real_time_on_a_platform_with_a_coarse_timer():
     wait, a sleep that overshoots is paid back by the batches after it, so the guest still advances at about real time."""
     paced = _advance_an_idle_chip_for(0.4, paced=True, coarse_timer=True)
     assert 0.1 < paced < 0.6, paced
+
+
+def test_a_pio_behind_many_short_idle_jumps_keeps_pace_with_a_clock_that_is_not_a_whole_number_of_ticks_per_cycle(
+    monkeypatch,
+):
+    """133 MHz is 120.30 ticks per cycle. The idle jump hands the PIO the cycles it covers, and flooring each jump on its own dropped the fraction every time (8 of 8.31 cycles for a 1000-tick jump:
+    the PIO ran 4 % slow against the clock). The fraction is now carried, as the CPU's own time carries it (record 0105, finding 2)."""
+    # The pure-Python loop gives a batch up after 5 ms of wall time; on a slow runner (Windows CI) that ends this one before its 500 jumps, and the carry is per batch. The test is about the carry.
+    monkeypatch.setattr(_execute_batch_module, "_BATCH_YIELD_BUDGET_SECONDS", 1e9)
+    chip = RP2040()
+    chip.clk_sys = 133e6
+    simulator = Simulator(rp2040=chip)
+    chip.write_uint32(0x50200000, 1)  # PIO0 CTRL: state machine 0 enabled, so the block is stepped
+    chip.core.waiting = True
+    period_ticks, jumps = 1000, 500
+    fired = [0]
+
+    def _on_alarm() -> None:
+        fired[0] += 1
+        if fired[0] >= jumps:
+            simulator.stopped = True
+        else:
+            alarm.schedule_ticks(period_ticks)
+
+    alarm = chip.clock.create_alarm(_on_alarm)
+    alarm.schedule_ticks(period_ticks)
+    start = chip.pio[0].cycle_fp
+    simulator.stopped = False
+    simulator._execute_batch()
+    simulator.stop()
+    cycles = (chip.pio[0].cycle_fp - start) >> 8
+    expected = chip.clock.ticks / (1e9 / 133e6 * 16)
+    assert chip.clock.ticks == period_ticks * jumps
+    assert expected - 1.5 < cycles <= expected + 1  # (it was 4 % short: 4000 of 4157)

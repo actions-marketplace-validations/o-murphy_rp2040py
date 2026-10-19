@@ -15,7 +15,7 @@
 // Quirks of the reference that are kept (pinned by the C++ checks and by tests/test_pwm_diff.py), several of them bugs that are fixed later, one commit each, with the oracle's mutants:
 //   - in phase-correct mode the wrap does not drive A and B, so a phase-correct output only ever changes at the compare alarms;
 //   - CC and TOP are double buffered: a write is held until the channel is enabled or wraps; a CC write is not masked (the reference keeps the 32-bit value; TOP keeps 16 bits);
-//   - reset() restarts the channels and the direction word, not INTR/INTE/INTF or `gpio_value`;
+//   - reset() restarts the channels, the direction word and INTR/INTE/INTF, not `gpio_value` (the pins' level);
 //   - an unimplemented offset warns and reads 0xFFFFFFFF (a read above 0x1000 warns a second time); an unimplemented write warns.
 //
 // Header-only, C++17, no exceptions/RTTI/STL, no allocation. Single-threaded by contract.
@@ -30,23 +30,13 @@
 
 namespace rp2040core {
 
-using PwmIrqFn = bool (*)(void* ctx, bool level);                       // false: failure parked
-using PwmDreqFn = bool (*)(void* ctx, uint32_t channel);                // the DMA request of PWM channel `channel` (DREQ_PWM_WRAP0 + channel); false: failure parked
 using PwmPinChangedFn = bool (*)(void* ctx, uint32_t pin);              // the block changed the word bit of `pin`: the host re-evaluates it; false: failure parked
 using PwmPinReadFn = bool (*)(void* ctx, uint32_t pin, bool* level);    // the input level of `pin`; false: failure parked
-constexpr uint32_t kPwmWarnRead = kRegWarnRead, kPwmWarnReadAtomicArea = kRegWarnReadAtomicArea, kPwmWarnWrite = kRegWarnWrite;
-using PwmWarnFn = RegWarnFn;
 
 struct PwmHost {
-    PwmIrqFn irq = nullptr;
-    void* irq_ctx = nullptr;  // the context of `irq` alone, when it is not `ctx` (a line bound straight to the chip, core/mcu.hpp)
-    PwmDreqFn dreq = nullptr;
-    void* dreq_ctx = nullptr;  // the context of `dreq` alone, when it is not `ctx` (a request bound straight to the chip, core/mcu.hpp)
     PwmPinChangedFn pin_changed = nullptr;
     PwmPinReadFn pin_read = nullptr;
-    PwmWarnFn warn = nullptr;
     void* ctx = nullptr;
-    const int* failed = nullptr;  // the shared parked-failure flag (see _pending.pyx)
 };
 
 namespace pwm_regs {
@@ -196,7 +186,7 @@ private:
     PwmBlock* pwm_ = nullptr;
 };
 
-class PwmBlock {
+class PwmBlock : public RegisterBlock<PwmBlock> {
 public:
     PwmBlock() = default;
     PwmBlock(const PwmBlock&) = delete;  // the channels' alarms and the window handler hold pointers to this object
@@ -207,8 +197,9 @@ public:
     uint32_t gpio_value = 0, gpio_direction = 0;
 
     // Binds the block to its clock and host; `clock_freq` is the system clock the counters run on (the reference reads `rp2040.clk_sys` when it builds the channels).
-    void init(Clock* clock, const PwmHost& host, double clock_freq) noexcept {
+    void init(Clock* clock, const ChipPorts* ports, uint32_t block, uint32_t irq_line, uint32_t dreq_base, const PwmHost& host, double clock_freq) noexcept {
         clock_ = clock;
+        port_.init(ports, block, irq_line, dreq_base);
         host_ = host;
         clock_freq_ = clock_freq;
         for (uint32_t i = 0; i < pwm_regs::kChannels; ++i) channels[i].init(this, clock, i, clock_freq);
@@ -221,9 +212,7 @@ public:
     }
 
     Clock* clock() const noexcept { return clock_; }
-    bool failed() const noexcept { return host_failed(host_.failed); }
     double clock_freq() const noexcept { return clock_freq_; }
-    int64_t raw_write_value() const noexcept { return raw_write_value_; }
 
     // A new system clock: every counter keeps its value and continues at the new rate.
     void set_clock_freq(double freq) noexcept {
@@ -281,7 +270,10 @@ public:
         for (PwmChannel& channel : channels) {
             if (!channel.reset()) return false;
         }
-        return true;
+        int_raw = 0;  // INTR, INTE and INTF are registers of the block like the channels' (datasheet 4.5.3: reset 0); `gpio_value` is the pins' level, not a register
+        int_enable = 0;
+        int_force = 0;
+        return check_interrupts();
     }
 
     // ---- registers --------------------------------------------------------------------------------------------
@@ -300,10 +292,7 @@ public:
             case INTS: return int_status();
             default: break;
         }
-        if (host_.warn) {
-            host_.warn(host_.ctx, kPwmWarnRead, offset, 0);
-            if (offset > 0x1000) host_.warn(host_.ctx, kPwmWarnReadAtomicArea, offset, 0);
-        }
+        port_.unimplemented_read(offset);
         return 0xFFFFFFFFu;
     }
 
@@ -329,27 +318,19 @@ public:
                 return check_interrupts();
             default: break;
         }
-        if (host_.warn) host_.warn(host_.ctx, kPwmWarnWrite, offset, value);
+        port_.unimplemented_write(offset, value);
         return true;
     }
 
     // `BasePeripheral.write_uint32_atomic`, step for step - remember the raw value, decode the alias against a *read* of the register (with that read's side effects), then write.
-    bool write_atomic(uint32_t offset, int64_t raw, uint32_t atomic_type) noexcept {
-        raw_write_value_ = raw;
-        int64_t value = raw;
-        if (atomic_type != kAtomicNormal) value = decode_atomic(atomic_type, static_cast<int64_t>(read(offset)), raw);
-        return write(offset, value);
-    }
 
-    WindowHandler window_handler() noexcept { return BlockWindow<PwmBlock>::handler(this); }
 
 private:
-    bool raise_dreq(uint32_t channel) noexcept { return host_.dreq(host_.dreq_ctx != nullptr ? host_.dreq_ctx : host_.ctx, channel); }
-    bool raise_irq(bool level) noexcept { return host_.irq(host_.irq_ctx != nullptr ? host_.irq_ctx : host_.ctx, level); }
+    bool raise_dreq(uint32_t channel) noexcept { return port_.dreq(channel, true); }
+    bool raise_irq(bool level) noexcept { return port_.irq(level); }
     PwmHost host_;
     Clock* clock_ = nullptr;
     double clock_freq_ = 0.0;
-    int64_t raw_write_value_ = 0;
 };
 
 // ---- the channel, now that the block is complete ---------------------------------------------------------------------------------

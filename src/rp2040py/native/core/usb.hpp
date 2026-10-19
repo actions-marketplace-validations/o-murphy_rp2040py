@@ -40,11 +40,9 @@ namespace rp2040core {
 [[maybe_unused]] constexpr uint32_t kUsbOther = 3;  // (read by the shells and the checks; the block itself only tells the other answers apart from ACK / NAK / STALL)
 constexpr uint32_t kUsbAck = 0, kUsbNak = 1, kUsbStall = 2;
 
-constexpr uint32_t kUsbWarnRead = kRegWarnRead, kUsbWarnReadAtomicArea = kRegWarnReadAtomicArea, kUsbWarnWrite = kRegWarnWrite;
 
+// The other end of the wire (the device and the endpoints); the line, the warnings and the failure flag are the chip's `ChipPorts` (core/core_host.hpp).
 struct UsbHost {
-    bool (*irq)(void* ctx, bool level) = nullptr;
-    void* irq_ctx = nullptr;  // the context of `irq` alone, when it is not `ctx` (a line bound straight to the chip, core/mcu.hpp)
     bool (*usb_enabled)(void* ctx) = nullptr;                           // on_usb_enabled (the shell checks it is set)
     bool (*reset_received)(void* ctx) = nullptr;                        // on_reset_received
     bool (*endpoint_read)(void* ctx, uint32_t endpoint, uint32_t length) = nullptr;  // on_endpoint_read: the host is asked for `length` bytes
@@ -58,10 +56,7 @@ struct UsbHost {
     bool (*pending_response)(void* ctx, uint32_t max_length, bool* present, const uint8_t** data, uint32_t* length) = nullptr;  // the kept data of a control IN, cut to max_length and forgotten
     bool (*device_in)(void* ctx, uint32_t endpoint_address, uint32_t* status, const uint8_t** data, uint32_t* length) = nullptr;
     bool (*device_out)(void* ctx, uint32_t endpoint, const uint8_t* data, uint32_t length, uint32_t* status) = nullptr;
-    RegWarnFn warn = nullptr;
-    void* warn_ctx = nullptr;  // the context of `warn` alone, when it is not `ctx` (the chip's warning, core/mcu.hpp)
     void* ctx = nullptr;
-    const int* failed = nullptr;  // the shared parked-failure flag (see _pending.pyx)
 };
 
 namespace usb_regs {
@@ -110,7 +105,7 @@ constexpr uint32_t INTR_ERROR_RX_OVERFLOW = 1u << 7, INTR_ERROR_RX_TIMEOUT = 1u 
 constexpr uint32_t INTR_HOST_SOF = 1u << 2, INTR_HOST_RESUME = 1u << 1, INTR_HOST_CONN_DIS = 1u << 0;
 }  // namespace usb_regs
 
-class UsbBlock {
+class UsbBlock : public RegisterBlock<UsbBlock> {
 public:
     static constexpr uint32_t kSlots = usb_regs::kEndpoints * 2;
 
@@ -129,10 +124,13 @@ public:
     uint32_t buf_select[kSlots] = {}, two_buffer_count[kSlots] = {};
     int64_t read_delay_microseconds = 10, write_delay_microseconds = 10, host_transaction_delay_microseconds = 5, host_reaction_microseconds = 10;
 
-    void init(Clock* clock, uint8_t* dpram, const UsbHost& host) noexcept {
+    // `irq_line` is USBCTRL_IRQ; `wire` may be empty (nothing connected, see `fill_unconnected`).
+    void init(Clock* clock, uint8_t* dpram, const ChipPorts* ports, uint32_t block, uint32_t irq_line, const UsbHost& wire) noexcept {
         clock_ = clock;
         dpram_ = dpram;
-        host_ = host;
+        port_.init(ports, block, irq_line);
+        host_ = wire;
+        fill_unconnected();
         for (uint32_t i = 0; i < kAlarms; ++i) {
             slots_[i].owner = this;
             slots_[i].index = i;
@@ -141,15 +139,10 @@ public:
         }
     }
 
-    // The other end of the wire: the host's callbacks and their context (`wire.ctx`). The line, the warning and the failure flag stay the ones the block was initialised with (the chip's).
+    // The other end of the wire: the host's callbacks and their context (`wire.ctx`).
     void set_wire(const UsbHost& wire) noexcept {
-        const UsbHost keep = host_;
         host_ = wire;
-        host_.irq = keep.irq;
-        host_.irq_ctx = keep.irq_ctx;
-        host_.warn = keep.warn;
-        host_.warn_ctx = keep.warn_ctx;
-        host_.failed = keep.failed;
+        fill_unconnected();
     }
 
     // Unlinks every alarm from the clock; the owner calls it before the block goes away.
@@ -157,9 +150,6 @@ public:
         for (uint32_t i = 0; i < kAlarms; ++i) cancel_alarm(&slots_[i].alarm);
     }
 
-    bool failed() const noexcept { return host_failed(host_.failed); }
-    void* warn_ctx() const noexcept { return host_.warn_ctx != nullptr ? host_.warn_ctx : host_.ctx; }
-    int64_t raw_write_value() const noexcept { return raw_write_value_; }
     bool has_scheduled_alarms() const noexcept {
         for (uint32_t i = 0; i < kAlarms; ++i) {
             if (slots_[i].alarm.scheduled) return true;
@@ -309,10 +299,7 @@ public:
             case INTS: return int_status();
             default: break;
         }
-        if (host_.warn) {
-            host_.warn(warn_ctx(), kUsbWarnRead, offset, 0);
-            if (offset > 0x1000) host_.warn(warn_ctx(), kUsbWarnReadAtomicArea, offset, 0);
-        }
+        port_.unimplemented_read(offset);
         return 0xFFFFFFFFu;
     }
 
@@ -404,17 +391,11 @@ public:
                 return check_interrupts();
             default: break;
         }
-        if (host_.warn) host_.warn(warn_ctx(), kUsbWarnWrite, offset, value64);
+        port_.unimplemented_write(offset, value64);
         return true;
     }
 
     // `BasePeripheral.write_uint32_atomic`, step for step.
-    bool write_atomic(uint32_t offset, int64_t raw, uint32_t atomic_type) noexcept {
-        raw_write_value_ = raw;
-        int64_t value = raw;
-        if (atomic_type != kAtomicNormal) value = decode_atomic(atomic_type, static_cast<int64_t>(read(offset)), raw);
-        return write(offset, value);
-    }
 
     // ---- device mode: the DPRAM -----------------------------------------------------------------------------------------------------------
 
@@ -512,9 +493,33 @@ public:
         return true;
     }
 
-    WindowHandler window_handler() noexcept { return BlockWindow<UsbBlock>::handler(this); }
 
 private:
+    // A wire the host left out: nothing is connected at the other end. Every callback the block may call answers as an absent device would (no device, nothing queued, a NAK), so a host that gives
+    // no wire - or only some of it - never makes the block call a null pointer.
+    void fill_unconnected() noexcept {
+        if (host_.usb_enabled == nullptr) host_.usb_enabled = [](void*) { return true; };
+        if (host_.reset_received == nullptr) host_.reset_received = [](void*) { return true; };
+        if (host_.endpoint_read == nullptr) host_.endpoint_read = [](void*, uint32_t, uint32_t) { return true; };
+        if (host_.write_queued == nullptr) host_.write_queued = [](void*, uint32_t, uint32_t, const uint8_t*, uint32_t) { return true; };
+        if (host_.drain_write == nullptr) host_.drain_write = [](void*, uint32_t) { return true; };
+        if (host_.drain_reaction == nullptr) host_.drain_reaction = [](void*, uint32_t) { return true; };
+        if (host_.drain_read == nullptr) host_.drain_read = [](void*, uint32_t) { return true; };
+        if (host_.device_reset == nullptr) host_.device_reset = [](void*) { return true; };
+        if (host_.device_address == nullptr) host_.device_address = [](void*, uint32_t* address) { *address = 0; return true; };
+        if (host_.device_setup == nullptr) host_.device_setup = [](void*, const uint8_t*, bool* has_response) { *has_response = false; return true; };
+        if (host_.pending_response == nullptr) host_.pending_response = [](void*, uint32_t, bool* present, const uint8_t**, uint32_t*) { *present = false; return true; };
+        if (host_.device_in == nullptr) {
+            host_.device_in = [](void*, uint32_t, uint32_t* status, const uint8_t** data, uint32_t* length) {
+                *status = kUsbNak;
+                *data = nullptr;
+                *length = 0;
+                return true;
+            };
+        }
+        if (host_.device_out == nullptr) host_.device_out = [](void*, uint32_t, const uint8_t*, uint32_t, uint32_t* status) { *status = kUsbNak; return true; };
+    }
+
     static constexpr uint32_t kAlarms = usb_regs::kEndpoints * 3 + 3;  // 16 OUT, 16 IN, 16 host reactions, bus reset, host SOF, host transaction
     static constexpr uint32_t kReactionAlarm = usb_regs::kEndpoints * 2, kResetAlarm = usb_regs::kEndpoints * 3, kSofAlarm = kResetAlarm + 1, kHostAlarm = kResetAlarm + 2;
 
@@ -860,7 +865,7 @@ private:
         return sie_status_updated();
     }
 
-    bool raise_irq(bool level) noexcept { return host_.irq(host_.irq_ctx != nullptr ? host_.irq_ctx : host_.ctx, level); }
+    bool raise_irq(bool level) noexcept { return port_.irq(level); }
 
     UsbHost host_;
     Clock* clock_ = nullptr;
@@ -870,7 +875,6 @@ private:
     uint32_t done_n_[kSlots] = {};
     uint8_t pend_[usb_regs::kEndpoints][usb_regs::kFifoDepth] = {};
     uint32_t pend_n_[usb_regs::kEndpoints] = {};
-    int64_t raw_write_value_ = 0;
 };
 
 }  // namespace rp2040core

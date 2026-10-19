@@ -19,13 +19,10 @@
 namespace rp2040core {
 
 using SysInfoRomVersionFn = bool (*)(void* ctx, uint32_t* version);  // the bootrom's version byte; false: failure parked
-constexpr uint32_t kSysInfoWarnRead = kRegWarnRead, kSysInfoWarnReadAtomicArea = kRegWarnReadAtomicArea, kSysInfoWarnWrite = kRegWarnWrite;
 
 struct SysInfoHost {
     SysInfoRomVersionFn rom_version = nullptr;
-    RegWarnFn warn = nullptr;
     void* ctx = nullptr;
-    const int* failed = nullptr;  // the shared parked-failure flag (see _pending.pyx)
 };
 
 namespace sysinfo_regs {
@@ -34,16 +31,17 @@ constexpr uint32_t CHIP_ID = 0x0, REG_PLATFORM = 0x4, GITREF_RP2040 = 0x40;
 constexpr uint32_t MANUFACTURER = 0x927, PART = 0x0002, ROM_VERSION_B2 = 3;
 }  // namespace sysinfo_regs
 
-class SysInfoBlock {
+class SysInfoBlock : public RegisterBlock<SysInfoBlock> {
 public:
     SysInfoBlock() = default;
     SysInfoBlock(const SysInfoBlock&) = delete;  // the window handler holds a pointer to this object
     SysInfoBlock& operator=(const SysInfoBlock&) = delete;
 
-    void init(const SysInfoHost& host) noexcept { host_ = host; }
+    void init(const ChipPorts* ports, uint32_t block, const SysInfoHost& host) noexcept {
+        port_.init(ports, block);
+        host_ = host;
+    }
 
-    bool failed() const noexcept { return host_failed(host_.failed); }
-    int64_t raw_write_value() const noexcept { return raw_write_value_; }
 
     // The block holds no state: nothing to put back.
     bool reset() noexcept { return true; }
@@ -62,34 +60,22 @@ public:
             case GITREF_RP2040: return 0xE0C912E8u;
             default: break;
         }
-        if (host_.warn) {
-            host_.warn(host_.ctx, kSysInfoWarnRead, offset, 0);
-            if (offset > 0x1000) host_.warn(host_.ctx, kSysInfoWarnReadAtomicArea, offset, 0);
-        }
+        port_.unimplemented_read(offset);
         return 0xFFFFFFFFu;
     }
 
     bool write(uint32_t offset, int64_t value) noexcept {
         using namespace sysinfo_regs;
         if (offset == CHIP_ID || offset == REG_PLATFORM || offset == GITREF_RP2040) return true;  // read-only: no effect
-        if (host_.warn) host_.warn(host_.ctx, kSysInfoWarnWrite, offset, value);
+        port_.unimplemented_write(offset, value);
         return true;
     }
 
     // `BasePeripheral.write_uint32_atomic`, step for step.
-    bool write_atomic(uint32_t offset, int64_t raw, uint32_t atomic_type) noexcept {
-        raw_write_value_ = raw;
-        int64_t value = raw;
-        if (atomic_type != kAtomicNormal) value = decode_atomic(atomic_type, static_cast<int64_t>(read(offset)), raw);
-        if (failed()) return false;
-        return write(offset, value);
-    }
 
-    WindowHandler window_handler() noexcept { return BlockWindow<SysInfoBlock>::handler(this); }
 
 private:
     SysInfoHost host_;
-    int64_t raw_write_value_ = 0;
 };
 
 }  // namespace rp2040core

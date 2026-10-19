@@ -16,6 +16,7 @@ filesystem ([record 0087](../docs/records/0087-circuitpython-writable-circuitpy-
 | [`kaluma_run.py`](kaluma_run.py) | Kaluma REPL (`rp2040py kaluma`) |
 | [`benchmark.py`](benchmark.py) | instruction-throughput benchmark (`rp2040py bench`) |
 | [`coremark_single_thread.py`](coremark_single_thread.py) | CoreMark (single-core UF2, fetched into the firmware cache), stops on the result line (`rp2040py micropython`) |
+| [`coremark_dual_core.py`](coremark_dual_core.py) | CoreMark on both cores: builds a patched protik09/CoreMark-RP2040 v1.0.7 (the release's own parallel code is broken, see the docstring) once, needs `git`, `cmake`, `arm-none-eabi-gcc`; `--image` runs any other build |
 | [`mklittlefs_dump.py`](mklittlefs_dump.py) | build/inspect a littlefs image |
 | [`eink_run.py`](eink_run.py) + [`mp_eink_demo.py`](mp_eink_demo.py) | virtual Waveshare 2.9″ e-Paper (G) over SPI1, with a from-scratch driver |
 | [`lcd_run.py`](lcd_run.py) + [`mp_lcd_demo.py`](mp_lcd_demo.py) / [`cp_lcd_demo.py`](cp_lcd_demo.py) | Waveshare RP2040-LCD-0.96's onboard 160×80 ST7735S panel, MicroPython or CircuitPython |

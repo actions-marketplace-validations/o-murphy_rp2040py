@@ -14,6 +14,9 @@ from typing import TYPE_CHECKING
 
 from rp2040py.clock._simulation_clock import TICKS_PER_NANO, nanos_to_ticks
 
+# Where LR points when core 1 starts (see `core/batch_dual.hpp`, `kCore1RomReturn`): an entry function that returns lands back in the boot ROM's `_wait_for_vector`.
+CORE1_ROM_RETURN = 0x00003FFC
+
 if TYPE_CHECKING:
     from rp2040py.simulator import Simulator
 
@@ -46,9 +49,13 @@ def execute_batch(simulator: "Simulator", tick_batch: int) -> None:
     rp2040 = simulator.rp2040
     changed = [False]
     unsubscribe = rp2040.add_clock_listener(lambda _new, _old: changed.__setitem__(0, True))
+    rp2040.batch_exit = (
+        changed  # a launch or a hold of core 1 ends the batch too: the next one is run by the other loop
+    )
     try:
         _run_batch(simulator, tick_batch, changed)
     finally:
+        rp2040.batch_exit = None
         unsubscribe()
 
 
@@ -64,6 +71,11 @@ def _run_batch(simulator: "Simulator", tick_batch: int, changed: list[bool]) -> 
     touches `.rp2040`, `.clock`, and `.stopped`, structurally, the same three attributes
     native/_simulator.pyx's own execute_batch() reads."""
     rp2040, clock = simulator.rp2040, simulator.clock
+    if rp2040.core1_running and not rp2040.run_pin_low:
+        _run_batch_dual(
+            simulator, changed
+        )  # two cores (record 0104): the loop below is the single-core one and is not touched
+        return
     real_io = getattr(
         simulator, "_real_io_flag", None
     )  # one byte, nonzero while a device waits on the real world (see _PACED_IDLE_NANOS)
@@ -127,6 +139,7 @@ def _run_batch(simulator: "Simulator", tick_batch: int, changed: list[bool]) -> 
     # instruction path as always, just with the redundant branch below.
     pending_cycles = 0
     pending_count = 0
+    idle_carry = 0.0  # idle time, in ticks, not yet handed to the PIO as whole cycles
     tick_budget = clock.ticks_to_next_alarm if clock.has_scheduled_alarm else None
     while i < 1000000 and not simulator.stopped and not changed[0]:
         # Checked every _TIME_CHECK_INTERVAL iterations regardless of idle/busy - not just
@@ -186,7 +199,11 @@ def _run_batch(simulator: "Simulator", tick_batch: int, changed: list[bool]) -> 
             # frozen solid whenever the CPU parks in WFI with an empty alarm queue could never
             # make the progress that would let the CPU wake up again - which is exactly how a
             # DMA-fed state machine is driven with no ARM program loaded (tests/test_pio.py).
-            cycles = int(idle_ticks / ticks_per_cycle) or 1
+            # The fraction of a cycle a jump leaves is carried to the next jump, as the CPU's own time carries it (`advance_cycles`): flooring each jump on its own dropped it every time (record 0105, finding 2).
+            idle_carry += idle_ticks
+            cycles = int(idle_carry / ticks_per_cycle)
+            idle_carry -= cycles * ticks_per_cycle
+            cycles = cycles or 1
             if tick_batch > 1:
                 tick_budget = clock.ticks_to_next_alarm if clock.has_scheduled_alarm else None
         else:
@@ -228,3 +245,144 @@ def _run_batch(simulator: "Simulator", tick_batch: int, changed: list[bool]) -> 
             if cycle_ticks
             else clock.advance_cycles(pending_cycles, ticks_per_cycle)
         )
+
+
+def _run_batch_dual(simulator: "Simulator", changed: list[bool]) -> None:
+    """The batch loop for two cores on one clock: the Python reference of `core/batch_dual.hpp` (record 0104, D5 and the scheduling decision: F2 main, A strict), held to it by the lockstep oracle.
+
+    Each core has its own local time. The cores run in quanta: from the clock's time to a horizon (`rp2040.quantum_cycles` cycles, cut at the next alarm), core 0 and then core 1 execute
+    instructions until their local time reaches it, and the clock is ticked to the earlier of the two. Every access that leaves RAM and flash - the SIO, the PPB, every peripheral - is a
+    SYNCHRONISATION POINT (`rp2040._sync`): before it happens the other core, if it is behind, executes up to this core's time (a nested catch-up), and the clock and the PIO are brought to
+    it, so the access is ordered by time exactly as the exact scheduler (quantum 1) would order it. Alarms and the PIO advance by the clock's delta, the PIO by whole cycles of it."""
+    rp2040, clock = simulator.rp2040, simulator.clock
+    cores = rp2040.cores
+    pios = rp2040.pio
+    real_io = getattr(simulator, "_real_io_flag", None)
+    ticks_per_cycle = 1e9 / rp2040.clk_sys * TICKS_PER_NANO
+    cycle_ticks = int(ticks_per_cycle) if ticks_per_cycle == int(ticks_per_cycle) else 0
+    quantum = max(1, rp2040.quantum_cycles) * (cycle_ticks if cycle_ticks else int(ticks_per_cycle))
+    start = clock.ticks
+    local = [start, start]  # each core's own time, in clock ticks
+    wake_at = [
+        start,
+        start,
+    ]  # the earliest time a core may run again: woken by the other (a FIFO word, a SEV) or by an alarm, it did not run before
+    frac = [0.0, 0.0]  # the fraction of a tick a cycle that is not a whole number of ticks leaves, per core
+    pio_carry = [0.0]  # clock ticks not yet handed to the PIO as whole cycles
+    horizon = [0]
+    current = [0]  # the core whose instruction is running
+    iterations = 0
+
+    def ticks_for(core: int, cycles: int) -> int:
+        if cycle_ticks:
+            return cycles * cycle_ticks
+        frac[core] += cycles * ticks_per_cycle
+        whole = math.floor(frac[core])
+        frac[core] -= whole
+        return whole
+
+    def step_pio(ticks: int) -> None:
+        if not pios:
+            return
+        pio_carry[0] += ticks
+        cycles = int(pio_carry[0] / ticks_per_cycle)
+        if cycles <= 0:
+            return
+        pio_carry[0] -= cycles * ticks_per_cycle
+        for pio in pios:
+            if not pio.stopped:
+                pio.advance(cycles)
+
+    def advance_to(t: int) -> None:
+        dt = t - clock.ticks
+        if dt > 0:
+            clock.tick_ticks(dt)
+            step_pio(dt)
+
+    def note_wake() -> None:
+        now = clock.ticks
+        for i in range(2):
+            wake_at[i] = max(wake_at[i], now)
+
+    parked = [
+        False
+    ]  # core 1 returned from its entry function to the boot ROM (CORE1_ROM_RETURN): the batch ends and the chip puts it back to the ROM's wait
+
+    def execute_one(core: int) -> None:
+        nonlocal iterations
+        if core == 1 and (cores[1].pc & ~1) == CORE1_ROM_RETURN:
+            cores[1].waiting = True
+            parked[0] = True
+            return
+        saved = current[0]
+        current[0] = core
+        rp2040.initiator = core
+        try:
+            cycles = cores[core].execute_instruction()
+        finally:
+            current[0] = saved
+            rp2040.initiator = saved
+        local[core] += ticks_for(core, cycles)
+        iterations += 1
+
+    def sync() -> None:
+        me = current[0]
+        other = 1 - me
+        if not cores[other].waiting:
+            local[other] = max(local[other], wake_at[other])
+            while local[other] < local[me] and not cores[other].waiting:
+                execute_one(other)
+        advance_to(local[me])
+        if clock.has_scheduled_alarm:
+            horizon[0] = min(horizon[0], clock.ticks + clock.ticks_to_next_alarm)
+        note_wake()
+        # the access itself may wake the other core (a FIFO word, a SEV): it cannot have run before now
+        wake_at[other] = max(wake_at[other], local[me])
+
+    batch_start = time.monotonic()
+    ticks_since_check = 0
+    rp2040._sync = sync
+    try:
+        while iterations < 1000000 and not simulator.stopped and not changed[0] and not parked[0]:
+            ticks_since_check += 1
+            if ticks_since_check >= _TIME_CHECK_INTERVAL:
+                ticks_since_check = 0
+                if time.monotonic() - batch_start > _BATCH_YIELD_BUDGET_SECONDS:
+                    break
+            now = clock.ticks
+            if (
+                cores[0].waiting and cores[1].waiting
+            ):  # both asleep: jump to the next alarm, as the single-core loop does (the PIO gets the cycles it covers, at least one)
+                idle_ticks = clock.ticks_to_next_alarm if clock.has_scheduled_alarm else 0
+                paced = False
+                if real_io is not None and real_io[0]:
+                    idle_ticks = min(idle_ticks, nanos_to_ticks(_PACED_IDLE_NANOS))
+                    paced = True
+                clock.tick_ticks(idle_ticks)
+                step_pio(idle_ticks if idle_ticks > 0 else int(ticks_per_cycle))
+                note_wake()
+                iterations += 1
+                if paced:
+                    break
+                continue
+            # A quantum: to the horizon, cut at the next alarm, at least one cycle long.
+            horizon[0] = now + quantum
+            if clock.has_scheduled_alarm:
+                horizon[0] = min(horizon[0], now + clock.ticks_to_next_alarm)
+            horizon[0] = max(horizon[0], now + (cycle_ticks if cycle_ticks else 1))
+            for core in range(2):
+                if cores[core].waiting:
+                    continue
+                local[core] = max(local[core], now)
+                local[core] = max(local[core], wake_at[core])
+                while local[core] < horizon[0] and not cores[core].waiting and iterations < 1000000:
+                    execute_one(core)
+            # The clock goes to the earlier of the cores still running (a core that fell asleep is not waited for); if both did, to the later of the two sleeps.
+            running = [local[core] for core in range(2) if not cores[core].waiting]
+            advance_to(min(running) if running else max(local))
+            note_wake()
+    finally:
+        rp2040._sync = None
+        rp2040.initiator = 0
+    if parked[0]:
+        rp2040.hold_core1()  # (core 1 waits to be launched again, as after a reset)

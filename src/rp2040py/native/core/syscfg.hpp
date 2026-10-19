@@ -18,13 +18,6 @@
 
 namespace rp2040core {
 
-constexpr uint32_t kSyscfgWarnRead = kRegWarnRead, kSyscfgWarnReadAtomicArea = kRegWarnReadAtomicArea, kSyscfgWarnWrite = kRegWarnWrite;
-
-struct SyscfgHost {
-    RegWarnFn warn = nullptr;
-    void* ctx = nullptr;
-    const int* failed = nullptr;  // the shared parked-failure flag (see _pending.pyx)
-};
 
 namespace syscfg_regs {
 constexpr uint32_t PROC0_NMI_MASK = 0x00, PROC1_NMI_MASK = 0x04, PROC_CONFIG = 0x08, PROC_IN_SYNC_BYPASS = 0x0C, PROC_IN_SYNC_BYPASS_HI = 0x10, DBGFORCE = 0x14, MEMPOWERDOWN = 0x18;
@@ -33,20 +26,20 @@ constexpr uint32_t PROC_IN_SYNC_BYPASS_MASK = 0x3FFFFFFFu, PROC_IN_SYNC_BYPASS_H
 constexpr uint32_t DBGFORCE_WRITABLE = 0xEEu, DBGFORCE_RESET = 0x66u, MEMPOWERDOWN_MASK = 0xFFu;
 }  // namespace syscfg_regs
 
-class SyscfgBlock {
+class SyscfgBlock : public RegisterBlock<SyscfgBlock> {
 public:
     SyscfgBlock() = default;
     SyscfgBlock(const SyscfgBlock&) = delete;  // the window handler holds a pointer to this object
     SyscfgBlock& operator=(const SyscfgBlock&) = delete;
 
     // `cpu` is the core whose NMI mask PROC0_NMI_MASK is (not owned).
-    void init(Cpu* cpu, const SyscfgHost& host) noexcept {
+    void init(Cpu* cpu, const ChipPorts* ports, uint32_t block) noexcept {
         cpu_ = cpu;
-        host_ = host;
+        port_.init(ports, block);
     }
+    // Core 1's NMI mask lives in core 1 (`PROC1_NMI_MASK`); the register still keeps what was written, as before.
+    void bind_core1(Cpu* cpu1) noexcept { cpu1_ = cpu1; }
 
-    bool failed() const noexcept { return host_failed(host_.failed); }
-    int64_t raw_write_value() const noexcept { return raw_write_value_; }
 
     uint32_t proc1_nmi_mask = 0;
     uint32_t proc_config = syscfg_regs::PROC_CONFIG_RESET;
@@ -59,6 +52,7 @@ public:
         using namespace syscfg_regs;
         cpu_->interrupt_nmi_mask = 0;
         proc1_nmi_mask = 0;
+        if (cpu1_ != nullptr) cpu1_->interrupt_nmi_mask = 0;
         proc_config = PROC_CONFIG_RESET;
         proc_in_sync_bypass = 0;
         proc_in_sync_bypass_hi = 0;
@@ -79,10 +73,7 @@ public:
             case MEMPOWERDOWN: return mempowerdown;
             default: break;
         }
-        if (host_.warn) {
-            host_.warn(host_.ctx, kSyscfgWarnRead, offset, 0);
-            if (offset > 0x1000) host_.warn(host_.ctx, kSyscfgWarnReadAtomicArea, offset, 0);
-        }
+        port_.unimplemented_read(offset);
         return 0xFFFFFFFFu;
     }
 
@@ -91,34 +82,28 @@ public:
         const uint32_t v = static_cast<uint32_t>(value);
         switch (offset) {
             case PROC0_NMI_MASK: cpu_->interrupt_nmi_mask = v; break;
-            case PROC1_NMI_MASK: proc1_nmi_mask = v; break;
+            case PROC1_NMI_MASK:
+                proc1_nmi_mask = v;
+                if (cpu1_ != nullptr) cpu1_->interrupt_nmi_mask = v;
+                break;
             case PROC_CONFIG: proc_config = (proc_config & ~PROC_CONFIG_WRITABLE) | (v & PROC_CONFIG_WRITABLE); break;
             case PROC_IN_SYNC_BYPASS: proc_in_sync_bypass = v & PROC_IN_SYNC_BYPASS_MASK; break;
             case PROC_IN_SYNC_BYPASS_HI: proc_in_sync_bypass_hi = v & PROC_IN_SYNC_BYPASS_HI_MASK; break;
             case DBGFORCE: dbgforce = (dbgforce & ~DBGFORCE_WRITABLE) | (v & DBGFORCE_WRITABLE); break;
             case MEMPOWERDOWN: mempowerdown = v & MEMPOWERDOWN_MASK; break;
             default:
-                if (host_.warn) host_.warn(host_.ctx, kSyscfgWarnWrite, offset, value);
+                port_.unimplemented_write(offset, value);
                 break;
         }
         return true;
     }
 
     // `BasePeripheral.write_uint32_atomic`, step for step.
-    bool write_atomic(uint32_t offset, int64_t raw, uint32_t atomic_type) noexcept {
-        raw_write_value_ = raw;
-        int64_t value = raw;
-        if (atomic_type != kAtomicNormal) value = decode_atomic(atomic_type, static_cast<int64_t>(read(offset)), raw);
-        if (failed()) return false;
-        return write(offset, value);
-    }
 
-    WindowHandler window_handler() noexcept { return BlockWindow<SyscfgBlock>::handler(this); }
 
 private:
     Cpu* cpu_ = nullptr;
-    SyscfgHost host_;
-    int64_t raw_write_value_ = 0;
+    Cpu* cpu1_ = nullptr;
 };
 
 }  // namespace rp2040core

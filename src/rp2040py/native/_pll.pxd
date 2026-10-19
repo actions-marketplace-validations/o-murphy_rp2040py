@@ -4,28 +4,16 @@
 from libc.stdint cimport int64_t, uint32_t
 from libcpp cimport bool as cppbool
 
+from rp2040py.native._core_host cimport ChipPorts
 from rp2040py.native._window_map cimport WindowHandler
 
 cdef extern from "pll.hpp" namespace "rp2040core":
-    cdef const uint32_t kPllWarnRead
-    cdef const uint32_t kPllWarnReadAtomicArea
-    cdef const uint32_t kPllWarnWrite
 
-    ctypedef void (*PllWarnFn)(void* ctx, uint32_t kind, uint32_t offset, int64_t value)
     ctypedef double (*PllRefFn)(void* ctx)
     ctypedef cppbool (*PllChangedFn)(void* ctx)
 
-    cdef cppclass PllHost:
-        PllHost() noexcept
-        PllWarnFn warn
-        PllRefFn ref_hz
-        PllChangedFn changed
-        void* ctx
-        const int* failed
-
     cdef cppclass PllBlock:
         PllBlock() noexcept
-        void init(const PllHost& host) noexcept
         void bind_reference(PllRefFn fn, void* ctx) noexcept
         int64_t raw_write_value() noexcept
         void reset() noexcept
@@ -46,8 +34,7 @@ cdef extern from "pll.hpp" namespace "rp2040core":
         WindowHandler window_handler() noexcept
 
 cdef class RPPLL:
-    cdef PllBlock* _block  # the chip's (`Mcu` builds and wires it), or `_own` for a block made directly (a stand-in chip, a test)
-    cdef PllBlock _own
+    cdef PllBlock* _block  # the chip's own (core/mcu.hpp): this object is its Python view
     cdef object _bound_tree  # the native clock tree this PLL takes its reference from (None: it asks the chip through Python)
     cdef public object rp2040
     cdef public object name

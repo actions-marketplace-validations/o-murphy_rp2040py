@@ -114,7 +114,8 @@ def test_reading_inter_core_fifo_addresses_names_0053_instead_of_generic_invalid
     """docs/records/0053's "Interim option": FIFO_ST/FIFO_WR/FIFO_RD (0x50/0x54/0x58) aren't
     implemented, but a read there should say so plainly instead of falling through to the generic
     "invalid SIO address" warning - so `import _thread`/`multicore_launch_core1()` points straight
-    at the record explaining why, not a mystery address."""
+    at the record explaining why, not a mystery address. The FIFOs are on by default now (record 0104); with them switched off the stub is what is left."""
+    cpu.rp2040.set_core1_enabled(False)
     warnings: list[str] = []
     cpu.rp2040.logger.warning = lambda component_name, message: warnings.append(message)
 

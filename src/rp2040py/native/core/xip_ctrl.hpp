@@ -24,24 +24,18 @@
 
 namespace rp2040core {
 
-// What the host is told that is not a register access; the host formats the message.
-constexpr uint32_t kXipWarnBadWrite = 0;   // a write to a non-caching alias with ERR_BADWRITE set (a bus fault); `address`
-constexpr uint32_t kXipWarnSramRead = 1;   // a read of the cache-as-SRAM while the cache is enabled or powered down; `address`
-constexpr uint32_t kXipWarnSramWrite = 2;  // the same for a write; `address`
-constexpr uint32_t kXipWarnWrite = 3;      // an unimplemented register write (offset, value)
+// What the host is told. The register message is the shared one (`kRegWarnWrite`: an unimplemented register write, offset and value); the three below it are about the data path - the XIP's
+// memory windows, not its registers - and carry an `address`, so they start after the shared range.
+inline constexpr uint32_t kXipWarnBadWrite = 3;   // a write to a non-caching alias with ERR_BADWRITE set (a bus fault); `address`
+inline constexpr uint32_t kXipWarnSramRead = 4;   // a read of the cache-as-SRAM while the cache is enabled or powered down; `address`
+inline constexpr uint32_t kXipWarnSramWrite = 5;  // the same for a write; `address`
 
-using XipWarnFn = void (*)(void* ctx, uint32_t kind, uint32_t address, int64_t value);
-using XipDreqFn = bool (*)(void* ctx, bool asserted);       // DREQ_XIP_STREAM; false: failure parked
 using XipRateFn = bool (*)(void* ctx, double* value);       // clk_sys in Hz / SSI.BAUDR (as read); false: failure parked
 
 struct XipHost {
-    XipWarnFn warn = nullptr;
-    XipDreqFn dreq = nullptr;
-    void* dreq_ctx = nullptr;  // the context of `dreq` alone, when it is not `ctx` (a request bound straight to the chip, core/mcu.hpp)
     XipRateFn clk_sys = nullptr;
     XipRateFn baudr = nullptr;
     void* ctx = nullptr;
-    const int* failed = nullptr;
 };
 
 namespace xip_regs {
@@ -58,17 +52,18 @@ constexpr uint32_t COUNTER_MAX = 0xFFFFFFFFu;
 constexpr uint32_t ALIAS_ALLOCATING = 0, ALIAS_NOCACHE = 2, ALIAS_BYPASS = 3;  // 0x10... allocating, 0x12... non-cacheable, 0x13... bypass; 0x11... (non-allocating) is "none of those"
 }  // namespace xip_regs
 
-class XipBlock {
+class XipBlock : public RegisterBlock<XipBlock> {
 public:
     XipBlock() = default;
     XipBlock(const XipBlock&) = delete;  // the alarm node, the window handler and the hooks hold a pointer to this object
     XipBlock& operator=(const XipBlock&) = delete;
 
     // Binds the block to its clock, the chip's flash buffer and its host. Once, before anything else. Does not reset (the owner calls reset() when the chip is complete).
-    void init(Clock* clock, const uint8_t* flash, uint32_t flash_size, const XipHost& host) noexcept {
+    void init(Clock* clock, const uint8_t* flash, uint32_t flash_size, const ChipPorts* ports, uint32_t block, uint32_t dreq, const XipHost& host) noexcept {
         clock_ = clock;
         flash_ = flash;
         flash_size_ = flash_size;
+        port_.init(ports, block, 0, dreq);
         host_ = host;
         stream_alarm_.fire = &XipBlock::on_stream_alarm;
         stream_alarm_.ctx = this;
@@ -81,8 +76,6 @@ public:
         cancel_alarm(&stream_alarm_);
     }
 
-    bool failed() const noexcept { return host_failed(host_.failed); }
-    int64_t raw_write_value() const noexcept { return raw_write_value_; }
 
     // The registers and state, public for the shell (the reference's attributes are read and, by tests, written directly).
     uint32_t ctrl = xip_regs::CTRL_RESET, ctr_hit = 0, ctr_acc = 0, stream_addr = 0, stream_ctr = 0;
@@ -144,7 +137,7 @@ public:
             if (ways[0] == tag) ways[0] = INVALID;
             if (ways[1] == tag) ways[1] = INVALID;
         } else if (ctrl & CTRL_ERR_BADWRITE) {
-            if (host_.warn) host_.warn(host_.ctx, kXipWarnBadWrite, address, 0);
+            port_.warn(kXipWarnBadWrite, address, 0);
         }
     }
 
@@ -153,7 +146,7 @@ public:
     // The word at `address` of the `0x15...` segment; 0xFFFFFFFF (and a report) while the cache is enabled or powered down - a bus error the model cannot raise.
     uint32_t sram_read(uint32_t address) noexcept {
         if (!sram_available()) {
-            if (host_.warn) host_.warn(host_.ctx, kXipWarnSramRead, address, 0);
+            port_.warn(kXipWarnSramRead, address, 0);
             return 0xFFFFFFFFu;
         }
         const uint32_t offset = address & (xip_regs::SRAM_SIZE - 1) & ~3u;
@@ -162,7 +155,7 @@ public:
 
     void sram_write(uint32_t address, uint32_t value) noexcept {
         if (!sram_available()) {
-            if (host_.warn) host_.warn(host_.ctx, kXipWarnSramWrite, address, 0);
+            port_.warn(kXipWarnSramWrite, address, 0);
             return;
         }
         const uint32_t offset = address & (xip_regs::SRAM_SIZE - 1) & ~3u;
@@ -234,22 +227,12 @@ public:
             default: break;
         }
         if (offset > REG_STREAM_FIFO) return true;  // cache maintenance past the register block: nothing to do
-        if (host_.warn) host_.warn(host_.ctx, kXipWarnWrite, offset, value);
+        port_.unimplemented_write(offset, value);
         return !failed();
     }
 
     // `BasePeripheral.write_uint32_atomic`, step for step.
-    bool write_atomic(uint32_t offset, int64_t raw, uint32_t atomic_type) noexcept {
-        raw_write_value_ = raw;
-        int64_t value = raw;
-        if (atomic_type != kAtomicNormal) {
-            value = decode_atomic(atomic_type, static_cast<int64_t>(read(offset)), raw);
-        }
-        if (failed()) return false;
-        return write(offset, value);
-    }
 
-    WindowHandler window_handler() noexcept { return BlockWindow<XipBlock>::handler(this); }
 
     // XIP_AUX: a read-only slave onto the stream FIFO.
     WindowHandler aux_window_handler() noexcept { return WindowHandler{&XipBlock::aux_read32, &XipBlock::aux_write32, this}; }
@@ -293,7 +276,7 @@ private:
     }
 
     // False: a failure is pending.
-    bool update_dreq() noexcept { return host_.dreq(host_.dreq_ctx != nullptr ? host_.dreq_ctx : host_.ctx, fifo_len > 0); }
+    bool update_dreq() noexcept { return port_.dreq(0, fifo_len > 0); }
 
     bool maybe_start_stream() noexcept {
         using namespace xip_regs;
@@ -328,7 +311,6 @@ private:
     uint32_t flash_size_ = 0;
     Alarm stream_alarm_;
     RebaseListener rebase_listener_;
-    int64_t raw_write_value_ = 0;
 };
 
 }  // namespace rp2040core

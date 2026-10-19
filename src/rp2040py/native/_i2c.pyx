@@ -18,10 +18,9 @@ The API is the reference's: the registers' attributes (readable and writable), `
 """
 
 from libc.stdint cimport int64_t, uint32_t
-from libcpp cimport bool as cppbool
 
-from rp2040py.native._mcu_irq cimport Mcu, McuIrqLine, mcu_irq_line, native_mcu
-from rp2040py.native._pending cimport park_error, pending_flag, raise_if_pending
+from rp2040py.native._mcu_irq cimport Mcu
+from rp2040py.native._pending cimport raise_if_pending
 from rp2040py.native._window_map cimport WindowHandler
 
 from rp2040py.peripherals._i2c import I2CMode, I2CSpeed, I2CState
@@ -31,94 +30,6 @@ __all__ = ("RPI2C",)
 cdef uint32_t SPEED_SHIFT = 1
 cdef uint32_t SPEED_MASK = 0x3
 cdef uint32_t SPEED_STANDARD = 1
-
-
-cdef cppbool _irq_trampoline(void* ctx, cppbool level) noexcept:
-    cdef RPI2C i2c = <RPI2C> ctx
-    try:
-        i2c.rp2040.set_interrupt(i2c.irq, level)
-    except BaseException as error:
-        park_error(error)
-        return False
-    return True
-
-
-cdef cppbool _start_trampoline(void* ctx, cppbool repeated) noexcept:
-    cdef RPI2C i2c = <RPI2C> ctx
-    try:
-        callback = i2c._on_start
-        if callback is None:
-            return i2c._block.complete_start()  # the reference's default device: never leaves C++
-        callback(bool(repeated))
-    except BaseException as error:
-        park_error(error)
-        return False
-    return True
-
-
-cdef cppbool _connect_trampoline(void* ctx, uint32_t address, uint32_t mode) noexcept:
-    cdef RPI2C i2c = <RPI2C> ctx
-    try:
-        callback = i2c._on_connect
-        if callback is None:
-            return i2c._block.complete_connect(False, 0)  # the default device NACKs every address
-        callback(address, I2CMode(mode))
-    except BaseException as error:
-        park_error(error)
-        return False
-    return True
-
-
-cdef cppbool _write_trampoline(void* ctx, uint32_t value) noexcept:
-    cdef RPI2C i2c = <RPI2C> ctx
-    try:
-        callback = i2c._on_write_byte
-        if callback is None:
-            return i2c._block.complete_write(False)
-        callback(value)
-    except BaseException as error:
-        park_error(error)
-        return False
-    return True
-
-
-cdef cppbool _read_trampoline(void* ctx, cppbool ack) noexcept:
-    cdef RPI2C i2c = <RPI2C> ctx
-    try:
-        callback = i2c._on_read_byte
-        if callback is None:
-            return i2c._block.complete_read(0xFF)
-        callback(bool(ack))
-    except BaseException as error:
-        park_error(error)
-        return False
-    return True
-
-
-cdef cppbool _stop_trampoline(void* ctx) noexcept:
-    cdef RPI2C i2c = <RPI2C> ctx
-    try:
-        callback = i2c._on_stop
-        if callback is None:
-            return i2c._block.complete_stop()
-        callback()
-    except BaseException as error:
-        park_error(error)
-        return False
-    return True
-
-
-cdef void _warn_trampoline(void* ctx, uint32_t kind, uint32_t offset, int64_t value) noexcept:
-    cdef RPI2C i2c = <RPI2C> ctx
-    try:
-        if kind == kI2cWarnRead:
-            i2c.warn(f"Unimplemented peripheral read from 0x{offset:x}")
-        elif kind == kI2cWarnReadAtomicArea:
-            i2c.warn("Unimplemented read from peripheral in the atomic operation region")
-        else:
-            i2c.warn(f"Unimplemented peripheral write to 0x{offset:x}: 0x{value:x}")
-    except BaseException as error:
-        park_error(error)
 
 
 cdef class _Fifo:
@@ -166,7 +77,6 @@ cdef class _Fifo:
 
 cdef class RPI2C:
     def __init__(self, rp2040, name, irq, mcu_index=-1):
-        cdef I2cHost host
         self.rp2040 = rp2040
         self.name = name
         self.irq = irq
@@ -180,26 +90,9 @@ cdef class RPI2C:
             # the chip's C++ `Mcu` has built this block already - with its window on the bus, its line and request on the chip - and this object is the Python view of it
             self._block = <I2cBlock*> <size_t> rp2040._native_i2c_address(mcu_index)
             return
-        self._block = &self._own
-        mcu = native_mcu(rp2040)
-        if mcu != NULL:
-            # the line goes from the C++ block straight to the chip's CPU, with no Python in between
-            self._irq_line.mcu = mcu
-            self._irq_line.line = <uint32_t> int(irq)
-            host.irq = mcu_irq_line
-            host.irq_ctx = &self._irq_line
-        else:
-            host.irq = _irq_trampoline
-            host.irq_ctx = NULL
-        host.start = _start_trampoline
-        host.connect = _connect_trampoline
-        host.write_byte = _write_trampoline
-        host.read_byte = _read_trampoline
-        host.stop = _stop_trampoline
-        host.warn = _warn_trampoline
-        host.ctx = <void*> self
-        host.failed = pending_flag()
-        self._own.init(host)
+        raise TypeError(
+            "the native block is a view of the chip's C++ `Mcu` block: RPI2C is built by a native chip (the pure-Python chip has the pure-Python peripherals)"
+        )
 
     def _world_start(self, repeated):
         """The device on the bus is asked to produce a (repeated) START; with none attached, the reference's default device answers at once."""
@@ -236,15 +129,6 @@ cdef class RPI2C:
             return bool(self._block.complete_stop())
         callback()
         return True
-
-    def _warn_kind(self, kind, offset, value):
-        """A register access the block does not implement, as the logger's message (the chip's host calls this for the block it built)."""
-        if kind == kI2cWarnRead:
-            self.warn(f"Unimplemented peripheral read from 0x{offset:x}")
-        elif kind == kI2cWarnReadAtomicArea:
-            self.warn("Unimplemented read from peripheral in the atomic operation region")
-        else:
-            self.warn(f"Unimplemented peripheral write to 0x{offset:x}: 0x{value:x}")
 
     # --- the device on the bus -------------------------------------------------------------------
 

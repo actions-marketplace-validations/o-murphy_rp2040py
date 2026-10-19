@@ -104,6 +104,9 @@ class Probe:
                 self.logger = SimpleNamespace(**{n: outer._logger(n) for n in ("debug", "info", "warning", "error")})
                 self._levels = 0
 
+            def set_interrupt(self, irq, level):
+                outer.log.append(("irq", irq, bool(level)))  # the FIFO lines (15 and 16)
+
             @property
             def gpio_values(self):
                 if outer.fail_input:

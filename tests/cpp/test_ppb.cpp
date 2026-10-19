@@ -26,7 +26,10 @@ struct Warn {
     int resets = 0;  // AIRCR.SYSRESETREQ requests
 };
 static void on_system_reset(void* ctx) { ++static_cast<Warn*>(ctx)->resets; }
-static void on_warn(void* ctx, uint32_t kind, uint32_t offset, int64_t value) {
+static constexpr uint32_t kTestBlock = 42;  // the id the block reports its warnings under
+
+static void on_warn(void* ctx, uint32_t block, uint32_t kind, uint32_t offset, int64_t value) {
+    CHECK(block == kTestBlock);
     Warn* w = static_cast<Warn*>(ctx);
     if (w->n < 8) {
         w->kind[w->n] = kind;
@@ -45,12 +48,14 @@ struct Rig {
     Cpu cpu;
     PpbBlock ppb;
     Warn warns;
+    ChipPorts ports;
     Rig() {
+        ports.warn = on_warn;
+        ports.chip = &warns;
         PpbHost host;
-        host.warn = on_warn;
         host.system_reset_request = on_system_reset;
         host.ctx = &warns;
-        ppb.init(&cpu, &clk, host, kHz, kIrqMax);
+        ppb.init(&cpu, &clk, &ports, kTestBlock, host, kHz, kIrqMax);
         ppb.tick_changed(kSysTickRefClk);  // the watchdog's tick is running
     }
     ~Rig() { ppb.detach(); }
@@ -277,7 +282,7 @@ static void check_priorities() {
     r.ppb.write(NVIC_IPR0 + 0x1C, 0xFFFFFFFFu);  // the last word: interrupts 28..31
     CHECK(r.ppb.read(NVIC_IPR0 + 0x1C) == 0xC0C0C0C0u);
     r.ppb.write(NVIC_IPR0 + 0x20, 0xFFFFFFFFu);  // not a priority register
-    CHECK(r.warns.n == 1 && r.warns.kind[0] == kPpbWarnWrite && r.warns.offset[0] == 0x420);
+    CHECK(r.warns.n == 1 && r.warns.kind[0] == kRegWarnWrite && r.warns.offset[0] == 0x420);
 }
 
 static void check_scb_registers() {
@@ -312,7 +317,7 @@ static void check_aircr() {
     Clock clk;
     Cpu cpu;
     PpbHost host;
-    bare.init(&cpu, &clk, host, kHz, kIrqMax);
+    bare.init(&cpu, &clk, nullptr, kTestBlock, host, kHz, kIrqMax);
     bare.write(AIRCR, 0x05FA0004u);
     bare.detach();
 }
@@ -376,9 +381,9 @@ static void check_mpu() {
 static void check_warnings() {
     Rig r;
     CHECK(r.ppb.read(0x004) == 0xFFFFFFFFu);
-    CHECK(r.warns.n == 1 && r.warns.kind[0] == kPpbWarnRead && r.warns.offset[0] == 0x004);
+    CHECK(r.warns.n == 1 && r.warns.kind[0] == kRegWarnRead && r.warns.offset[0] == 0x004);
     r.ppb.write(0xD18, 0x5FA0004u);
-    CHECK(r.warns.n == 2 && r.warns.kind[1] == kPpbWarnWrite && r.warns.offset[1] == 0xD18 && r.warns.value[1] == 0x5FA0004);
+    CHECK(r.warns.n == 2 && r.warns.kind[1] == kRegWarnWrite && r.warns.offset[1] == 0xD18 && r.warns.value[1] == 0x5FA0004);
 }
 
 static void check_reset_restores_systick() {
@@ -409,7 +414,7 @@ static void check_detach_and_clock_destroyed_first() {
     {
         Clock clk;
         PpbHost host;
-        ppb.init(&cpu, &clk, host, kHz, kIrqMax);
+        ppb.init(&cpu, &clk, nullptr, kTestBlock, host, kHz, kIrqMax);
         ppb.tick_changed(kSysTickRefClk);
         ppb.write(SYST_CSR, 1);
         CHECK(clk.has_alarm());

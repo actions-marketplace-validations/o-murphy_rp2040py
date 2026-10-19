@@ -35,7 +35,9 @@ static Env env;
 static Clock clk;
 static RoscBlock rosc;
 
-static void on_warn(void*, uint32_t kind, uint32_t offset, int64_t value) {
+static constexpr uint32_t kTestBlock = 42;  // the id the block reports its warnings under
+static void on_warn(void*, uint32_t block, uint32_t kind, uint32_t offset, int64_t value) {
+    CHECK(block == kTestBlock);
     if (env.warns < 16) {
         env.warn_kind[env.warns] = kind;
         env.warn_offset[env.warns] = offset;
@@ -62,15 +64,20 @@ static bool on_bit(void*, uint32_t* bit) {
     return true;
 }
 
+static const ChipPorts& test_ports() {
+    static ChipPorts ports;
+    ports.warn = on_warn;
+    ports.failed = &env.failed;
+    return ports;
+}
+
 static void fresh() {
     env = Env();
     clk.reset();
     RoscHost host;
-    host.warn = on_warn;
     host.frequency_changed = on_freq;
     host.random_bit = on_bit;
-    host.failed = &env.failed;
-    rosc.init(&clk, host);
+    rosc.init(&clk, &test_ports(), kTestBlock, host);
     CHECK(rosc.reset());
     env.freq_calls = 0;
     env.warns = 0;
@@ -95,10 +102,9 @@ static void test_a_block_that_was_never_reset_is_at_power_on() {
     RoscBlock block;  // the shell only calls init(): the member defaults are the power-on state
     Clock c;
     RoscHost host;
-    host.warn = on_warn;
     host.frequency_changed = on_freq;
     host.random_bit = on_bit;
-    block.init(&c, host);
+    block.init(&c, &test_ports(), kTestBlock, host);
     CHECK(block.read(REG_CTRL) == 0x00FABAA0u && block.read(REG_DORMANT) == WAKE_VALUE && block.read(REG_DIV) == 0xAB0u && block.read(REG_PHASE) == 0x8u);
     CHECK(block.read(REG_STATUS) == 0x80011000u && block.enabled && !block.badwrite && block.hz == 6.5e6 && block.last_bit == 1);
     env.next_bit = 1;
@@ -113,7 +119,7 @@ static void test_every_read_reports_success() {
     }
     CHECK(env.warns == 2);  // 0x24 and 0x1000: one warning each, 0x1000 is not "in the atomic area"
     env.warns = 0;
-    CHECK(rd(0x1000) == 0xFFFFFFFFu && env.warns == 1 && env.warn_kind[0] == kRoscWarnRead);
+    CHECK(rd(0x1000) == 0xFFFFFFFFu && env.warns == 1 && env.warn_kind[0] == kRegWarnRead);
     CHECK(wr(REG_STATUS, 0));  // a write without BADWRITE clears nothing
     CHECK(wr(REG_DIV, 0xAA0u + 31) && env.warns == 1 && rd(REG_DIV) == 0xABFu);  // the largest valid div
     CHECK(wr(REG_STATUS, 0) && !(rd(REG_STATUS) & STATUS_BADWRITE));
@@ -241,9 +247,9 @@ static void test_aliases_unimplemented_offsets_and_the_window() {
     CHECK(rd(REG_DIV) == 0xAA7u && rosc.raw_write_value() == 3);
     CHECK(wr(REG_DIV, 0x1, kAtomicClear) && rd(REG_DIV) == 0xAA6u);
     CHECK(wr(REG_DIV, 0x1, kAtomicSet) && rd(REG_DIV) == 0xAA7u);
-    CHECK(rd(0x24) == 0xFFFFFFFFu && env.warns == 1 && env.warn_kind[0] == kRoscWarnRead && env.warn_offset[0] == 0x24);
-    CHECK(rd(0x1024) == 0xFFFFFFFFu && env.warns == 3 && env.warn_kind[2] == kRoscWarnReadAtomicArea);
-    CHECK(wr(0x28, 5) && env.warns == 4 && env.warn_kind[3] == kRoscWarnWrite && env.warn_value[3] == 5);
+    CHECK(rd(0x24) == 0xFFFFFFFFu && env.warns == 1 && env.warn_kind[0] == kRegWarnRead && env.warn_offset[0] == 0x24);
+    CHECK(rd(0x1024) == 0xFFFFFFFFu && env.warns == 3 && env.warn_kind[2] == kRegWarnReadAtomicArea);
+    CHECK(wr(0x28, 5) && env.warns == 4 && env.warn_kind[3] == kRegWarnWrite && env.warn_value[3] == 5);
     WindowHandler w = rosc.window_handler();
     w.write32(w.ctx, REG_COUNT, 9, kAtomicNormal);
     CHECK(w.read32(w.ctx, REG_COUNT) == 9);
@@ -263,10 +269,10 @@ static void test_failures_stop_at_once() {
     CHECK(!wr(REG_RANDOMBIT, 1, kAtomicXor));  // the read an alias decodes against asks the host for a bit, and fails
     fresh();
     env.failed = 1;
-    CHECK(!wr(REG_COUNT, 5, kAtomicXor) && rd(REG_COUNT) == 0);  // a failure already pending: the write does not happen
-    CHECK(!wr(REG_COUNT, 5) && rd(REG_COUNT) == 0);
+    CHECK(!wr(REG_COUNT, 5, kAtomicXor) && rd(REG_COUNT) == 0);  // a failure already pending: an alias write stops after its decoding read
+    CHECK(wr(REG_COUNT, 5) && rd(REG_COUNT) == 5);  // ...a plain write is not refused for it (the shared rule of RegisterBlock)
     env.failed = 0;
-    CHECK(wr(REG_COUNT, 5) && rd(REG_COUNT) == 5);
+    CHECK(wr(REG_COUNT, 7) && rd(REG_COUNT) == 7);
     fresh();
     CHECK(wr(REG_DIV, 0xAA0u + 2));
     env.fail_freq = true;

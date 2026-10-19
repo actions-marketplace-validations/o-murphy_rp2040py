@@ -38,7 +38,7 @@ static bool on_irq(void* ctx, uint32_t line, bool level) {
     return call != r->fail_irq_on_call;
 }
 
-static void on_warn(void* ctx, uint32_t kind, uint32_t offset, int64_t value) {
+static void on_warn(void* ctx, uint32_t /*block*/, uint32_t kind, uint32_t offset, int64_t value) {
     Recorder* r = static_cast<Recorder*>(ctx);
     if (r->warns < Recorder::kMax) {
         r->warn_kind[r->warns] = kind;
@@ -46,6 +46,16 @@ static void on_warn(void* ctx, uint32_t kind, uint32_t offset, int64_t value) {
         r->warn_value[r->warns] = value;
         ++r->warns;
     }
+}
+
+static constexpr uint32_t kTestBlock = 42;
+
+static ChipPorts ports_of(Recorder& rec) {
+    ChipPorts ports;
+    ports.irq = on_irq;
+    ports.warn = on_warn;
+    ports.chip = &rec;
+    return ports;
 }
 
 static void clear(Recorder& r) {
@@ -60,11 +70,8 @@ static void check_the_tick() {
     Clock clock;
     Recorder rec;
     TimerBlock timer;
-    TimerHost host;
-    host.irq = on_irq;
-    host.warn = on_warn;
-    host.ctx = &rec;
-    timer.init(&clock, host);
+    ChipPorts ports = ports_of(rec);
+    timer.init(&clock, &ports, kTestBlock, 0);
 
     timer.tick_changed(1e6);
     clock.tick(10000);  // 10 us
@@ -152,15 +159,8 @@ int main() {
     Clock clock;
     Recorder rec;
     TimerBlock timer;
-    TimerHost host;
-    host.irq = on_irq;
-    host.warn = on_warn;
-    host.ctx = &rec;
-    host.lines[0] = 10;  // distinct from the register index, to prove the mapping is used
-    host.lines[1] = 11;
-    host.lines[2] = 12;
-    host.lines[3] = 13;
-    timer.init(&clock, host);
+    ChipPorts ports = ports_of(rec);
+    timer.init(&clock, &ports, kTestBlock, 10);  // TIMER_0 is line 10, distinct from the register index, to prove the base is used
 
     // A bare block does not count: the watchdog's tick is not running ("The Watchdog tick must be running for the timer to start counting", datasheet 4.6.4).
     clock.tick(5000);
@@ -282,13 +282,13 @@ int main() {
 
     // Unimplemented registers read as 0xFFFFFFFF and warn - twice in the atomic-alias area - and writes warn too.
     CHECK(rd(timer, 0x44) == 0xFFFFFFFFu);
-    CHECK(rec.warns == 1 && rec.warn_kind[0] == kTimerWarnRead && rec.warn_offset[0] == 0x44);
+    CHECK(rec.warns == 1 && rec.warn_kind[0] == kRegWarnRead && rec.warn_offset[0] == 0x44);
     clear(rec);
     CHECK(rd(timer, 0x2044) == 0xFFFFFFFFu);
-    CHECK(rec.warns == 2 && rec.warn_kind[1] == kTimerWarnReadAtomicArea);
+    CHECK(rec.warns == 2 && rec.warn_kind[1] == kRegWarnReadAtomicArea);
     clear(rec);
     timer.write_atomic(0x44, -2, kAtomicNormal);
-    CHECK(rec.warns == 1 && rec.warn_kind[0] == kTimerWarnWrite && rec.warn_offset[0] == 0x44 && rec.warn_value[0] == -2);
+    CHECK(rec.warns == 1 && rec.warn_kind[0] == kRegWarnWrite && rec.warn_offset[0] == 0x44 && rec.warn_value[0] == -2);
     clear(rec);
 
     // An alias write decodes against a read of the register - so a read side effect (TIMELR's latch) happens.

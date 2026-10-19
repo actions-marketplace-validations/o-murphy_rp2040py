@@ -9,30 +9,15 @@ table (see `_native_window`), so a register access never enters Python. What sta
 """
 
 from libc.stdint cimport int64_t, uint32_t
-from libcpp cimport bool as cppbool
 
-from rp2040py.native._pending cimport park_error, pending_flag, raise_if_pending
+from rp2040py.native._pending cimport raise_if_pending
 from rp2040py.native._window_map cimport WindowHandler
 
 __all__ = ("RPReset",)
 
 
-cdef void _warn_trampoline(void* ctx, uint32_t kind, uint32_t offset, int64_t value) noexcept:
-    cdef RPReset block = <RPReset> ctx
-    try:
-        if kind == kResetsWarnRead:
-            block.warn(f"Unimplemented peripheral read from 0x{offset:x}")
-        elif kind == kResetsWarnReadAtomicArea:
-            block.warn("Unimplemented read from peripheral in the atomic operation region")
-        else:
-            block.warn(f"Unimplemented peripheral write to 0x{offset:x}: 0x{value:x}")
-    except BaseException as error:
-        park_error(error)
-
-
 cdef class RPReset:
     def __init__(self, rp2040, name):
-        cdef ResetsHost host
         self.rp2040 = rp2040
         self.name = name
         address = getattr(rp2040, "_native_resets_address", None)
@@ -41,21 +26,9 @@ cdef class RPReset:
             # the chip's C++ `Mcu` has built the block already - with its window on the bus - and this object is the Python view of it
             self._block = <ResetsBlock*> <size_t> address()
         else:
-            host.warn = _warn_trampoline
-            host.ctx = <void*> self
-            host.failed = pending_flag()
-            self._block = &self._own
-            self._own.init(host)
-
-    def _warn_kind(self, kind, offset, value):
-        """A register access the block does not implement, as the logger's message (the chip's host calls this for the block it built)."""
-        if kind == kResetsWarnRead:
-            self.warn(f"Unimplemented peripheral read from 0x{offset:x}")
-        elif kind == kResetsWarnReadAtomicArea:
-            self.warn("Unimplemented read from peripheral in the atomic operation region")
-        else:
-            self.warn(f"Unimplemented peripheral write to 0x{offset:x}: 0x{value:x}")
-
+            raise TypeError(
+                "the native block is a view of the chip's C++ `Mcu` block: RPReset is built by a native chip (the pure-Python chip has the pure-Python peripherals)"
+            )
     @property
     def raw_write_value(self):
         return self._block.raw_write_value()

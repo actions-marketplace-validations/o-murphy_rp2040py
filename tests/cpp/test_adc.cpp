@@ -22,12 +22,15 @@ static int failures = 0;
 enum Mode { kDefault = 0, kImmediate = 1, kDeferred = 2, kSilent = 3 };
 
 static AdcBlock adc;
+static ChipPorts ports;
+static constexpr uint32_t kTestIrqLine = 22, kTestDreq = 36;  // ADC_IRQ_FIFO, DREQ_ADC
 static Clock clk;
 
 struct Env {
     bool irq_levels[512];
     double irq_times[512];
     int irq_n = 0;
+    uint32_t irq_line = 0, dreq_number = 0;
     bool dreq_levels[512];
     int dreq_n = 0;
     uint32_t reads[256];
@@ -45,7 +48,8 @@ struct Env {
 };
 static Env env;
 
-static bool on_irq(void*, bool level) {
+static bool on_irq(void*, uint32_t line, bool level) {
+    env.irq_line = line;
     if (env.irq_n < 512) {
         env.irq_levels[env.irq_n] = level;
         env.irq_times[env.irq_n] = clk.nanos();
@@ -54,7 +58,8 @@ static bool on_irq(void*, bool level) {
     if (env.fail_irq) { env.failed = 1; return false; }
     return true;
 }
-static bool on_dreq(void*, bool asserted) {
+static bool on_dreq(void*, uint32_t number, bool asserted) {
+    env.dreq_number = number;
     if (env.dreq_n < 512) env.dreq_levels[env.dreq_n] = asserted;
     ++env.dreq_n;
     if (env.fail_dreq) { env.failed = 1; return false; }
@@ -82,7 +87,7 @@ static bool on_channel_value(void*, uint32_t channel, int64_t* value) {
     *value = env.values[channel];
     return true;
 }
-static void on_warn(void*, uint32_t kind, uint32_t offset, int64_t value) {
+static void on_warn(void*, uint32_t, uint32_t kind, uint32_t offset, int64_t value) {
     if (env.warns < 32) {
         env.warn_kind[env.warns] = kind;
         env.warn_offset[env.warns] = offset;
@@ -97,13 +102,14 @@ static void fresh(int mode = kDefault) {
     env.mode = mode;
     clk.reset();
     AdcHost host;
-    host.irq = on_irq;
-    host.dreq = on_dreq;
     host.read = on_read;
     host.channel_value = on_channel_value;
-    host.warn = on_warn;
-    host.failed = &env.failed;
-    adc.init(&clk, host);
+    ports = ChipPorts();
+    ports.warn = on_warn;
+    ports.irq = on_irq;
+    ports.dreq = on_dreq;
+    ports.failed = &env.failed;
+    adc.init(&clk, &ports, 7, kTestIrqLine, kTestDreq, host);
     adc.num_channels = 5;
     adc.sample_time = 2;
     (void)adc.reset();
@@ -426,18 +432,18 @@ static void test_aliases_decode_against_a_read_with_its_side_effects() {
     wr(FCS, FCS_EN);
     CHECK(wr(INTE, 1, kAtomicSet));                                  // plain read, no side effect
     CHECK(wr(0x0C, 5, kAtomicSet) && adc.fifo.count() == 1);        // FIFO has no write handler, but the decode READ pulled 0x11; the write warns
-    CHECK(env.warns == 1 && env.warn_kind[0] == kAdcWarnWrite && env.warn_offset[0] == FIFO && env.warn_value[0] == (0x11 | 5));
+    CHECK(env.warns == 1 && env.warn_kind[0] == kRegWarnWrite && env.warn_offset[0] == FIFO && env.warn_value[0] == (0x11 | 5));
 }
 
 static void test_unimplemented_offsets_warn_and_read_all_ones() {
     fresh();
-    CHECK(rd(0x24) == 0xFFFFFFFFu && env.warns == 1 && env.warn_kind[0] == kAdcWarnRead && env.warn_offset[0] == 0x24);
+    CHECK(rd(0x24) == 0xFFFFFFFFu && env.warns == 1 && env.warn_kind[0] == kRegWarnRead && env.warn_offset[0] == 0x24);
     env.warns = 0;
-    CHECK(rd(0x1004) == 0xFFFFFFFFu && env.warns == 2 && env.warn_kind[1] == kAdcWarnReadAtomicArea);
+    CHECK(rd(0x1004) == 0xFFFFFFFFu && env.warns == 2 && env.warn_kind[1] == kRegWarnReadAtomicArea);
     env.warns = 0;
     CHECK(rd(0x1000) == 0xFFFFFFFFu && env.warns == 1);
     env.warns = 0;
-    CHECK(wr(0x04, 0x77) && env.warns == 1 && env.warn_kind[0] == kAdcWarnWrite && env.warn_offset[0] == 0x04 && env.warn_value[0] == 0x77);   // RESULT is read-only
+    CHECK(wr(0x04, 0x77) && env.warns == 1 && env.warn_kind[0] == kRegWarnWrite && env.warn_offset[0] == 0x04 && env.warn_value[0] == 0x77);   // RESULT is read-only
     env.warns = 0;
     CHECK(wr(INTR, 1) && wr(INTS, 1) && wr(FIFO, 1) && env.warns == 3);
 }

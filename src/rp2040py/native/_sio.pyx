@@ -20,7 +20,7 @@ pair, the divider's operands) are properties; `interp0`/`interp1` are views of t
 from libc.stdint cimport int64_t, uint32_t
 from libcpp cimport bool
 
-from rp2040py.native._pending cimport park_error, raise_if_pending
+from rp2040py.native._pending cimport park_error, pending_flag, raise_if_pending
 from rp2040py.native._window_map cimport WindowHandler
 
 __all__ = ("RPSIO",)
@@ -72,12 +72,23 @@ cdef void _cycles_trampoline(void* ctx, uint32_t cycles) noexcept:
         park_error(error)
 
 
-cdef void _warn_trampoline(void* ctx, uint32_t kind, uint32_t offset, int64_t value) noexcept:
-    cdef RPSIO sio = <RPSIO> ctx
+cdef void _ports_warn(void* chip, uint32_t block, uint32_t kind, uint32_t offset, int64_t value) noexcept:
+    cdef RPSIO sio = <RPSIO> chip
     try:
         sio._warn_kind(kind, offset, value)
     except BaseException as error:
         park_error(error)
+
+
+cdef bool _ports_irq(void* chip, uint32_t line, bool level) noexcept:
+    # a block made on its own (a stand-in chip, a test): the FIFO lines go to the chip's Python `set_interrupt`, as a pure-Python SIO does
+    cdef RPSIO sio = <RPSIO> chip
+    try:
+        sio.rp2040.set_interrupt(line, True if level else False)
+    except BaseException as error:
+        park_error(error)
+        return False
+    return True
 
 
 cdef class _InterpolatorView:
@@ -191,9 +202,12 @@ cdef class RPSIO:
             host.qspi_in = _qspi_in_trampoline
             host.update_pins = _update_pins_trampoline
             host.add_cycles = _cycles_trampoline
-            host.warn = _warn_trampoline
             host.ctx = <void*> self
-            self._own.init(host)
+            self._ports.chip = <void*> self
+            self._ports.warn = _ports_warn
+            self._ports.irq = _ports_irq
+            self._ports.failed = pending_flag()
+            self._own.init(&self._ports, 0, host)
         self._interp0 = _InterpolatorView(self, 0)
         self._interp1 = _InterpolatorView(self, 1)
 
@@ -256,43 +270,43 @@ cdef class RPSIO:
 
     @property
     def div_dividend(self):
-        return self._block.div_dividend
+        return self._block.core(0).div_dividend
 
     @div_dividend.setter
     def div_dividend(self, value):
-        self._block.div_dividend = <int64_t> value
+        self._block.core(0).div_dividend = <int64_t> value
 
     @property
     def div_divisor(self):
-        return self._block.div_divisor
+        return self._block.core(0).div_divisor
 
     @div_divisor.setter
     def div_divisor(self, value):
-        self._block.div_divisor = <int64_t> value
+        self._block.core(0).div_divisor = <int64_t> value
 
     @property
     def div_quotient(self):
-        return self._block.div_quotient
+        return self._block.core(0).div_quotient
 
     @div_quotient.setter
     def div_quotient(self, value):
-        self._block.div_quotient = <double> value
+        self._block.core(0).div_quotient = <double> value
 
     @property
     def div_remainder(self):
-        return self._block.div_remainder
+        return self._block.core(0).div_remainder
 
     @div_remainder.setter
     def div_remainder(self, value):
-        self._block.div_remainder = <int64_t> value
+        self._block.core(0).div_remainder = <int64_t> value
 
     @property
     def div_csr(self):
-        return self._block.div_csr
+        return self._block.core(0).div_csr
 
     @div_csr.setter
     def div_csr(self, value):
-        self._block.div_csr = <uint32_t> (<int64_t> value)
+        self._block.core(0).div_csr = <uint32_t> (<int64_t> value)
 
     @property
     def spin_lock(self):

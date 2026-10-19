@@ -50,6 +50,7 @@ struct BatchParams {
     double yield_budget_seconds = 0.005;
     int check_interval = 256;
     double paced_idle_nanos = 1e6;      // the longest idle jump while `real_io` is set (1 ms of simulated time)
+    int quantum_cycles = 16;            // two cores only (batch_dual.hpp): the cycles a core runs ahead of the other between synchronisation points; 1 is the exact scheduler
 };
 
 // Why a batch ended (`BatchResult::reason`). Exactly one holds; they are checked in this order.
@@ -95,6 +96,7 @@ inline int run_batch(Cpu& cpu, Clock& clock, const BatchHost& host, const BatchP
     const double batch_start = host.monotonic(host.ctx);
     int64_t pending_cycles = 0;
     int pending_count = 0;
+    double idle_carry = 0.0;  // idle time, in ticks, not yet handed to the PIO as whole cycles
     int64_t tick_budget = clock.has_alarm() ? clock.ticks_to_next_alarm() : kNoAlarm;
     // The flag addresses in registers instead of reloaded from the host struct on every iteration (the flags themselves are still
     // read every time: a firmware write that starts a PIO must make it step on the very next instruction).
@@ -128,7 +130,11 @@ inline int run_batch(Cpu& cpu, Clock& clock, const BatchHost& host, const BatchP
             if (!clock.tick_ticks(idle_ticks)) return done(kBatchFault, kStopFault);
             // The system clocks that jump covered, floored at one: an idle jump with no alarm advances time by nothing, and a PIO
             // frozen whenever the CPU parks in WFI with an empty alarm queue could never make the progress that wakes it again.
-            cycles = static_cast<int64_t>(static_cast<double>(idle_ticks) / ticks_per_cycle);
+            // The fraction of a cycle a jump leaves is CARRIED to the next jump (as the CPU's own time carries it): flooring each jump on its own dropped it every time, and on a clock that is not a whole
+            // number of ticks per cycle (133 MHz) a PIO behind many short jumps ran slow against the clock (record 0105, finding 2).
+            idle_carry += static_cast<double>(idle_ticks);
+            cycles = static_cast<int64_t>(idle_carry / ticks_per_cycle);
+            idle_carry -= static_cast<double>(cycles) * ticks_per_cycle;
             if (cycles == 0) cycles = 1;
             if (params.tick_batch > 1) tick_budget = clock.has_alarm() ? clock.ticks_to_next_alarm() : kNoAlarm;
         } else {

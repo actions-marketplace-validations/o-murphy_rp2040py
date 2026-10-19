@@ -1,7 +1,9 @@
+import os
 from collections.abc import Callable, Coroutine
 from typing import TYPE_CHECKING, Any
 
 from rp2040py._cortex_m0_core import CortexM0Core
+from rp2040py._execute_batch import CORE1_ROM_RETURN
 from rp2040py._gpio_pin import GPIOPin
 from rp2040py._pin_bank import GPIOPinBank
 from rp2040py._sio import RPSIO
@@ -154,6 +156,21 @@ class RP2040:
         self.dpram_byte_size = len(self.usb_dpram)
 
         self.core = CortexM0Core(self)
+        # The second core (record 0104): it exists from the start and is not run until a launch (`launch_core1`); the SIO's inter-core FIFOs and the launch handshake are off until
+        # `set_core1_enabled(True)` (the C++ core's default too).
+        self.core1 = CortexM0Core(self)
+        self.cores = (self.core, self.core1)
+        self.core.peer = self.core1
+        self.core1.peer = self.core
+        self.initiator = 0  # which core is making the access in progress: the SIO and the PPB are banked by it
+        self.core1_running = False
+        self.quantum_cycles = 16  # two cores only (record 0104): the cycles a core runs ahead of the other between synchronisation points; 1 is the exact scheduler
+        self.batch_exit: list[bool] | None = (
+            None  # the batch loop's "leave at the next iteration" flag while one runs: a launch or a hold of core 1 raises it (the other loop runs the next batch)
+        )
+        self._sync: Callable[[], None] | None = (
+            None  # while two cores run: called before every access that leaves RAM and flash (the scheduler of `_execute_batch.py`)
+        )
 
         # Clocks
         self.clk_sys: float = 125 * MHZ
@@ -164,7 +181,17 @@ class RP2040:
         self._clock_listeners: set = set()
 
         self.ppb = RPPPB(self, "PPB")
+        self.ppb1 = RPPPB(
+            self, "PPB", core=self.core1
+        )  # core 1's SysTick, SCR, MPU and NVIC window, reached when the initiator is core 1
         self.sio = RPSIO(self)
+        if os.environ.get("RP2040PY_CORE1", "1").lower() in (
+            "0",
+            "off",
+            "false",
+            "no",
+        ):  # the CLI's --no-core1 sets it: the second core is on unless asked to be off
+            self.set_core1_enabled(False)
 
         self.uart = [
             RPUART(
@@ -466,7 +493,11 @@ class RP2040:
         all, so `BasePeripheral`'s default no-op is their correct implementation.
         """
         if from_watchdog:
-            psm_wdsel = self.psm.wdsel
+            psm_wdsel = self.psm.wdsel & PSM_BITS_MASK
+            if psm_wdsel:
+                # "if a peripheral in the power-on state machine has the WDSEL bit set, every peripheral after it in the power-on sequence will also be reset" (datasheet 2.13.4): the bits of
+                # PSM.WDSEL are in sequence order (ROSC 0 .. PROC1 16), so the lowest bit set selects itself and everything above it.
+                psm_wdsel = PSM_BITS_MASK & ~((psm_wdsel & -psm_wdsel) - 1)
             resets_wdsel = self.resets.wdsel
             if psm_wdsel & WDSEL_RESETS:
                 # The RESETS controller itself is in the watchdog's reset domain, and a reset
@@ -484,7 +515,10 @@ class RP2040:
         # asked for, which is the exact hang `BaseDevice._on_watchdog_trigger()` exists to prevent
         # (it predates this phase). Revisit only with a firmware that actually depends on it.
         self.core.reset()
+        self.core1.reset_state()  # (core 1 is not running: back to power-on without a vector fetch)
+        self.core1_running = False
         self.ppb.reset()
+        self.ppb1.reset()
 
         if psm_wdsel & WDSEL_SIO:
             self.sio.reset()
@@ -601,8 +635,10 @@ class RP2040:
             return read_uint32_le(self.sram, address - RAM_START_ADDRESS)
         if DPRAM_START_ADDRESS <= address < DPRAM_START_ADDRESS + self.dpram_byte_size:
             return read_uint32_le(self.usb_dpram, address - DPRAM_START_ADDRESS)
+        if self._sync is not None:
+            self._sync()
         if address >> 12 == 0xE000E:
-            return self.ppb.read_uint32(address & 0xFFF)
+            return (self.ppb1 if self.initiator else self.ppb).read_uint32(address & 0xFFF)
         if SIO_START_ADDRESS <= address < SIO_START_ADDRESS + 0x10000000:
             # int(): SIO's DIV_QUOTIENT can be a fractional JS number (see sio.py) - any real JS
             # consumer (typed-array store, bitwise op) truncates it immediately via ToUint32, so
@@ -663,10 +699,16 @@ class RP2040:
             write_uint32_le(self.usb_dpram, offset, value)
             self.usb_ctrl.dpram_updated(offset, value)
         elif SIO_START_ADDRESS <= address < SIO_START_ADDRESS + 0x10000000:
+            if self._sync is not None:
+                self._sync()
             self.sio.write_uint32(address - SIO_START_ADDRESS, value)
         elif address >> 12 == 0xE000E:
-            self.ppb.write_uint32(address & 0xFFF, value)
+            if self._sync is not None:
+                self._sync()
+            (self.ppb1 if self.initiator else self.ppb).write_uint32(address & 0xFFF, value)
         else:
+            if self._sync is not None:
+                self._sync()
             peripheral = self.find_peripheral(address)
             if peripheral:
                 atomic_type = (address & 0x3000) >> 12
@@ -729,7 +771,52 @@ class RP2040:
         return self._gpio_bank.input_values()
 
     def set_interrupt(self, irq: int, value: bool) -> None:
+        # Every NVIC has the same system interrupts routed to it (datasheet 2.3.2) - except the two GPIO ones, which are one per bank PER CORE (`set_interrupt_core`). Core 1 is not reached while
+        # it is not running (as in the C++ core); it starts with the lines core 0 has pending.
         self.core.set_interrupt(irq, value)
+        if self.core1_running and irq != IRQ.IO_BANK0 and irq != IRQ.IO_QSPI:
+            self.core1.set_interrupt(irq, value)
+
+    def set_interrupt_core(self, core: int, irq: int, value: bool) -> None:
+        """One core's own line (IO_IRQ_BANK0 / IO_IRQ_QSPI carry a different level on each core)."""
+        self.cores[core].set_interrupt(irq, value)
+
+    def set_core1_enabled(self, on: bool) -> None:
+        """The inter-core FIFOs and the boot ROM's launch handshake (which the SIO answers): on by default; off gives back the old stub (the registers warn and read as 0xFFFFFFFF)."""
+        self.sio.multicore = bool(on)
+
+    def send_event(self, core: int) -> None:
+        """An event (what a `SEV` does) for core `core`: asleep in a WFE it wakes (the event is consumed), otherwise the flag is sticky and its next WFE does not sleep."""
+        target = self.cores[core]
+        if target.waiting and target.event_wait:
+            target.waiting = False
+            target.event_wait = False
+        else:
+            target.event_registered = True
+
+    def launch_core1(self, vector_table: int, sp: int, pc: int) -> None:
+        """Core 1 starts at the vector table, stack and entry core 0 sent it (the handshake of datasheet 2.8.2, answered by the SIO)."""
+        core = self.core1
+        core.reset_state()
+        core.vtor = vector_table
+        core.sp = sp & 0xFFFFFFFC
+        core.pc = pc & 0xFFFFFFFE
+        core.registers[14] = (
+            CORE1_ROM_RETURN | 1
+        )  # (an entry function that returns lands back in the boot ROM: see _execute_batch)
+        core.pending_interrupts = self.core.pending_interrupts & ~((1 << IRQ.IO_BANK0) | (1 << IRQ.IO_QSPI))
+        core.interrupts_updated = True
+        self.core1_running = True
+        if self.batch_exit is not None:
+            self.batch_exit[0] = True
+
+    def hold_core1(self) -> None:
+        """Core 1 goes back to the boot ROM (PSM.FRCE_OFF PROC1, `multicore_reset_core1()`): it stops, its FIFOs are emptied and a new handshake is needed."""
+        self.core1_running = False
+        self.core1.reset_state()
+        self.sio.reset_core1()
+        if self.batch_exit is not None:
+            self.batch_exit[0] = True
 
     def update_io_interrupt(self) -> None:
         self.set_interrupt(IRQ.IO_BANK0, self._gpio_bank.any_irq_value())

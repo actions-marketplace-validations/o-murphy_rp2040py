@@ -16,32 +16,30 @@
 
 namespace rp2040core {
 
-constexpr uint32_t kPsmWarnRead = kRegWarnRead, kPsmWarnReadAtomicArea = kRegWarnReadAtomicArea, kPsmWarnWrite = kRegWarnWrite;
-
-struct PsmHost {
-    RegWarnFn warn = nullptr;
-    void* ctx = nullptr;
-    const int* failed = nullptr;  // the shared parked-failure flag (see _pending.pyx)
-};
 
 namespace psm_regs {
 constexpr uint32_t FRCE_ON = 0x00, FRCE_OFF = 0x04, REG_WDSEL = 0x08, REG_DONE = 0x0C, BITS_MASK = 0x0001FFFF;
 }  // namespace psm_regs
 
-class PsmBlock {
+class PsmBlock : public RegisterBlock<PsmBlock> {
 public:
     PsmBlock() = default;
     PsmBlock(const PsmBlock&) = delete;  // the window handler holds a pointer to this object
     PsmBlock& operator=(const PsmBlock&) = delete;
 
-    void init(const PsmHost& host) noexcept { host_ = host; }
+    void init(const ChipPorts* ports, uint32_t block) noexcept { port_.init(ports, block); }
 
-    bool failed() const noexcept { return host_failed(host_.failed); }
-    int64_t raw_write_value() const noexcept { return raw_write_value_; }
 
     uint32_t frce_on = 0;
     uint32_t frce_off = 0;
     uint32_t wdsel = 0;
+
+    // PROC1 is bit 16: forcing it off holds core 1 in reset (`multicore_reset_core1()` does it and clears it again). The chip is told each time the held state changes (record 0104).
+    using Proc1Fn = void (*)(void* ctx, bool held);
+    void bind_proc1(Proc1Fn fn, void* ctx) noexcept {
+        proc1_fn_ = fn;
+        proc1_ctx_ = ctx;
+    }
 
     uint32_t read(uint32_t offset) noexcept {
         using namespace psm_regs;
@@ -49,10 +47,7 @@ public:
         if (offset == FRCE_OFF) return frce_off;
         if (offset == REG_WDSEL) return wdsel;
         if (offset == REG_DONE) return (BITS_MASK & ~frce_off) | (frce_on & frce_off);
-        if (host_.warn) {
-            host_.warn(host_.ctx, kPsmWarnRead, offset, 0);
-            if (offset > 0x1000) host_.warn(host_.ctx, kPsmWarnReadAtomicArea, offset, 0);
-        }
+        port_.unimplemented_read(offset);
         return 0xFFFFFFFFu;
     }
 
@@ -61,32 +56,35 @@ public:
         const uint32_t v = static_cast<uint32_t>(value) & BITS_MASK;
         if (offset == FRCE_ON) {
             frce_on = v;
+            proc1_changed();
         } else if (offset == FRCE_OFF) {
             frce_off = v;
+            proc1_changed();
         } else if (offset == REG_WDSEL) {
             wdsel = v;
         } else if (offset == REG_DONE) {
             // read-only: no effect
-        } else if (host_.warn) {
-            host_.warn(host_.ctx, kPsmWarnWrite, offset, value);
+        } else {
+            port_.unimplemented_write(offset, value);
         }
         return true;
     }
 
     // `BasePeripheral.write_uint32_atomic`, step for step.
-    bool write_atomic(uint32_t offset, int64_t raw, uint32_t atomic_type) noexcept {
-        raw_write_value_ = raw;
-        int64_t value = raw;
-        if (atomic_type != kAtomicNormal) value = decode_atomic(atomic_type, static_cast<int64_t>(read(offset)), raw);
-        if (failed()) return false;
-        return write(offset, value);
-    }
 
-    WindowHandler window_handler() noexcept { return BlockWindow<PsmBlock>::handler(this); }
 
 private:
-    PsmHost host_;
-    int64_t raw_write_value_ = 0;
+    bool proc1_held() const noexcept { return (frce_off & ~frce_on & (1u << 16)) != 0; }  // (FRCE_ON overrides FRCE_OFF)
+    void proc1_changed() noexcept {
+        const bool held = proc1_held();
+        if (held != proc1_was_held_) {
+            proc1_was_held_ = held;
+            if (proc1_fn_ != nullptr) proc1_fn_(proc1_ctx_, held);
+        }
+    }
+    Proc1Fn proc1_fn_ = nullptr;
+    void* proc1_ctx_ = nullptr;
+    bool proc1_was_held_ = false;
 };
 
 }  // namespace rp2040core

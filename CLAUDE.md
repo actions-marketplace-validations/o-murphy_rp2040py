@@ -44,6 +44,13 @@ run the full `pre-commit` pass before considering work done.
 
 If `uv` isn't on `PATH` in the shell, prefix with `export PATH="$HOME/.local/bin:$PATH"` first.
 
+### The lockstep oracles come in tiers (`--oracle`)
+
+The differential oracles and parity tests (`tests/test_*_diff.py`, `*parity*`) are ~87 % of the suite's time. `pytest --oracle=full` (the default; also `RP2040PY_ORACLE=full`) runs all of
+them - that is what `pre-commit` and CI do on every push. `--oracle=smoke` keeps the first parameter set of each oracle test (one seed, one mutant): that is what `cibuildwheel`'s
+`test-command` runs on every platform (a built wheel only has to show its compiled code still agrees with the reference, in about a quarter of the time), and `--oracle=off` is for the
+platforms that cannot run them (Pyodide, Android). The mechanism is `tests/conftest.py` (`tests/test_oracle_option.py` holds it); a new oracle needs nothing but the file name.
+
 ### Keep `uv` current - an old one silently breaks CI
 
 **In any session with network access, check `uv --version` against the latest release and upgrade
@@ -125,11 +132,10 @@ Prefer driving `Simulator._execute_batch()` directly (synchronous, no real OS th
 `start_execution()` + a real background thread, whenever a test doesn't specifically need to
 verify cross-thread behavior - the established pattern in most of `tests/test_simulator.py`.
 
-When a test genuinely needs a real background thread (`schedule_threadsafe()`, cross-thread
+The library starts no thread of its own (the engine runs on the thread that pumps it). When a test genuinely needs a thread of its own (a producer calling `schedule_threadsafe()`, cross-thread
 callbacks, etc.):
-- Always wrap the risky body in `try: ... finally: simulator.stop()`. A leaked engine-room thread
-  with `core.waiting=True` busy-loops a full CPU core for the rest of the test session -
-  "idle" doesn't mean cheap to leak here.
+- Always wrap the risky body in `try: ... finally: simulator.stop()` and pump the loop once afterwards. A `core.waiting=True` engine that is left running busy-loops a full CPU core for the rest of
+  the test session - "idle" doesn't mean cheap to leak here.
 - Don't add a blocking "wait for settle" API to `Simulator` itself to paper over a race (a
   `Simulator.stop(wait=True)` blocking on `future.result()` was tried and reverted - it
   measurably slowed the whole suite and could hang under real system load). Fix the race at the

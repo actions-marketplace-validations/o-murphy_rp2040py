@@ -41,7 +41,10 @@ struct Env {
 };
 static Env env;
 
-static void on_warn(void*, uint32_t kind, uint32_t offset, int64_t value) {
+static constexpr uint32_t kTestBlock = 42;  // the id the block reports its warnings under
+static void on_warn(void*, uint32_t block, uint32_t kind, uint32_t offset, int64_t value) {
+    CHECK(block == kTestBlock);
+
     if (env.warns < 8) {
         env.warn_kind[env.warns] = kind;
         env.warn_offset[env.warns] = offset;
@@ -78,24 +81,27 @@ static ClocksBlock clocks;
 static double pll_ref(void*) { return env.xosc; }
 static bool pll_changed(void*) { return clocks.retune(); }
 
+static const ChipPorts& test_ports() {
+    static ChipPorts ports;
+    ports.warn = on_warn;
+    ports.failed = &env.failed;
+    return ports;
+}
+
 static void fresh() {
     env = Env();
     clk.reset();
     PllHost ph;
-    ph.warn = on_warn;
     ph.ref_hz = pll_ref;
     ph.changed = pll_changed;
-    ph.failed = &env.failed;
-    pll_sys.init(ph);
-    pll_usb.init(ph);
+    pll_sys.init(&test_ports(), kTestBlock, ph);
+    pll_usb.init(&test_ports(), kTestBlock, ph);
     pll_sys.reset();
     pll_usb.reset();
     ClocksHost host;
-    host.warn = on_warn;
     host.xosc_hz = on_xosc;
     host.rosc_hz = on_rosc;
-    host.failed = &env.failed;
-    clocks.init(&clk, host, &pll_sys, &pll_usb);
+    clocks.init(&clk, &test_ports(), kTestBlock, host, &pll_sys, &pll_usb);
     CHECK(clocks.add_sys_sink(on_sys, nullptr));
     CHECK(clocks.add_sys_sink(on_sys2, nullptr));
     CHECK(clocks.add_peri_sink(on_peri, nullptr));
@@ -552,12 +558,12 @@ static void test_a_new_count_replaces_the_one_in_progress_and_reset_clears_it() 
 static void test_unimplemented_offsets_warn() {
     fresh();
     CHECK(clocks.read(0xC8) == 0xFFFFFFFFu);
-    CHECK(env.warns == 1 && env.warn_kind[0] == kClocksWarnRead && env.warn_offset[0] == 0xC8);
+    CHECK(env.warns == 1 && env.warn_kind[0] == kRegWarnRead && env.warn_offset[0] == 0xC8);
     W(0xCC, 7);
-    CHECK(env.warns == 2 && env.warn_kind[1] == kClocksWarnWrite && env.warn_value[1] == 7);
+    CHECK(env.warns == 2 && env.warn_kind[1] == kRegWarnWrite && env.warn_value[1] == 7);
     fresh();
     CHECK(clocks.read(0x1008) == 0xFFFFFFFFu);
-    CHECK(env.warns == 2 && env.warn_kind[1] == kClocksWarnReadAtomicArea);
+    CHECK(env.warns == 2 && env.warn_kind[1] == kRegWarnReadAtomicArea);
     fresh();
     CHECK(clocks.read(0x1000) == 0xFFFFFFFFu);  // the atomic area starts above 0x1000
     CHECK(env.warns == 1);
@@ -581,21 +587,17 @@ static bool rosc_bit_host(void*, uint32_t* bit) {
     *bit = 0;
     return true;
 }
-static void rosc_warn_host(void*, uint32_t, uint32_t, int64_t) {}
 
 static void test_the_tree_reads_the_oscillators_from_their_blocks() {
     fresh();
     XoscBlock xosc;
     XoscHost xhost;
-    xhost.warn = on_warn;
-    xhost.failed = &env.failed;
-    xosc.init(xhost);
+    xosc.init(&test_ports(), kTestBlock, xhost);
     RoscBlock rosc;
     RoscHost rhost;
-    rhost.warn = rosc_warn_host;
     rhost.frequency_changed = rosc_freq_host;
     rhost.random_bit = rosc_bit_host;
-    rosc.init(&clk, rhost);
+    rosc.init(&clk, &test_ports(), kTestBlock, rhost);
 
     CHECK(clocks.xosc_hz() == 12 * MHZ && clocks.rosc_hz() == 6.5 * MHZ);  // (the host's answers)
     clocks.bind_xosc(&xosc);
@@ -635,15 +637,12 @@ static void test_the_oscillators_tell_the_tree_directly() {
     sdk_clocks();  // clk_ref on the crystal, clk_sys on PLL_SYS, clk_peri on clk_sys
     XoscBlock xosc;
     XoscHost xhost;
-    xhost.warn = on_warn;
-    xhost.failed = &env.failed;
-    xosc.init(xhost);
+    xosc.init(&test_ports(), kTestBlock, xhost);
     RoscBlock rosc;
     RoscHost rhost;
-    rhost.warn = rosc_warn_host;
     rhost.frequency_changed = rosc_freq_host;
     rhost.random_bit = rosc_bit_host;
-    rosc.init(&clk, rhost);
+    rosc.init(&clk, &test_ports(), kTestBlock, rhost);
     clocks.bind_xosc(&xosc);
     clocks.bind_rosc(&rosc);
     xosc.bind_stable_listener(clocks_retune, &clocks);

@@ -7,21 +7,9 @@ from libcpp cimport bool as cppbool
 from rp2040py.native._window_map cimport WindowHandler
 
 cdef extern from "resets.hpp" namespace "rp2040core":
-    cdef const uint32_t kResetsWarnRead
-    cdef const uint32_t kResetsWarnReadAtomicArea
-    cdef const uint32_t kResetsWarnWrite
-
-    ctypedef void (*ResetsWarnFn)(void* ctx, uint32_t kind, uint32_t offset, int64_t value)
-
-    cdef cppclass ResetsHost:
-        ResetsHost() noexcept
-        ResetsWarnFn warn
-        void* ctx
-        const int* failed
 
     cdef cppclass ResetsBlock:
         ResetsBlock() noexcept
-        void init(const ResetsHost& host) noexcept
         int64_t raw_write_value() noexcept
         uint32_t reset_bits
         uint32_t wdsel
@@ -31,8 +19,7 @@ cdef extern from "resets.hpp" namespace "rp2040core":
         WindowHandler window_handler() noexcept
 
 cdef class RPReset:
-    cdef ResetsBlock* _block  # the chip's (`Mcu` builds it), or `_own` for a block made directly (a stand-in chip, a test)
-    cdef ResetsBlock _own
+    cdef ResetsBlock* _block  # the chip's own (core/mcu.hpp): this object is its Python view
     cdef public bint _from_mcu
     cdef public object rp2040
     cdef public object name

@@ -27,7 +27,10 @@ struct Env {
 };
 static Env env;
 
-static void on_warn(void*, uint32_t kind, uint32_t offset, int64_t value) {
+static constexpr uint32_t kTestBlock = 42;  // the id the block reports its warnings under
+static void on_warn(void*, uint32_t block, uint32_t kind, uint32_t offset, int64_t value) {
+    CHECK(block == kTestBlock);
+
     if (env.warns < 16) {
         env.warn_kind[env.warns] = kind;
         env.warn_offset[env.warns] = offset;
@@ -47,13 +50,18 @@ static bool on_stable(void*) {
 
 static XoscBlock block;
 
+static const ChipPorts& test_ports() {
+    static ChipPorts ports;
+    ports.warn = on_warn;
+    ports.failed = &env.failed;
+    return ports;
+}
+
 static void fresh() {
     env = Env();
     XoscHost host;
-    host.warn = on_warn;
     host.stable_changed = on_stable;
-    host.failed = &env.failed;
-    block.init(host);
+    block.init(&test_ports(), kTestBlock, host);
     block.reset();
 }
 
@@ -135,11 +143,11 @@ static void test_reset_puts_everything_back() {
 static void test_unimplemented_offsets_warn() {
     fresh();
     CHECK(block.read(0x10) == 0xFFFFFFFFu);
-    CHECK(env.warns == 1 && env.warn_kind[0] == kXoscWarnRead && env.warn_offset[0] == 0x10);
+    CHECK(env.warns == 1 && env.warn_kind[0] == kRegWarnRead && env.warn_offset[0] == 0x10);
     CHECK(block.read(0x3000) == 0xFFFFFFFFu);
-    CHECK(env.warns == 3 && env.warn_kind[2] == kXoscWarnReadAtomicArea);
+    CHECK(env.warns == 3 && env.warn_kind[2] == kRegWarnReadAtomicArea);
     CHECK(block.write(0x14, 9));
-    CHECK(env.warns == 4 && env.warn_kind[3] == kXoscWarnWrite && env.warn_offset[3] == 0x14 && env.warn_value[3] == 9);
+    CHECK(env.warns == 4 && env.warn_kind[3] == kRegWarnWrite && env.warn_offset[3] == 0x14 && env.warn_value[3] == 9);
 }
 
 static void test_alias_writes_decode_against_a_read_and_remember_the_raw_value() {

@@ -11,18 +11,11 @@ table (see `_native_window`), so a register access never enters Python. What sta
 from libc.stdint cimport int64_t, uint32_t
 from libcpp cimport bool as cppbool
 
-from rp2040py.native._pending cimport park_error, pending_flag, raise_if_pending
+from rp2040py.native._pending cimport park_error, raise_if_pending
 from rp2040py.native._window_map cimport WindowHandler
+from rp2040py.native._register_warning import register_warning
 
 __all__ = ("RPXOSC",)
-
-
-cdef void _warn_trampoline(void* ctx, uint32_t kind, uint32_t offset, int64_t value) noexcept:
-    cdef RPXOSC block = <RPXOSC> ctx
-    try:
-        block._warn_kind(kind, offset, value)
-    except BaseException as error:
-        park_error(error)
 
 
 cdef cppbool _stable_trampoline(void* ctx) noexcept:
@@ -38,7 +31,6 @@ cdef cppbool _stable_trampoline(void* ctx) noexcept:
 
 cdef class RPXOSC:
     def __init__(self, rp2040, name, mcu_index=-1):
-        cdef XoscHost host
         self.rp2040 = rp2040
         self.name = name
         self._from_mcu = mcu_index >= 0
@@ -46,12 +38,9 @@ cdef class RPXOSC:
             # the chip's C++ `Mcu` has built this block already - with its window on the bus and its notices to the clock tree - and this object is the Python view of it
             self._block = <XoscBlock*> <size_t> rp2040._native_xosc_address()
             return
-        self._block = &self._own
-        host.warn = _warn_trampoline
-        host.stable_changed = _stable_trampoline
-        host.ctx = <void*> self
-        host.failed = pending_flag()
-        self._own.init(host)
+        raise TypeError(
+            "the native block is a view of the chip's C++ `Mcu` block: RPXOSC is built by a native chip (the pure-Python chip has the pure-Python peripherals)"
+        )
 
     def _rejoin_the_python_tree(self, tree):
         """`tree` is going away (the chip's clock tree was replaced): tell the chip through Python again, if this block was telling that tree."""
@@ -62,18 +51,14 @@ cdef class RPXOSC:
 
     def _warn_kind(self, kind, offset, value):
         """A register access the block does not implement, as the logger's message (the chip's host calls this for the block it built)."""
-        if kind == kXoscWarnRead:
-            self.warn(f"Unimplemented peripheral read from 0x{offset:x}")
-        elif kind == kXoscWarnReadAtomicArea:
-            self.warn("Unimplemented read from peripheral in the atomic operation region")
-        elif kind == kXoscWarnInvalidFreqRange:
+        if kind == kXoscWarnInvalidFreqRange:
             self.warn(f"Invalid FREQ_RANGE value written: 0x{value:x}")
         elif kind == kXoscWarnInvalidEnable:
             self.warn(f"Invalid ENABLE value written: 0x{value:x}")
         elif kind == kXoscWarnInvalidDormant:
             self.warn(f"Invalid DORMANT value written: 0x{value:x}")
         else:
-            self.warn(f"Unimplemented peripheral write to 0x{offset:x}: 0x{value:x}")
+            self.warn(register_warning(kind, offset, value))
 
     @property
     def raw_write_value(self):

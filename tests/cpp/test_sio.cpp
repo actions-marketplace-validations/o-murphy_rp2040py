@@ -41,7 +41,10 @@ static bool host_update_pins(void* c, uint32_t mask, bool qspi) {
     return !e->fail_updates;
 }
 static void host_add_cycles(void* c, uint32_t n) { static_cast<Env*>(c)->cycles += n; }
-static void host_warn(void* c, uint32_t kind, uint32_t offset, int64_t value) {
+static constexpr uint32_t kTestBlock = 42;  // the id the block reports its warnings under
+
+static void host_warn(void* c, uint32_t block, uint32_t kind, uint32_t offset, int64_t value) {
+    CHECK(block == kTestBlock);
     Env* e = static_cast<Env*>(c);
     if (e->warns < 32) {
         e->warn_kind[e->warns] = kind;
@@ -58,10 +61,12 @@ int main() {
     host.qspi_in = host_qspi_in;
     host.update_pins = host_update_pins;
     host.add_cycles = host_add_cycles;
-    host.warn = host_warn;
     host.ctx = &env;
+    ChipPorts ports;
+    ports.warn = host_warn;
+    ports.chip = &env;
     SioBlock sio;
-    sio.init(host);
+    sio.init(&ports, kTestBlock, host);
 
     // Spinlocks: reading acquires (returns the bit, or 0 if held), any write releases; SPINLOCK_ST shows the state.
     CHECK(sio.read32(SPINLOCK0 + 4 * 3) == 8u);
@@ -131,6 +136,7 @@ int main() {
     CHECK(env.warns == 1 && env.warn_kind[0] == kSioFailDivideByZero);
     CHECK(env.cycles == cycles_before && sio.read32(DIV_QUOTIENT) == quotient_before);
     env.warns = 0;
+    sio.set_multicore(false);  // (the FIFOs are on by default; switched off, the registers are the old stub)
 
     // Registers the block does not know warn with the unmasked value, and the FIFO warns as "not implemented".
     CHECK(sio.read32(0x200) == 0xFFFFFFFFu && env.warns == 1 && env.warn_kind[0] == kSioWarnReadInvalid);
@@ -156,7 +162,7 @@ int main() {
     // reset() puts everything back, including the interpolators.
     sio.reset();
     CHECK(sio.read32(GPIO_OE) == 0 && sio.read32(INTERP0 + I_ACCUM0) == 0 && sio.read32(SPINLOCK_ST) == 0);
-    CHECK(sio.read32(DIV_CSR) == 1 && sio.div_divisor == 0);   // datasheet: DIV_CSR.READY resets to 1, DIV_xDIVISOR to 0
+    CHECK(sio.read32(DIV_CSR) == 1 && sio.core(0).div_divisor == 0);   // datasheet: DIV_CSR.READY resets to 1, DIV_xDIVISOR to 0
 
     // Datasheet audit: the QSPI output registers are 6 bits, the interpolators' ACCUMn_ADD 24 bits, FORCE_MSB a field of each lane's own CTRL and not part of what POP writes back.
     sio.write32(GPIO_HI_OUT, 0xFFFFFFFFu);

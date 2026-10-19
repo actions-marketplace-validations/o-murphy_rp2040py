@@ -542,6 +542,11 @@ def _set_clk_sys(rp2040: "RP2040", clk_sys: float) -> None:
     old_clk_sys = rp2040.clk_sys
     rp2040.clk_sys = clk_sys
     rp2040.ppb.clk_sys_changed(clk_sys)
+    ppb1 = getattr(
+        rp2040, "ppb1", None
+    )  # core 1's own SysTick (the native chip's is fed by its C++ tree; a stand-in chip has none)
+    if ppb1 is not None:
+        ppb1.clk_sys_changed(clk_sys)
     pwm = rp2040.pwm
     for channel in pwm.channels:
         channel.timer.frequency = pwm.clock_freq

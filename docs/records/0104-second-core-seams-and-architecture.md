@@ -175,7 +175,7 @@ So F, as written above, is **not accurate for anything that reads time**: inside
 - **P0.5 - the scheduling prototype and the decision.** The throwaway prototype of the candidates above (`scripts/bench/two_core/`), the numbers in this record - two rounds done, F leads - then D6 decided by the maintainer. No product code.
 - **P1 - core 1 in C++** (after P0.5). the dual loop (the candidate chosen in P0.5), the FIFOs, the launch handshake (D7), `PSM` / `RESETS` `PROC1`, IO_BANK0 `PROC1`, `PROC1_NMI_MASK`. Tests in the bare-core harness with small hand-assembled two-core programs: FIFO ping-pong, spinlock contention, `SEV` / `WFE` wake, an IRQ on each core, the launch and the reset of core 1. **Acceptance:** P0's four, unchanged, with core 1 never launched; and the cost with two busy cores measured, expected near 2x the single-core wall time per simulated second (two cores execute twice the instructions).
 - **P2 - the reference, the oracle and the shells.** The dual loop in Python, the lockstep oracle, the Cython shells (`cores`, `core1`), the `Simulator`, the GDB stub's core selection.
-- **P3 - real firmware.** MicroPython `_thread`, pico-sdk's multicore examples (the Pico SDK workflow), CoreMark 1.0.4 or later (the demo can move from the pinned v1.0.0; **the README is not touched until the maintainer says**).
+- **P3 - real firmware.** MicroPython `_thread`, pico-sdk's multicore examples (the Pico SDK workflow), CoreMark 1.0.4 or later (the demo can move from the pinned v1.0.0; the README was updated for the 1.0.0b1 beta on the maintainer's word, 2026-10-19).
 
 ## Next steps (planned 2026-10-18; each needs its own "yes")
 

@@ -56,7 +56,10 @@ and `reference/` for those). The structure itself is decided in
 
 ### In progress / Proposed
 
+> **Agreed order (2026-10-19):** tag `v1.0.0b1` (the maintainer's step: CI and the build-only publish run are green) -> [0096]'s Phase 5b (measure the bottlenecks first, no code; then the maintainer picks) -> by the maintainer's pick: [0098] (I2C slave and the rest of its backlog), [0106] (pads), [0096] Phase 6 beyond the PoC. Each step needs its own go-ahead (CLAUDE.md).
+
 - [ ] [0106] routing the UART, SPI and I2C functions to the pads | proposed, nothing built - found by `extmod_hardware`; Wokwi routes by FUNCSEL over bit-level models; layer vs pin-bank sources is open
+- [ ] [0096] a C++ MCU core, statically linked through Cython, WASM host last | phases 0-4 and the gate G1-G8 done; next: Phase 5b (bottlenecks and fewer abstractions, both implementations), then Phase 6 beyond the PoC ([0103]), Phase 7; the second core is [0104]
 - [ ] [0105] the time architecture: an audit of the clock, the tick generators and who counts what | audit done, TIMER/PIO fixes landed; `Timer32` and PIO-from-clock still proposed
 - [ ] [0104] the second core: seams, architecture, core 1 in the C++ core and the reference | P0-P2 done, core 1 on by default, `thread/` 24 of 33, dual-core CoreMark demo; open: per-core GPIO IRQs, GDB/wasm
 - [ ] [0103] a wasm backend: toolchain, packaging, backend selection and testing | headless module built and measured (0.4-0.6x of the Cython build); next: `RP2040PY_BACKEND` and a backend axis in the tests
@@ -64,7 +67,6 @@ and `reference/` for those). The structure itself is decided in
 - [ ] [0101] the chip's reset values, read on a real board | proposed, waiting for a board - the 56 registers on which a fresh chip is meant to differ from the SVD, to be measured; nothing changes in the chip until then
 - [ ] [0099] a WASM drop-in for the original rp2040js | proposed, nothing designed - once Phase 6 of 0096 boots MicroPython on wasmtime/node, try a TypeScript wrapper with rp2040js's public API and run its own specs against the core
 - [ ] [0098] the ported blocks against the RP2040 datasheet | code shipped, record open - every ported block read and fixed; open: PIO autopull timing, DMA sniffer/arbitration, RTC synchroniser, CLOCKS resus and gating, I2C and SPI slave modes, USB token wire (pads -> [0106])
-- [ ] [0096] a C++ MCU core, statically linked through Cython, WASM host last | phases 0-4 and the gate G1-G8 done; next: Phase 5b (bottlenecks and fewer abstractions, both implementations), then Phase 6 beyond the PoC ([0103]), Phase 7; the second core is [0104]
 - [ ] [0094] a Zephyr guest boots here - MicroPython's `ports/zephyr` on `rpi_pico` | measured, nothing built - the RP2040 model needed no changes; its console is USB CDC, so the `micropython` subcommand sees silence
 - [ ] [0093] CircuitPython 8.0.2 never comes back after a chip reset | open, not root-caused - red on 8.x, green on 9.2.9/10.2.1; five hypotheses killed by measurement
 - [ ] [0092] a power button, and what a power cycle would have to destroy | documented, nothing built - the `HAD_POR` cause exists; a trigger and an SRAM/USB decision do not

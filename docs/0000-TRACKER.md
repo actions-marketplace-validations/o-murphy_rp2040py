@@ -58,8 +58,8 @@ and `reference/` for those). The structure itself is decided in
 
 > **Agreed order (2026-10-19):** tag `v1.0.0b1` (the maintainer's step: CI and the build-only publish run are green) -> [0096]'s Phase 5b (measure the bottlenecks first, no code; then the maintainer picks) -> by the maintainer's pick: [0098] (I2C slave and the rest of its backlog), [0106] (pads), [0096] Phase 6 beyond the PoC. Each step needs its own go-ahead (CLAUDE.md).
 
-- [ ] [0106] routing the UART, SPI and I2C functions to the pads | proposed, nothing built - found by `extmod_hardware`; Wokwi routes by FUNCSEL over bit-level models; layer vs pin-bank sources is open
 - [ ] [0096] a C++ MCU core, statically linked through Cython, WASM host last | phases 0-4 and the gate G1-G8 done; next: Phase 5b (bottlenecks and fewer abstractions, both implementations), then Phase 6 beyond the PoC ([0103]), Phase 7; the second core is [0104]
+- [ ] [0106] routing the UART, SPI and I2C functions to the pads | proposed, nothing built - found by `extmod_hardware`; Wokwi routes by FUNCSEL over bit-level models; layer vs pin-bank sources is open
 - [ ] [0105] the time architecture: an audit of the clock, the tick generators and who counts what | audit done, TIMER/PIO fixes landed; `Timer32` and PIO-from-clock still proposed
 - [ ] [0104] the second core: seams, architecture, core 1 in the C++ core and the reference | P0-P2 done, core 1 on by default, `thread/` 24 of 33, dual-core CoreMark demo; open: per-core GPIO IRQs, GDB/wasm
 - [ ] [0103] a wasm backend: toolchain, packaging, backend selection and testing | headless module built and measured (0.4-0.6x of the Cython build); next: `RP2040PY_BACKEND` and a backend axis in the tests

@@ -20,6 +20,9 @@ static int failures = 0;
         }                                                                        \
     } while (0)
 
+static constexpr uint32_t kTestBlock = 42, kTestIrq = 6, kTestDreqTx = 38;
+static ChipPorts ports;
+
 static const uint32_t kFlashSize = 0x20000;
 static uint8_t flash[kFlashSize];
 
@@ -37,10 +40,11 @@ struct Env {
     int irq_calls = 0, tx_dreq_calls = 0, rx_dreq_calls = 0;
     bool irq_level = false, tx_dreq = false, rx_dreq = false;
     bool fail_irq = false, fail_dreq = false;
+    int failed = 0;  // the shared parked-failure flag the ports watch
 };
 static Env env;
 
-static void on_warn(void*, uint32_t kind, uint32_t offset, int64_t value) {
+static void on_warn(void*, uint32_t /*block*/, uint32_t kind, uint32_t offset, int64_t value) {
     if (env.warns < 32) {
         env.warn_kind[env.warns] = kind;
         env.warn_offset[env.warns] = offset;
@@ -54,14 +58,19 @@ static bool on_cs_low(void*, bool* low) {
     return !env.cs_low_fail;
 }
 
-static bool on_irq(void*, bool level) {
+static bool on_irq(void*, uint32_t line, bool level) {
+    CHECK(line == kTestIrq);
     ++env.irq_calls;
     env.irq_level = level;
+    if (env.fail_irq) env.failed = 1;
     return !env.fail_irq;
 }
-static bool on_dreq(void*, bool tx, bool asserted) {
+static bool on_dreq(void*, uint32_t number, bool asserted) {
+    CHECK(number == kTestDreqTx || number == kTestDreqTx + 1);
+    const bool tx = number == kTestDreqTx;
     (tx ? env.tx_dreq_calls : env.rx_dreq_calls)++;
     (tx ? env.tx_dreq : env.rx_dreq) = asserted;
+    if (env.fail_dreq) env.failed = 1;
     return !env.fail_dreq;
 }
 
@@ -244,6 +253,27 @@ static void test_the_fifos_and_the_interrupts() {
     env.fail_dreq = false;
 }
 
+// A read of DR0 pops the RX queue and tells the interrupt line; an alias write decodes against that read, so when the host fails there the write must not happen (RegisterBlock, core_host.hpp).
+static void test_a_failing_decode_read_stops_a_dr0_alias_write() {
+    fresh();
+    env = Env();
+    wr(SSIENR, 1);
+    cs(kCsLow);
+    burst(1);
+    wr(IMR, INT_RXF);  // the line is high while a frame waits
+    CHECK(env.irq_level && rd(RXFLR) == 1);
+    env.fail_irq = true;
+    CHECK(!ssi.write_atomic(DR0, 0x55, kAtomicSet));  // the decoding read pops the frame, the line falls, the host fails ...
+    CHECK(rd(RXFLR) == 0 && env.failed == 1);          // ... and the write that would have shifted a new frame in did not happen
+    fresh();
+    env = Env();
+    wr(SSIENR, 1);
+    cs(kCsLow);
+    burst(1);
+    wr(IMR, INT_RXF);
+    CHECK(ssi.write_atomic(DR0, 0x55, kAtomicSet) && rd(RXFLR) == 1);  // without the failure the write goes ahead
+}
+
 static void test_the_bit_positions_and_the_held_interrupts() {
     fresh();
     env = Env();
@@ -347,15 +377,17 @@ int main() {
     const bool always_output_enabled = true;  // QSPI_SS is
     CHECK(cs_pin.init(1, host, &always_output_enabled, 1));
     cs(kCsHigh);
+    ports.warn = on_warn;
+    ports.irq = on_irq;
+    ports.dreq = on_dreq;
+    ports.failed = &env.failed;
     SsiHost ssi_host;
-    ssi_host.warn = on_warn;
-    ssi_host.irq = on_irq;
-    ssi_host.dreq = on_dreq;
-    ssi.init(flash, kFlashSize, ssi_host);
+    ssi.init(flash, kFlashSize, &ports, kTestBlock, kTestIrq, kTestDreqTx, ssi_host);
     CHECK(ssi.bind_cs(&cs_pin));
     fresh();
     test_dr1_to_dr35_are_the_data_register_too();
     test_the_fifos_and_the_interrupts();
+    test_a_failing_decode_read_stops_a_dr0_alias_write();
     test_the_bit_positions_and_the_held_interrupts();
     test_the_dma_requests();
     fresh();
@@ -389,12 +421,12 @@ int main() {
     CHECK(ssi.reset());
     CHECK(rd(SPI_CTRL_R0) == 0x03000000u && rd(IMR) == 0 && rd(SER) == 0 && rd(CTRLR0) == 0);
     fresh();
-    CHECK(rd(0xFC) == 0xFFFFFFFFu && env.warns == 1 && env.warn_kind[0] == kSsiWarnRead && env.warn_offset[0] == 0xFC);
+    CHECK(rd(0xFC) == 0xFFFFFFFFu && env.warns == 1 && env.warn_kind[0] == kRegWarnRead && env.warn_offset[0] == 0xFC);
     env.warns = 0;
-    CHECK(rd(0x10FC) == 0xFFFFFFFFu && env.warns == 2 && env.warn_kind[0] == kSsiWarnRead && env.warn_kind[1] == kSsiWarnReadAtomicArea);
+    CHECK(rd(0x10FC) == 0xFFFFFFFFu && env.warns == 2 && env.warn_kind[0] == kRegWarnRead && env.warn_kind[1] == kRegWarnReadAtomicArea);
     env.warns = 0;
     wr(0xFC, 0x1234);
-    CHECK(env.warns == 1 && env.warn_kind[0] == kSsiWarnWrite && env.warn_offset[0] == 0xFC && env.warn_value[0] == 0x1234);
+    CHECK(env.warns == 1 && env.warn_kind[0] == kRegWarnWrite && env.warn_offset[0] == 0xFC && env.warn_value[0] == 0x1234);
     env.warns = 0;
     // the atomic aliases decode against a read of the register
     wr(CTRLR0, 0x0F, kAtomicNormal);
@@ -404,7 +436,7 @@ int main() {
     CHECK(rd(CTRLR0) == 0x30);
     wr(CTRLR0, 0x70, kAtomicClear);  // 0x30 & ~0x70 = 0 (an and would give 0x30)
     CHECK(rd(CTRLR0) == 0 && ssi.raw_write_value() == 0x70);
-    CHECK(rd(0x1000) == 0xFFFFFFFFu && env.warns == 1 && env.warn_kind[0] == kSsiWarnRead);  // offset 0x1000 itself is not "in the atomic area"
+    CHECK(rd(0x1000) == 0xFFFFFFFFu && env.warns == 1 && env.warn_kind[0] == kRegWarnRead);  // offset 0x1000 itself is not "in the atomic area"
     env.warns = 0;
 
     // a finished command leaves nothing behind
@@ -591,7 +623,7 @@ int main() {
     // ---- binding ----------------------------------------------------------------------------------------------------------------
     {
         SsiBlock other;
-        other.init(flash, kFlashSize, ssi_host);
+        other.init(flash, kFlashSize, &ports, kTestBlock, kTestIrq, kTestDreqTx, ssi_host);
         cs(kCsLow);
         CHECK(other.bind_cs(&cs_pin) && other.cs_asserted());  // synced from the pin at bind time, not assumed
         cs(kCsHigh);
@@ -612,7 +644,7 @@ int main() {
         CHECK(bad_pin.init(1, failing, &always_output_enabled, 1));
         bad_pin.pin(0).ctrl = 5;  // SIO function: the level comes from a source
         SsiBlock other;
-        other.init(flash, kFlashSize, ssi_host);
+        other.init(flash, kFlashSize, &ports, kTestBlock, kTestIrq, kTestDreqTx, ssi_host);
         CHECK(!other.bind_cs(&bad_pin));
         other.detach();
     }
@@ -621,7 +653,7 @@ int main() {
         SsiBlock python_cs;
         SsiHost fallback = ssi_host;
         fallback.cs_low = on_cs_low;
-        python_cs.init(flash, kFlashSize, fallback);
+        python_cs.init(flash, kFlashSize, &ports, kTestBlock, kTestIrq, kTestDreqTx, fallback);
         env.cs_low_answer = true;
         CHECK(python_cs.reset() && python_cs.cs_asserted() && env.cs_low_calls == 1);
         python_cs.on_cs_change(false);

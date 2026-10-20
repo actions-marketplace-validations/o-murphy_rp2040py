@@ -29,7 +29,10 @@ struct Env {
 };
 static Env env;
 
-static void on_warn(void*, uint32_t kind, uint32_t offset, int64_t value) {
+static constexpr uint32_t kTestBlock = 42;  // the id the block reports its warnings under
+static void on_warn(void*, uint32_t block, uint32_t kind, uint32_t offset, int64_t value) {
+    CHECK(block == kTestBlock);
+
     if (env.warns < 8) {
         env.warn_kind[env.warns] = kind;
         env.warn_offset[env.warns] = offset;
@@ -49,14 +52,19 @@ static bool on_changed(void*) {
 
 static PllBlock block;
 
+static const ChipPorts& test_ports() {
+    static ChipPorts ports;
+    ports.warn = on_warn;
+    ports.failed = &env.failed;
+    return ports;
+}
+
 static void fresh() {
     env = Env();
     PllHost host;
-    host.warn = on_warn;
     host.ref_hz = on_ref;
     host.changed = on_changed;
-    host.failed = &env.failed;
-    block.init(host);
+    block.init(&test_ports(), kTestBlock, host);
     block.reset();
 }
 
@@ -168,13 +176,13 @@ static void test_reset_announces_nothing() {
 static void test_unimplemented_offsets_warn() {
     fresh();
     CHECK(block.read(0x10) == 0xFFFFFFFFu);
-    CHECK(env.warns == 1 && env.warn_kind[0] == kPllWarnRead && env.warn_offset[0] == 0x10);
+    CHECK(env.warns == 1 && env.warn_kind[0] == kRegWarnRead && env.warn_offset[0] == 0x10);
     CHECK(block.write(0x14, 5));
-    CHECK(env.warns == 2 && env.warn_kind[1] == kPllWarnWrite && env.warn_value[1] == 5);
+    CHECK(env.warns == 2 && env.warn_kind[1] == kRegWarnWrite && env.warn_value[1] == 5);
     CHECK(env.changed == 0);
     fresh();
     CHECK(block.read(0x1004) == 0xFFFFFFFFu);
-    CHECK(env.warns == 2 && env.warn_kind[1] == kPllWarnReadAtomicArea);
+    CHECK(env.warns == 2 && env.warn_kind[1] == kRegWarnReadAtomicArea);
     fresh();
     CHECK(block.read(0x1000) == 0xFFFFFFFFu);  // the atomic area starts above 0x1000 (the reference's `offset > 0x1000`)
     CHECK(env.warns == 1);
@@ -183,8 +191,7 @@ static void test_unimplemented_offsets_warn() {
 static void test_a_block_with_no_host_function_still_writes() {
     fresh();
     PllHost bare;
-    bare.failed = &env.failed;
-    block.init(bare);
+    block.init(&test_ports(), kTestBlock, bare);
     CHECK(block.write(REG_FBDIV_INT, 7));  // no `changed`, no `ref_hz`, no `warn`
     CHECK(block.read(REG_FBDIV_INT) == 7 && block.frequency() == 0.0 && block.read(0x10) == 0xFFFFFFFFu);
 }

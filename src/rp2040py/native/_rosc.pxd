@@ -4,13 +4,11 @@
 from libc.stdint cimport int64_t, uint32_t
 from libcpp cimport bool as cppbool
 
+from rp2040py.native._core_host cimport ChipPorts
 from rp2040py.native._clock cimport Clock
 from rp2040py.native._window_map cimport WindowHandler
 
 cdef extern from "rosc.hpp" namespace "rp2040core":
-    cdef const uint32_t kRoscWarnRead
-    cdef const uint32_t kRoscWarnReadAtomicArea
-    cdef const uint32_t kRoscWarnWrite
     cdef const uint32_t kRoscWarnInvalidFreqRange
     cdef const uint32_t kRoscWarnInvalidEnable
     cdef const uint32_t kRoscWarnInvalidFreqPasswd
@@ -18,22 +16,11 @@ cdef extern from "rosc.hpp" namespace "rp2040core":
     cdef const uint32_t kRoscWarnInvalidDiv
     cdef const uint32_t kRoscWarnInvalidPhasePasswd
 
-    ctypedef void (*RoscWarnFn)(void* ctx, uint32_t kind, uint32_t offset, int64_t value)
     ctypedef cppbool (*RoscFrequencyFn)(void* ctx, double hz)
     ctypedef cppbool (*RoscBitFn)(void* ctx, uint32_t* bit)
 
-    cdef cppclass RoscHost:
-        RoscHost() noexcept
-        RoscWarnFn warn
-        RoscFrequencyFn frequency_changed
-        RoscBitFn random_bit
-        void* random_ctx
-        void* ctx
-        const int* failed
-
     cdef cppclass RoscBlock:
         RoscBlock() noexcept
-        void init(Clock* clock, const RoscHost& host) noexcept
         void detach() noexcept
         void bind_frequency_listener(RoscFrequencyFn fn, void* ctx) noexcept
         void bind_random_source(RoscBitFn fn, void* ctx) noexcept
@@ -60,8 +47,7 @@ cdef extern from "rosc.hpp" namespace "rp2040core":
 
 cdef class RPROSC:
     cdef public bint _from_mcu  # this is the view of the `Mcu`'s block
-    cdef RoscBlock* _block  # the chip's (`Mcu` builds and wires it), or `_own` for a block made directly (a stand-in chip, a test)
-    cdef RoscBlock _own
+    cdef RoscBlock* _block  # the chip's own (core/mcu.hpp): this object is its Python view
     cdef public object rp2040
     cdef public object name
     cdef public object clock

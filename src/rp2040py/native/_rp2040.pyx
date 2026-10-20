@@ -20,27 +20,16 @@ dispatch - see native/_simulation_clock.pyx's own module docstring for the full 
 """
 
 from libc.stdint cimport int64_t, uint8_t, uint32_t, uint64_t
-from libc.string cimport memset
 from libcpp cimport bool
 
 from rp2040py.native._cortex_m0_core cimport CortexM0Core
-from rp2040py.native._memory_map cimport (
-    Region,
-    kNotifyOnWrite,
-    kXip,
-    XipAccessFn,
-    XipHooks,
-    XipSramReadFn,
-    XipSramWriteFn,
-    kSubWord,
-    kWordIndexed,
-)
 from rp2040py.native._dma cimport RPDMA
-from rp2040py.native._mcu cimport kMcuBlockBusctrl, kMcuBlockPsm, kMcuBlockResets, kMcuBlockRtc, kMcuBlockSyscfg, kMcuBlockSysinfo, kMcuBlockTbman, kMcuBlockVreg, Mcu, McuHost, kMcuBlockAdc, kMcuBlockClocks, kMcuBlockDma, kMcuBlockI2c0, kMcuBlockI2c1, kMcuBlockIoBank0, kMcuBlockIoQspi, kMcuBlockPadsBank0, kMcuBlockPadsQspi, kMcuBlockPllSys, kMcuBlockPllUsb, kMcuBlockPpb, kMcuBlockPio0, kMcuBlockPio1, kMcuBlockPwm, kMcuBlockRosc, kMcuBlockSsi, kMcuBlockUsb, kMcuBlockXip, kMcuBlockSio, kMcuBlockSpi0, kMcuBlockSpi1, kMcuBlockTimer, kMcuBlockUart0, kMcuBlockUart1, kMcuBlockWatchdog, kMcuBlockXosc
+from rp2040py.native._mcu cimport kMcuBlockBusctrl, kMcuBlockPsm, kMcuBlockResets, McuMemory, kMcuBlockRtc, kMcuBlockSyscfg, kMcuBlockSysinfo, kMcuBlockTbman, kMcuBlockVreg, Mcu, McuHost, kMcuBlockAdc, kMcuBlockClocks, kMcuBlockDma, kMcuBlockI2c0, kMcuBlockI2c1, kMcuBlockIoBank0, kMcuBlockIoQspi, kMcuBlockPadsBank0, kMcuBlockPadsQspi, kMcuBlockPllSys, kMcuBlockPllUsb, kMcuBlockPpb, kMcuBlockPio0, kMcuBlockPio1, kMcuBlockPwm, kMcuBlockRosc, kMcuBlockSsi, kMcuBlockUsb, kMcuBlockXip, kMcuBlockSio, kMcuBlockSpi0, kMcuBlockSpi1, kMcuBlockTimer, kMcuBlockUart0, kMcuBlockUart1, kMcuBlockWatchdog, kMcuBlockXosc
 from rp2040py.native._pending cimport park_error, pending_flag, raise_if_pending
 from rp2040py.native._pio cimport PioBlock
+from rp2040py.native._usb cimport UsbHost, usb_wire_fill
 from rp2040py.native._bus cimport BusHost, kBusWarnInvalidRead, kBusWarnUnalignedRead
-from rp2040py.native._window_map cimport Read32Fn, Write32Fn, WindowHandler, kNoWindow
+from rp2040py.native._window_map cimport Read32Fn, Write32Fn, WindowHandler
 from rp2040py.native._simulation_clock cimport SimulationClock
 
 from rp2040py.clock.clock import IClock
@@ -71,10 +60,8 @@ from rp2040py.reset_cause import ResetCause
 from rp2040py.native._pio import RPPIO
 from rp2040py.native._ppb import RPPPB
 from rp2040py.native._psm import RPPSM
-from rp2040py.peripherals._psm import PSM_BITS_MASK, WDSEL_CLOCKS, WDSEL_RESETS, WDSEL_ROSC, WDSEL_SIO, WDSEL_XIP, WDSEL_XOSC
 from rp2040py.native._pwm import RPPWM
 from rp2040py.native._reset import RPReset
-from rp2040py.peripherals._reset import RESET_ADC, RESET_BUSCTRL, RESET_DMA, RESET_I2C0, RESET_I2C1, RESET_IO_BANK0, RESET_IO_QSPI, RESET_PADS_BANK0, RESET_PADS_QSPI, RESET_PIO0, RESET_PIO1, RESET_PWM, RESET_RTC, RESET_SPI0, RESET_SPI1, RESET_SYSCFG, RESET_TIMER, RESET_UART0, RESET_UART1, RESET_USBCTRL, RESETS_BITS_MASK
 from rp2040py.native._rtc import RP2040RTC
 from rp2040py.native._spi import RPSPI
 from rp2040py.peripherals._spi import ISPIDMAChannels
@@ -90,7 +77,7 @@ from rp2040py.native._watchdog import RPWatchdog
 from rp2040py.native._rosc import RPROSC
 from rp2040py.native._xosc import RPXOSC
 from rp2040py.native._sio import RPSIO
-from rp2040py.native._bit cimport u32, write_uint16_le
+from rp2040py.native._bit cimport u32
 from rp2040py.utils.logging import ConsoleLogger, LogLevel
 
 # Deliberately NOT `from cpython cimport array`: that pulls in CPython-internal array.array
@@ -99,6 +86,8 @@ from rp2040py.utils.logging import ConsoleLogger, LogLevel
 # actually do with `array` is call the plain array.array(...) constructor, which needs no special
 # declaration - a normal Python-level call works identically and is limited-API-safe.
 import array
+import os
+from rp2040py.native._register_warning import warn_register
 
 __all__ = (
     "APB_START_ADDRESS",
@@ -148,36 +137,6 @@ cdef uint32_t _python_window_read32(void* ctx, uint32_t offset) noexcept:
 cdef void _python_window_write32(void* ctx, uint32_t offset, int64_t raw_value, uint32_t atomic_type) noexcept:
     try:
         (<_PythonWindow> ctx).peripheral.write_uint32_atomic(offset, raw_value, atomic_type)
-    except BaseException as error:
-        park_error(error)
-
-
-cdef void _python_xip_read_access(void* ctx, uint32_t address) noexcept:
-    try:
-        (<object> ctx).access(address)
-    except BaseException as error:
-        park_error(error)
-
-
-cdef void _python_xip_write_access(void* ctx, uint32_t address) noexcept:
-    try:
-        (<object> ctx).write_access(address)
-    except BaseException as error:
-        park_error(error)
-
-
-cdef uint32_t _python_xip_sram_read(void* ctx, uint32_t address) noexcept:
-    try:
-        value = (<object> ctx).sram_read(address)
-        return 0xFFFFFFFFU if value is None else <unsigned int> value
-    except BaseException as error:
-        park_error(error)
-        return 0
-
-
-cdef void _python_xip_sram_write(void* ctx, uint32_t address, uint32_t value) noexcept:
-    try:
-        (<object> ctx).sram_write(address, value)
     except BaseException as error:
         park_error(error)
 
@@ -369,9 +328,8 @@ cdef void _mcu_warn(void* ctx, uint32_t block, uint32_t kind, uint32_t offset, i
     try:
         # (the PPB and SIO are not in the peripherals table: the bus reaches them on its own)
         view = chip._ppb if block == kMcuBlockPpb else chip._sio if block == kMcuBlockSio else chip._peripherals.get(_BLOCK_WINDOW[block])
-        warn = getattr(view, "_warn_kind", None)
-        if warn is not None:
-            warn(kind, offset, value)
+        if view is not None:
+            warn_register(view, kind, offset, value)
     except BaseException as error:
         park_error(error)
 
@@ -701,6 +659,9 @@ cdef class RP2040:
         self._attach_memory_regions()
         self._window_owners = {}
         self.core = CortexM0Core(self)
+        self.core1 = CortexM0Core(self, 1)  # the second core (record 0104): the chip's C++ `cpu1`, not run until a launch
+        self.cores = (self.core, self.core1)
+        self.quantum_cycles = 16  # two cores only (record 0104): 16 is the F2 scheduler, 1 the exact one
 
     cdef void _attach_memory_regions(self):
         """Hands the C++ memory map pointers into the four buffers above (record 0096, Phase 1, D2).
@@ -708,39 +669,16 @@ cdef class RP2040:
         memoryviews pin them (a bytearray/array.array cannot be resized while exported). The
         per-region flags and mirror masks reproduce the pre-Phase-1 behaviour exactly - see
         core/memory_map.hpp and tests/test_memory_map_parity.py."""
-        cdef Region region
-        # Boot ROM: word-indexed, no sub-word fast path (composed from 32-bit reads, as before).
-        region.base = 0
-        region.window = self.bootrom_byte_size
-        region.size = self.bootrom_byte_size
-        region.mask = 0xFFFFFFFFU
-        region.data = <uint8_t*> &self._bootrom[0]
-        region.flags = kWordIndexed
-        self._mcu.bus.mem.attach(region)
-        # Flash: four 16 MiB aliases for reads (XIP, NOALLOC, NOCACHE, NOCACHE_NOALLOC); writes and
-        # sub-word accesses only below the real flash size.
-        region.base = FLASH_START
-        region.window = FLASH_END - FLASH_START
-        region.size = self.flash_byte_size
-        region.mask = 0x00FFFFFFU
-        region.data = <uint8_t*> &self._flash[0]
-        region.flags = kSubWord | kXip  # the whole window is read-only to the bus; the XIP block (once built) is told of every access
-        self._mcu.bus.mem.attach(region)
-        region.base = RAM_START
-        region.window = self.ram_byte_size
-        region.size = self.ram_byte_size
-        region.mask = 0xFFFFFFFFU
-        region.data = <uint8_t*> &self._sram[0]
-        region.flags = kSubWord
-        self._mcu.bus.mem.attach(region)
-        # USB DPRAM: a completed 32-bit write must reach `usb_ctrl.dpram_updated()`.
-        region.base = DPRAM_START
-        region.window = self.dpram_byte_size
-        region.size = self.dpram_byte_size
-        region.mask = 0xFFFFFFFFU
-        region.data = <uint8_t*> &self._usb_dpram[0]
-        region.flags = kNotifyOnWrite
-        self._mcu.bus.mem.attach(region)
+        cdef McuMemory memory
+        memory.rom = <uint8_t*> &self._bootrom[0]
+        memory.rom_size = self.bootrom_byte_size
+        memory.flash = <uint8_t*> &self._flash[0]
+        memory.flash_size = self.flash_byte_size
+        memory.sram = <uint8_t*> &self._sram[0]
+        memory.sram_size = self.ram_byte_size
+        memory.dpram = <uint8_t*> &self._usb_dpram[0]
+        memory.dpram_size = self.dpram_byte_size
+        self._mcu.set_memory(memory)
 
     def __init__(self, clock: IClock | None = None):
         cdef BusHost bus_host
@@ -757,6 +695,7 @@ cdef class RP2040:
         # The blocks that live in the C++ `Mcu` are built by it - on this clock, with their windows on the bus and their lines on the CPU (record 0096, 3a); the host it is given is what answers for what the
         # core cannot (the logger, so far).
         cdef McuHost world
+        cdef UsbHost usb_wire
         world.warn = _mcu_warn
         world.ctx = <void*> self
         world.failed = pending_flag()
@@ -781,14 +720,14 @@ cdef class RP2040:
         world.adc_read = _w_adc_read
         world.pio_started = _w_pio_started
         world.ssi_baudr = _w_ssi_baudr
+        usb_wire_fill(&usb_wire, <void*> self)
+        world.usb_wire = &usb_wire
         world.reset_block = _w_reset_block
         world.usb_reset = _w_usb_reset
         world.bus_reset = _w_bus_reset
         world.record_cause = _w_record_cause
         world.clk_sys = _w_clk_sys
         world.adc_channel_value = _w_adc_channel_value
-        self._mcu.set_flash(<uint8_t*> &self._flash[0], <uint32_t> self.flash_byte_size)
-        self._mcu.set_usb_dpram(<uint8_t*> &self._usb_dpram[0])
         self._mcu.build(world)
 
         # Clocks
@@ -801,6 +740,8 @@ cdef class RP2040:
 
         self.ppb = RPPPB(self, "PPB", 0)
         self.sio = RPSIO(self, 0)
+        if os.environ.get("RP2040PY_CORE1", "1").lower() in ("0", "off", "false", "no"):  # the CLI's --no-core1 sets it: the second core is on unless asked to be off
+            self.set_core1_enabled(False)
 
         self.uart = [
             RPUART(
@@ -1345,36 +1286,6 @@ cdef class RP2040:
         if clocks is not None and hasattr(clocks, "rebind_consumers"):
             clocks.rebind_consumers()
 
-    def _attach_xip_hooks(self, xip):
-        """Hands the C++ memory map the XIP block's hooks, so the flash window (read-only to the bus, its reads counted and cached) and the `0x15...` cache-as-SRAM segment are served
-        through it. A block with native hooks (looked up on the TYPE, like `_native_window`) lends its own C++ functions; any other block (the pure-Python reference, which the facade hands out when
-        the native one is switched off) is reached through Python trampolines, so the flash window means the same thing whichever XIP the chip has."""
-        cdef XipHooks hooks
-        native_hooks = getattr(type(xip), "_native_xip_hooks", None)
-        if native_hooks is None:
-            hooks.read_access = _python_xip_read_access
-            hooks.write_access = _python_xip_write_access
-            hooks.sram_read = _python_xip_sram_read
-            hooks.sram_write = _python_xip_sram_write
-            hooks.ctx = <void*> xip
-            self._xip_owner = xip  # keeps the block (and so the context pointer) alive
-            self._mcu.bus.mem.set_xip(hooks)
-        else:
-            read_access, write_access, sram_read, sram_write, ctx = native_hooks(xip)
-            hooks.read_access = <XipAccessFn> <size_t> read_access
-            hooks.write_access = <XipAccessFn> <size_t> write_access
-            hooks.sram_read = <XipSramReadFn> <size_t> sram_read
-            hooks.sram_write = <XipSramWriteFn> <size_t> sram_write
-            hooks.ctx = <void*> <size_t> ctx
-            self._xip_owner = xip  # keeps the block (and so the context pointer) alive
-            self._mcu.bus.mem.set_xip(hooks)
-
-    def _native_flash_address(self):
-        """The address and size of this chip's flash buffer, for a native block that works on it directly (the SSI): allocated once, only ever
-        refilled in place, so the address is good for the chip's life. Looked up as an attribute of the chip, so a chip without one (the
-        pure-Python chip) simply does not answer."""
-        return (<size_t> &self._flash[0], self.flash_byte_size)
-
     def _native_pio_address(self, index):
         """The address of this chip's PIO block `index` (0 or 1), for the native PIO shell that is its Python view; None if there is no such block."""
         cdef PioBlock* block = self._mcu.pio_block(index)
@@ -1605,8 +1516,8 @@ cdef class RP2040:
     def _native_sio_address(self):
         return <size_t> &self._mcu.sio()
 
-    def _native_ppb_address(self):
-        return <size_t> &self._mcu.ppb()
+    def _native_ppb_address(self, core=0):
+        return <size_t> &self._mcu.ppb(<uint8_t> core)
 
     def _native_watchdog_address(self):
         return <size_t> &self._mcu.watchdog()
@@ -1648,7 +1559,16 @@ cdef class RP2040:
         return <size_t> &self._mcu
 
     def _native_set_interrupt(self, irq: int, value: bool) -> None:
-        self.core.set_interrupt(irq, value)
+        if not self._mcu.set_interrupt_unhooked(<uint32_t> irq, True if value else False):  # (not through a hook: a spy calls this to let the line through) every NVIC (core 1's once it runs) gets the system lines; waking a core took an exception that failed
+            raise_if_pending()
+
+    def set_core1_enabled(self, on):
+        """The inter-core FIFOs and the boot ROM's launch handshake (which the SIO answers): on by default; off gives back the old stub (the registers warn and read as 0xFFFFFFFF)."""
+        self._mcu.set_core1_enabled(True if on else False)
+
+    @property
+    def core1_running(self):
+        return self._mcu.core1_running()
 
     @property
     def set_interrupt(self):

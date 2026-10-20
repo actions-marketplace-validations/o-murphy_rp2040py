@@ -53,7 +53,10 @@ static bool fails(int call) {
     if (env.fail_call == call) { env.failed = 1; return true; }
     return false;
 }
-static bool on_irq(void*, bool level) {
+static constexpr uint32_t kTestBlock = 42, kTestIrq = 23;  // the id its warnings carry and its NVIC line
+
+static bool on_irq(void*, uint32_t line, bool level) {
+    CHECK(line == kTestIrq);
     if (env.irq_n < 256) env.irq_calls[env.irq_n] = level;
     ++env.irq_n;
     if (env.fail_irq) { env.failed = 1; return false; }
@@ -92,7 +95,8 @@ static bool on_stop(void*) {
     if (env.mode[kStopCall] == kDefault || env.mode[kStopCall] == kAuto) return i2c.complete_stop();
     return true;
 }
-static void on_warn(void*, uint32_t kind, uint32_t offset, int64_t value) {
+static void on_warn(void*, uint32_t block, uint32_t kind, uint32_t offset, int64_t value) {
+    CHECK(block == kTestBlock);
     if (env.warns < 32) {
         env.warn_kind[env.warns] = kind;
         env.warn_offset[env.warns] = offset;
@@ -101,19 +105,24 @@ static void on_warn(void*, uint32_t kind, uint32_t offset, int64_t value) {
     ++env.warns;
 }
 
+static const ChipPorts& test_ports() {
+    static ChipPorts ports;
+    ports.irq = on_irq;
+    ports.warn = on_warn;
+    ports.failed = &env.failed;
+    return ports;
+}
+
 static void fresh(int all_modes = kDefault) {
     env = Env();
     for (int i = 1; i <= 5; ++i) env.mode[i] = all_modes;
     I2cHost host;
-    host.irq = on_irq;
     host.start = on_start;
     host.connect = on_connect;
     host.write_byte = on_write;
     host.read_byte = on_read;
     host.stop = on_stop;
-    host.warn = on_warn;
-    host.failed = &env.failed;
-    i2c.init(host);
+    i2c.init(&test_ports(), kTestBlock, kTestIrq, host);
     (void)i2c.reset();
     (void)i2c.write_atomic(CON, i2c.control, kAtomicNormal);  // raw_write_value: whatever, then back to 0 below
     (void)i2c.write_atomic(SS_SCL_HCNT, 0x28, kAtomicNormal);
@@ -541,9 +550,9 @@ static void test_datasheet_audit_flags_flush_activity_and_the_stored_registers()
 
 static void test_unimplemented_offsets_warn_and_read_all_ones() {
     fresh();
-    CHECK(rd(0x0C) == 0xFFFFFFFFu && env.warns == 1 && env.warn_kind[0] == kI2cWarnRead && env.warn_offset[0] == 0x0C);
+    CHECK(rd(0x0C) == 0xFFFFFFFFu && env.warns == 1 && env.warn_kind[0] == kRegWarnRead && env.warn_offset[0] == 0x0C);
     env.warns = 0;
-    CHECK(rd(0x1004) == 0xFFFFFFFFu && env.warns == 2 && env.warn_kind[1] == kI2cWarnReadAtomicArea);
+    CHECK(rd(0x1004) == 0xFFFFFFFFu && env.warns == 2 && env.warn_kind[1] == kRegWarnReadAtomicArea);
     env.warns = 0;
     CHECK(rd(0x1001) == 0xFFFFFFFFu && env.warns == 2);
     env.warns = 0;
@@ -551,7 +560,7 @@ static void test_unimplemented_offsets_warn_and_read_all_ones() {
     env.warns = 0;
     CHECK(rd(0xAC) == 0xFFFFFFFFu && env.warns == 1);            // not a register
     env.warns = 0;
-    CHECK(wr(0x28, 0x77) && env.warns == 1 && env.warn_kind[0] == kI2cWarnWrite && env.warn_offset[0] == 0x28 && env.warn_value[0] == 0x77);
+    CHECK(wr(0x28, 0x77) && env.warns == 1 && env.warn_kind[0] == kRegWarnWrite && env.warn_offset[0] == 0x28 && env.warn_value[0] == 0x77);
     env.warns = 0;
     CHECK(wr(STATUS, 1) && wr(TXFLR, 1) && wr(COMP_TYPE, 1) && env.warns == 3);   // read-only registers
 }

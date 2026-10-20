@@ -19,82 +19,19 @@ the block's two alarms), `num_channels`, `sample_time`, `resolution`, `divider`,
 """
 
 from libc.stdint cimport int64_t, uint32_t
-from libcpp cimport bool as cppbool
 
 from rp2040py.native._clock cimport Alarm
-from rp2040py.native._mcu_irq cimport Mcu, McuIrqLine, mcu_irq_line, native_mcu, McuDreqLine, mcu_dreq_line
-from rp2040py.native._pending cimport park_error, pending_flag, raise_if_pending
+from rp2040py.native._mcu_irq cimport Mcu
+from rp2040py.native._pending cimport raise_if_pending
 from rp2040py.native._simulation_clock cimport SimulationClock
 from rp2040py.native._window_map cimport WindowHandler
 
-from rp2040py.irq import IRQ
 from rp2040py.peripherals._dma import DREQChannel
 
 __all__ = ("RPADC",)
 
 cdef uint32_t CS_TS_EN = 1 << 1
 cdef uint32_t CS_EN = 1 << 0
-
-
-cdef cppbool _irq_trampoline(void* ctx, cppbool level) noexcept:
-    cdef RPADC adc = <RPADC> ctx
-    try:
-        adc.rp2040.set_interrupt(IRQ.ADC_FIFO, level)
-    except BaseException as error:
-        park_error(error)
-        return False
-    return True
-
-
-cdef cppbool _dreq_trampoline(void* ctx, cppbool asserted) noexcept:
-    cdef RPADC adc = <RPADC> ctx
-    try:
-        if asserted:
-            adc.rp2040.dma.set_dreq(adc.dreq)
-        else:
-            adc.rp2040.dma.clear_dreq(adc.dreq)
-    except BaseException as error:
-        park_error(error)
-        return False
-    return True
-
-
-cdef cppbool _read_trampoline(void* ctx, uint32_t channel) noexcept:
-    cdef RPADC adc = <RPADC> ctx
-    try:
-        callback = adc._on_adc_read
-        if callback is None:
-            adc._block.default_adc_read(channel)  # the reference's default device: never leaves C++
-            return True
-        callback(channel)
-    except BaseException as error:
-        park_error(error)
-        return False
-    return True
-
-
-cdef cppbool _channel_value_trampoline(void* ctx, uint32_t channel, int64_t* value) noexcept:
-    cdef RPADC adc = <RPADC> ctx
-    try:
-        # The index goes in as a Python int: a C index into a list would skip the range check (boundscheck=False), and the reference raises an IndexError.
-        value[0] = <int64_t> adc.channel_values[<object> channel]
-    except BaseException as error:
-        park_error(error)
-        return False
-    return True
-
-
-cdef void _warn_trampoline(void* ctx, uint32_t kind, uint32_t offset, int64_t value) noexcept:
-    cdef RPADC adc = <RPADC> ctx
-    try:
-        if kind == kAdcWarnRead:
-            adc.warn(f"Unimplemented peripheral read from 0x{offset:x}")
-        elif kind == kAdcWarnReadAtomicArea:
-            adc.warn("Unimplemented read from peripheral in the atomic operation region")
-        else:
-            adc.warn(f"Unimplemented peripheral write to 0x{offset:x}: 0x{value:x}")
-    except BaseException as error:
-        park_error(error)
 
 
 cdef class _Fifo:
@@ -159,7 +96,6 @@ cdef class _AlarmView:
 
 cdef class RPADC:
     def __init__(self, rp2040, name, mcu_index=-1):
-        cdef AdcHost host
         clock = rp2040.clock
         if not isinstance(clock, SimulationClock):
             raise TypeError(
@@ -180,32 +116,9 @@ cdef class RPADC:
             # the chip's C++ `Mcu` has built this block already - with its window on the bus, its line and request on the chip - and this object is the Python view of it
             self._block = <AdcBlock*> <size_t> rp2040._native_adc_address()
             return
-        self._block = &self._own
-        mcu = native_mcu(rp2040)
-        if mcu != NULL:
-            # the line goes from the C++ block straight to the chip's CPU, with no Python in between
-            self._irq_line.mcu = mcu
-            self._irq_line.line = <uint32_t> int(IRQ.ADC_FIFO)
-            host.irq = mcu_irq_line
-            host.irq_ctx = &self._irq_line
-        else:
-            host.irq = _irq_trampoline
-            host.irq_ctx = NULL
-        if mcu != NULL:
-            # the request goes from the C++ block straight to the chip (and its DMA), with no Python in between
-            self._dreq_line.mcu = mcu
-            self._dreq_line.number = <uint32_t> int(self.dreq)
-            host.dreq = mcu_dreq_line
-            host.dreq_ctx = &self._dreq_line
-        else:
-            host.dreq = _dreq_trampoline
-            host.dreq_ctx = NULL
-        host.read = _read_trampoline
-        host.channel_value = _channel_value_trampoline
-        host.warn = _warn_trampoline
-        host.ctx = <void*> self
-        host.failed = pending_flag()
-        self._own.init(&(<SimulationClock> clock)._clock, host)
+        raise TypeError(
+            "the native block is a view of the chip's C++ `Mcu` block: RPADC is built by a native chip (the pure-Python chip has the pure-Python peripherals)"
+        )
 
     def _world_read(self, channel):
         """A conversion was requested: the attached device answers; with none, the reference's default device does."""
@@ -217,20 +130,6 @@ cdef class RPADC:
 
     def _world_channel_value(self, channel):
         return int(self.channel_values[channel])
-
-    def _warn_kind(self, kind, offset, value):
-        """A register access the block does not implement, as the logger's message (the chip's host calls this for the block it built)."""
-        if kind == kAdcWarnRead:
-            self.warn(f"Unimplemented peripheral read from 0x{offset:x}")
-        elif kind == kAdcWarnReadAtomicArea:
-            self.warn("Unimplemented read from peripheral in the atomic operation region")
-        else:
-            self.warn(f"Unimplemented peripheral write to 0x{offset:x}: 0x{value:x}")
-
-    def __dealloc__(self):
-        # Safe whichever of this block and its clock the collector frees first: the C++ clock unlinks its alarms when it dies.
-        if self._block == &self._own:
-            self._own.detach()
 
     # --- the device on the pins ------------------------------------------------------------------
 

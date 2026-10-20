@@ -7,23 +7,9 @@ from libcpp cimport bool as cppbool
 from rp2040py.native._window_map cimport WindowHandler
 
 cdef extern from "sysinfo.hpp" namespace "rp2040core":
-    cdef const uint32_t kSysInfoWarnRead
-    cdef const uint32_t kSysInfoWarnReadAtomicArea
-    cdef const uint32_t kSysInfoWarnWrite
-
-    ctypedef cppbool (*SysInfoRomVersionFn)(void* ctx, uint32_t* version)
-    ctypedef void (*SysInfoWarnFn)(void* ctx, uint32_t kind, uint32_t offset, int64_t value)
-
-    cdef cppclass SysInfoHost:
-        SysInfoHost() noexcept
-        SysInfoRomVersionFn rom_version
-        SysInfoWarnFn warn
-        void* ctx
-        const int* failed
 
     cdef cppclass SysInfoBlock:
         SysInfoBlock() noexcept
-        void init(const SysInfoHost& host) noexcept
         int64_t raw_write_value() noexcept
         cppbool reset() noexcept
         uint32_t read(uint32_t offset) noexcept
@@ -32,7 +18,6 @@ cdef extern from "sysinfo.hpp" namespace "rp2040core":
         WindowHandler window_handler() noexcept
 
 cdef class RP2040SysInfo:
-    cdef SysInfoBlock* _block  # the chip's (`Mcu` builds and wires it), or `_own` for a stand-in chip that has no `Mcu`
-    cdef SysInfoBlock _own
+    cdef SysInfoBlock* _block  # the chip's own (core/mcu.hpp): this object is its Python view
     cdef public object rp2040
     cdef public object name

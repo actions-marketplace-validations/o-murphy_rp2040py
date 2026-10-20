@@ -14,7 +14,7 @@ from libc.stdint cimport int64_t, uint32_t
 from libcpp cimport bool as cppbool
 
 from rp2040py.native._dma cimport RPDMA
-from rp2040py.native._pending cimport park_error, pending_flag, raise_if_pending
+from rp2040py.native._pending cimport park_error, raise_if_pending
 from rp2040py.native._ppb cimport RPPPB
 from rp2040py.native._pll cimport RPPLL
 from rp2040py.native._rosc cimport RPROSC
@@ -29,33 +29,6 @@ __all__ = ("RPClocks",)
 
 XOSC_STATUS = 0x04
 XOSC_STATUS_STABLE = 1 << 31
-
-
-cdef void _warn_trampoline(void* ctx, uint32_t kind, uint32_t offset, int64_t value) noexcept:
-    cdef RPClocks block = <RPClocks> ctx
-    try:
-        block._warn_kind(kind, offset, value)
-    except BaseException as error:
-        park_error(error)
-
-
-cdef double _xosc_trampoline(void* ctx) noexcept:
-    cdef RPClocks block = <RPClocks> ctx
-    try:
-        rp2040 = block.rp2040
-        return <double> rp2040.xosc_freq if rp2040.xosc.read_uint32(XOSC_STATUS) & XOSC_STATUS_STABLE else 0.0
-    except BaseException as error:
-        park_error(error)
-        return 0.0
-
-
-cdef double _rosc_trampoline(void* ctx) noexcept:
-    cdef RPClocks block = <RPClocks> ctx
-    try:
-        return <double> block.rp2040.rosc_freq
-    except BaseException as error:
-        park_error(error)
-        return 0.0
 
 
 cdef cppbool _sys_sink(void* ctx, double hz, double old) noexcept:
@@ -139,7 +112,6 @@ cdef cppbool _peri_sink(void* ctx, double hz, double old) noexcept:
 
 cdef class RPClocks:
     def __init__(self, rp2040, name, mcu_index=-1):
-        cdef ClocksHost host
         pll_sys = rp2040.pll_sys  # the chip builds the PLLs first: the tree points at their C++ blocks
         pll_usb = rp2040.pll_usb
         clock = rp2040.clock
@@ -154,27 +126,9 @@ cdef class RPClocks:
             self._block = <ClocksBlock*> <size_t> rp2040._native_clocks_address()
             self.rebind_consumers()
             return
-        self._block = &self._own
-        if not isinstance(clock, SimulationClock):
-            raise TypeError(
-                "the native CLOCKS block counts its frequency counter against the native SimulationClock; "
-                f"{type(rp2040).__name__} with {type(clock).__name__} is not that "
-                "(use the pure-Python peripherals/_clocks.RPClocks with it)"
-            )
-        if not isinstance(pll_sys, RPPLL) or not isinstance(pll_usb, RPPLL):
-            raise TypeError("the native CLOCKS block reads the native PLLs (peripherals/_pll.RPPLL needs the pure-Python RPClocks)")
-        self.rp2040 = rp2040
-        self.name = name
-        self.clock = clock
-        self._pll_sys = pll_sys
-        self._pll_usb = pll_usb
-        host.warn = _warn_trampoline
-        host.xosc_hz = _xosc_trampoline
-        host.rosc_hz = _rosc_trampoline
-        host.ctx = <void*> self
-        host.failed = pending_flag()
-        self._own.init(&(<SimulationClock> clock)._clock, host, (<RPPLL> pll_sys)._block, (<RPPLL> pll_usb)._block)
-        self.rebind_consumers()
+        raise TypeError(
+            "the native block is a view of the chip's C++ `Mcu` block: RPClocks is built by a native chip (the pure-Python chip has the pure-Python peripherals)"
+        )
 
     def release_consumers(self):
         """This tree is being replaced (the chip's `clocks` was assigned): the blocks that read their clock from it go back to asking the chip, and it stops telling anyone."""
@@ -203,7 +157,7 @@ cdef class RPClocks:
         ppb, pwm, watchdog, rtc, dma = rp2040.ppb, rp2040.pwm, rp2040.watchdog, rp2040.rtc, rp2040.dma
         tree = getattr(rp2040, "_native_tree", None)
         if tree is not None:
-            tree(self._block != &self._own)  # the chip's own tree is told by the oscillators and the PLLs inside the Mcu; a tree made directly is told through the chip
+            tree(True)  # the chip's own tree is told by the oscillators and the PLLs inside the Mcu
         xosc, rosc = rp2040.xosc, rp2040.rosc
         self._consumers = (ppb, pwm, watchdog, rtc, dma, xosc, rosc, self._pll_sys, self._pll_usb)
         self._block.clear_sinks()
@@ -213,6 +167,10 @@ cdef class RPClocks:
             if isinstance(ppb, RPPPB)
             else self._block.add_sys_sink(_ppb_python_sink, <void*> self)
         )
+        # core 1's own SysTick (the chip builds it, the Python layer has no view of it yet): the tree feeds it as it feeds core 0's
+        core1_ppb_address = getattr(rp2040, "_native_ppb_address", None)  # (a stand-in chip of a test has no second core)
+        if core1_ppb_address is not None:
+            ok = ok and self._block.add_sys_sink(ppb_sys_sink, <void*> <size_t> core1_ppb_address(1))
         ok = ok and (
             self._block.add_sys_sink(pwm_sys_sink, <void*> (<RPPWM> pwm)._block)
             if isinstance(pwm, RPPWM)
@@ -255,15 +213,6 @@ cdef class RPClocks:
         )
         if not ok:
             raise RuntimeError("the clock tree's sink lists are full")
-
-    def _warn_kind(self, kind, offset, value):
-        """A register access the block does not implement, as the logger's message (the chip's host calls this for the block it built)."""
-        if kind == kClocksWarnRead:
-            self.warn(f"Unimplemented peripheral read from 0x{offset:x}")
-        elif kind == kClocksWarnReadAtomicArea:
-            self.warn("Unimplemented read from peripheral in the atomic operation region")
-        else:
-            self.warn(f"Unimplemented peripheral write to 0x{offset:x}: 0x{value:x}")
 
     @property
     def raw_write_value(self):
@@ -446,11 +395,6 @@ cdef class RPClocks:
     @rtc_div.setter
     def rtc_div(self, value):
         self._block.rtc_div = <uint32_t> (value & 0xFFFFFFFF)
-
-    def __dealloc__(self):
-        # Off the clock's alarm list before the block goes away (a no-op if the clock is gone already). The chip's own block is the `Mcu`'s to detach.
-        if self._block == &self._own:
-            self._own.detach()
 
     def debug(self, msg):
         self.rp2040.logger.debug(self.name, msg)

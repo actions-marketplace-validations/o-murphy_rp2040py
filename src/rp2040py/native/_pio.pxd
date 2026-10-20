@@ -4,36 +4,17 @@
 from libc.stdint cimport int32_t, int64_t, uint32_t
 from libcpp cimport bool as cppbool
 
-from rp2040py.native._mcu_irq cimport McuIrqLines
 
 from rp2040py.native._pin cimport PinBank
 from rp2040py.native._window_map cimport WindowHandler
 
 cdef extern from "pio.hpp" namespace "rp2040core":
-    cdef const uint32_t kPioWarnRead
-    cdef const uint32_t kPioWarnReadAtomicArea
-    cdef const uint32_t kPioWarnWrite
     cdef const uint32_t kPioErrorSmRead
     cdef const uint32_t kPioErrorSmWrite
 
-    ctypedef cppbool (*PioIrqFn)(void* ctx, uint32_t line, cppbool level)
-    ctypedef cppbool (*PioDreqFn)(void* ctx, uint32_t channel, cppbool set)
-    ctypedef void (*PioLogFn)(void* ctx, uint32_t kind, uint32_t a, uint32_t b)
     ctypedef cppbool (*PioPinUpdateFn)(void* ctx, uint32_t pin)
     ctypedef cppbool (*PioPinInputFn)(void* ctx, uint32_t pin, cppbool* level)
     ctypedef cppbool (*PioStartedFn)(void* ctx)
-
-    cdef cppclass PioHost:
-        PioHost() noexcept
-        PioIrqFn set_irq
-        void* set_irq_ctx
-        PioDreqFn dreq
-        void* dreq_ctx
-        PioLogFn log
-        PioPinUpdateFn pin_update
-        PioPinInputFn pin_input
-        PioStartedFn started
-        void* ctx
 
     cdef cppclass PioFifo:
         uint32_t buffer[8]
@@ -105,8 +86,7 @@ cdef extern from "pio.hpp" namespace "rp2040core":
         uint32_t irq0_int_enable, irq0_int_force, irq1_int_enable, irq1_int_force
         int32_t stopped
         cppbool in_cycle
-        int64_t cycle_fp, next_due_fp, backlog_drops, raw_write_value, resolve_due_fp
-        cppbool init(const PioHost& host, uint32_t first_irq, uint32_t index) noexcept
+        int64_t cycle_fp, next_due_fp, backlog_drops, resolve_due_fp
         void bind_pin(uint32_t gpio, PinBank* bank, uint32_t slot) noexcept
         uint32_t int_raw() noexcept
         uint32_t irq0_int_status() noexcept
@@ -125,6 +105,8 @@ cdef extern from "pio.hpp" namespace "rp2040core":
         cppbool read32(uint32_t offset, uint32_t* out) noexcept
         cppbool write32(uint32_t offset, uint32_t value) noexcept
         cppbool write_atomic(uint32_t offset, int64_t raw, uint32_t atomic_type) noexcept
+        int64_t raw_write_value() noexcept
+        void set_raw_write_value(int64_t value) noexcept
         cppbool reset() noexcept
         void stop() noexcept
         WindowHandler window_handler() noexcept

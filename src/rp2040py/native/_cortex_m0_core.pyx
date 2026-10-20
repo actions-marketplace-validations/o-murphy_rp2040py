@@ -14,12 +14,11 @@ The architectural state is exposed field by field as properties (same names, sam
 `registers` and `interrupt_priorities` are memoryviews over the C++ arrays.
 """
 
-from libc.stdint cimport int64_t, uint32_t
+from libc.stdint cimport uint8_t, uint32_t
 from libcpp cimport bool
 
 from rp2040py.native._cpu cimport (
     CpuHost,
-    kCpuFault,
     kCpuLogInstrUnimplemented,
     kCpuLogMrsUnimplemented,
     kCpuLogSev,
@@ -79,11 +78,12 @@ cdef void _log_trampoline(void* ctx, uint32_t kind, uint32_t a, uint32_t b, uint
 cdef class CortexM0Core:
     def __cinit__(self, *args, **kwargs):
         # The CPU is the chip's (core/mcu.hpp), and so are the arrays the views are over: no allocation, no copy, valid as long as the chip lives - and this object holds it.
-        self._cpu = &(<RP2040?> args[0])._mcu.cpu
+        # (core 1's shell is made with a second argument, 1: `CortexM0Core(rp2040, 1)`)
+        self._cpu = &(<RP2040?> args[0])._mcu.core(<uint8_t> (args[1] if len(args) > 1 else 0))
         self.registers = <unsigned int[:16]> self._cpu.registers
         self.interrupt_priorities = <unsigned int[:4]> self._cpu.interrupt_priorities
 
-    def __init__(self, rp2040):
+    def __init__(self, rp2040, core_index=0):
         cdef CpuHost host
         self.rp2040 = rp2040
         self._default_bl_taken = lambda core, blx: None
@@ -110,6 +110,10 @@ cdef class CortexM0Core:
         # Only a real hook is called from the instruction loop; the default no-op never leaves C++.
         self._bl_taken = value
         self._cpu.bl_hook_enabled = value is not self._default_bl_taken
+
+    def reset_state(self):
+        """Back to the power-on state with no bus access (no vector fetch): what a core that is not running - core 1 until it is launched - is kept in."""
+        self._cpu.reset_state()
 
     cpdef reset(self):
         # Full architectural reset - mirrors _cortex_m0_core.py's reset() (RPWatchdog.on_watchdog_trigger reuses it for a
@@ -201,6 +205,14 @@ cdef class CortexM0Core:
     @event_registered.setter
     def event_registered(self, value):
         self._cpu.event_registered = True if value else False
+
+    @property
+    def event_wait(self):
+        return self._cpu.event_wait
+
+    @event_wait.setter
+    def event_wait(self, value):
+        self._cpu.event_wait = True if value else False
 
     @property
     def waiting(self):

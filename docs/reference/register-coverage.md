@@ -12,12 +12,12 @@
 
 **This is a curated list, not a measurement.** "Answers" is measured (a read at the register's address does not warn "Unimplemented peripheral read"; for a write-only register, a write of 0 does not warn). "Acts" is curated: it means the block was audited and the register is in none of the stub / partial lists of `scripts/audit/register_status.py`, each entry of which carries its evidence. A stub that nobody has listed yet shows as Acts; if you find one, add it there and re-run the script. For what each block does and does not do, see [feature-coverage.md](feature-coverage.md). A table shared by several instances (UART0/UART1, the DMA's per-channel tables) is listed once, as the datasheet gives it.
 
-**474 registers: 344 act, 67 are stubs, 58 partial, 0 exist but are unchecked, 5 are absent.**
+**474 registers: 349 act, 65 are stubs, 58 partial, 0 exist but are unchecked, 2 are absent.**
 
 | Block | Registers | Acts | Stub | Partial | Unchecked | Absent |
 |---|---|---|---|---|---|---|
 | M0PLUS | 29 | 23 | 5 | 1 | 0 | 0 |
-| SIO | 63 | 57 | 0 | 3 | 0 | 3 |
+| SIO | 63 | 61 | 0 | 2 | 0 | 0 |
 | TIMER | 17 | 16 | 1 | 0 | 0 | 0 |
 | WATCHDOG | 5 | 4 | 0 | 1 | 0 | 0 |
 | RTC | 12 | 12 | 0 | 0 | 0 | 0 |
@@ -30,12 +30,12 @@
 | PIO | 24 | 23 | 0 | 1 | 0 | 0 |
 | SSI | 28 | 21 | 7 | 0 | 0 | 0 |
 | CLOCKS | 48 | 28 | 20 | 0 | 0 | 0 |
-| PLL | 4 | 2 | 1 | 1 | 0 | 0 |
+| PLL | 4 | 2 | 0 | 2 | 0 | 0 |
 | XOSC | 5 | 2 | 1 | 2 | 0 | 0 |
 | ROSC | 9 | 4 | 0 | 5 | 0 | 0 |
 | PSM | 4 | 4 | 0 | 0 | 0 | 0 |
 | RESETS | 3 | 3 | 0 | 0 | 0 | 0 |
-| SYSCFG | 7 | 1 | 6 | 0 | 0 | 0 |
+| SYSCFG | 7 | 2 | 5 | 0 | 0 | 0 |
 | SYSINFO | 3 | 3 | 0 | 0 | 0 | 0 |
 | TBMAN | 1 | 1 | 0 | 0 | 0 | 0 |
 | VREG_AND_CHIP_RESET | 3 | 1 | 2 | 0 | 0 | 0 |
@@ -87,7 +87,7 @@ Stubs in this block: SCR (SLEEPONEXIT, SLEEPDEEP, SEVONPEND) and the MPU (CTRL, 
 
 | Offset | Register | Status | Note |
 |---|---|---|---|
-| `0x000` | CPUID | Partial | CPUID is always 0 (no core 1) |
+| `0x000` | CPUID | Acts |  |
 | `0x004` | GPIO_IN | Partial | GPIO_IN reads the pad at once: the two-cycle input synchroniser is not modelled (SYSCFG.PROC_IN_SYNC_BYPASS is stored) |
 | `0x008` | GPIO_HI_IN | Partial | GPIO_HI_IN reads the pad at once: the two-cycle input synchroniser is not modelled (SYSCFG.PROC_IN_SYNC_BYPASS_HI is stored) |
 | `0x010` | GPIO_OUT | Acts |  |
@@ -106,9 +106,9 @@ Stubs in this block: SCR (SLEEPONEXIT, SLEEPDEEP, SEVONPEND) and the MPU (CTRL, 
 | `0x044` | GPIO_HI_OE_SET | Acts |  |
 | `0x048` | GPIO_HI_OE_CLR | Acts |  |
 | `0x04c` | GPIO_HI_OE_XOR | Acts |  |
-| `0x050` | FIFO_ST | Absent |  |
-| `0x054` | FIFO_WR | Absent |  |
-| `0x058` | FIFO_RD | Absent |  |
+| `0x050` | FIFO_ST | Acts |  |
+| `0x054` | FIFO_WR | Acts |  |
+| `0x058` | FIFO_RD | Acts |  |
 | `0x05c` | SPINLOCK_ST | Acts |  |
 | `0x060` | DIV_UDIVIDEND | Acts |  |
 | `0x064` | DIV_UDIVISOR | Acts |  |
@@ -469,12 +469,10 @@ Stubs in this block: clock gating, the resus and its interrupt are not modelled 
 
 ## PLL
 
-Stubs in this block: PWR (PD, VCOPD, POSTDIVPD, DSMPD) is stored: the PLL is always locked and running (peripherals/pll.py).
-
 | Offset | Register | Status | Note |
 |---|---|---|---|
-| `0x0` | CS | Partial | CS.LOCK is always 1 (no start-up time) |
-| `0x4` | PWR | Stub |  |
+| `0x0` | CS | Partial | CS.LOCK follows PD / VCOPD and the reference clock; it comes up at once (no lock time) |
+| `0x4` | PWR | Partial | PD, VCOPD and POSTDIVPD act; DSMPD is stored: the fractional-N / dither is not modelled (peripherals/_pll.py) |
 | `0x8` | FBDIV_INT | Acts |  |
 | `0xc` | PRIM | Acts |  |
 
@@ -523,12 +521,12 @@ Stubs in this block: COUNT is loaded by a write but never counts down (periphera
 
 ## SYSCFG
 
-Stubs in this block: only PROC0_NMI_MASK has an effect (peripherals/_syscfg.py); the rest is stored: no second core, no debug port, no memory to power down, and PROC_IN_SYNC_BYPASS(_HI) bypass a synchroniser whose two cycles of latency are not modelled.
+Stubs in this block: PROC0_NMI_MASK and PROC1_NMI_MASK act (each core's own NMI mask, peripherals/_syscfg.py); the rest is stored: no debug port, no memory to power down, and PROC_IN_SYNC_BYPASS(_HI) bypass a synchroniser whose two cycles of latency are not modelled.
 
 | Offset | Register | Status | Note |
 |---|---|---|---|
 | `0x00` | PROC0_NMI_MASK | Acts |  |
-| `0x04` | PROC1_NMI_MASK | Stub |  |
+| `0x04` | PROC1_NMI_MASK | Acts |  |
 | `0x08` | PROC_CONFIG | Stub |  |
 | `0x0c` | PROC_IN_SYNC_BYPASS | Stub |  |
 | `0x10` | PROC_IN_SYNC_BYPASS_HI | Stub |  |
@@ -595,30 +593,30 @@ Stubs in this block: BUS_PRIORITY, PERFSEL0-3 are stored and PERFCTR0-3 stay 0: 
 | `0x124` | PROC0_INTS1 | Acts |  |
 | `0x128` | PROC0_INTS2 | Acts |  |
 | `0x12c` | PROC0_INTS3 | Acts |  |
-| `0x130` | PROC1_INTE0 | Partial | PROC1 / DORMANT_WAKE: stored; there is no second core and no dormant mode to raise a line |
-| `0x134` | PROC1_INTE1 | Partial | PROC1 / DORMANT_WAKE: stored; there is no second core and no dormant mode to raise a line |
-| `0x138` | PROC1_INTE2 | Partial | PROC1 / DORMANT_WAKE: stored; there is no second core and no dormant mode to raise a line |
-| `0x13c` | PROC1_INTE3 | Partial | PROC1 / DORMANT_WAKE: stored; there is no second core and no dormant mode to raise a line |
-| `0x140` | PROC1_INTF0 | Partial | PROC1 / DORMANT_WAKE: stored; there is no second core and no dormant mode to raise a line |
-| `0x144` | PROC1_INTF1 | Partial | PROC1 / DORMANT_WAKE: stored; there is no second core and no dormant mode to raise a line |
-| `0x148` | PROC1_INTF2 | Partial | PROC1 / DORMANT_WAKE: stored; there is no second core and no dormant mode to raise a line |
-| `0x14c` | PROC1_INTF3 | Partial | PROC1 / DORMANT_WAKE: stored; there is no second core and no dormant mode to raise a line |
-| `0x150` | PROC1_INTS0 | Partial | PROC1 / DORMANT_WAKE: stored; there is no second core and no dormant mode to raise a line |
-| `0x154` | PROC1_INTS1 | Partial | PROC1 / DORMANT_WAKE: stored; there is no second core and no dormant mode to raise a line |
-| `0x158` | PROC1_INTS2 | Partial | PROC1 / DORMANT_WAKE: stored; there is no second core and no dormant mode to raise a line |
-| `0x15c` | PROC1_INTS3 | Partial | PROC1 / DORMANT_WAKE: stored; there is no second core and no dormant mode to raise a line |
-| `0x160` | DORMANT_WAKE_INTE0 | Partial | PROC1 / DORMANT_WAKE: stored; there is no second core and no dormant mode to raise a line |
-| `0x164` | DORMANT_WAKE_INTE1 | Partial | PROC1 / DORMANT_WAKE: stored; there is no second core and no dormant mode to raise a line |
-| `0x168` | DORMANT_WAKE_INTE2 | Partial | PROC1 / DORMANT_WAKE: stored; there is no second core and no dormant mode to raise a line |
-| `0x16c` | DORMANT_WAKE_INTE3 | Partial | PROC1 / DORMANT_WAKE: stored; there is no second core and no dormant mode to raise a line |
-| `0x170` | DORMANT_WAKE_INTF0 | Partial | PROC1 / DORMANT_WAKE: stored; there is no second core and no dormant mode to raise a line |
-| `0x174` | DORMANT_WAKE_INTF1 | Partial | PROC1 / DORMANT_WAKE: stored; there is no second core and no dormant mode to raise a line |
-| `0x178` | DORMANT_WAKE_INTF2 | Partial | PROC1 / DORMANT_WAKE: stored; there is no second core and no dormant mode to raise a line |
-| `0x17c` | DORMANT_WAKE_INTF3 | Partial | PROC1 / DORMANT_WAKE: stored; there is no second core and no dormant mode to raise a line |
-| `0x180` | DORMANT_WAKE_INTS0 | Partial | PROC1 / DORMANT_WAKE: stored; there is no second core and no dormant mode to raise a line |
-| `0x184` | DORMANT_WAKE_INTS1 | Partial | PROC1 / DORMANT_WAKE: stored; there is no second core and no dormant mode to raise a line |
-| `0x188` | DORMANT_WAKE_INTS2 | Partial | PROC1 / DORMANT_WAKE: stored; there is no second core and no dormant mode to raise a line |
-| `0x18c` | DORMANT_WAKE_INTS3 | Partial | PROC1 / DORMANT_WAKE: stored; there is no second core and no dormant mode to raise a line |
+| `0x130` | PROC1_INTE0 | Partial | PROC1 / DORMANT_WAKE: stored; there is no dormant mode, and core 1 sees IO_BANK0 as core 0 does (the per-core GPIO lines are not split yet, record 0104) |
+| `0x134` | PROC1_INTE1 | Partial | PROC1 / DORMANT_WAKE: stored; there is no dormant mode, and core 1 sees IO_BANK0 as core 0 does (the per-core GPIO lines are not split yet, record 0104) |
+| `0x138` | PROC1_INTE2 | Partial | PROC1 / DORMANT_WAKE: stored; there is no dormant mode, and core 1 sees IO_BANK0 as core 0 does (the per-core GPIO lines are not split yet, record 0104) |
+| `0x13c` | PROC1_INTE3 | Partial | PROC1 / DORMANT_WAKE: stored; there is no dormant mode, and core 1 sees IO_BANK0 as core 0 does (the per-core GPIO lines are not split yet, record 0104) |
+| `0x140` | PROC1_INTF0 | Partial | PROC1 / DORMANT_WAKE: stored; there is no dormant mode, and core 1 sees IO_BANK0 as core 0 does (the per-core GPIO lines are not split yet, record 0104) |
+| `0x144` | PROC1_INTF1 | Partial | PROC1 / DORMANT_WAKE: stored; there is no dormant mode, and core 1 sees IO_BANK0 as core 0 does (the per-core GPIO lines are not split yet, record 0104) |
+| `0x148` | PROC1_INTF2 | Partial | PROC1 / DORMANT_WAKE: stored; there is no dormant mode, and core 1 sees IO_BANK0 as core 0 does (the per-core GPIO lines are not split yet, record 0104) |
+| `0x14c` | PROC1_INTF3 | Partial | PROC1 / DORMANT_WAKE: stored; there is no dormant mode, and core 1 sees IO_BANK0 as core 0 does (the per-core GPIO lines are not split yet, record 0104) |
+| `0x150` | PROC1_INTS0 | Partial | PROC1 / DORMANT_WAKE: stored; there is no dormant mode, and core 1 sees IO_BANK0 as core 0 does (the per-core GPIO lines are not split yet, record 0104) |
+| `0x154` | PROC1_INTS1 | Partial | PROC1 / DORMANT_WAKE: stored; there is no dormant mode, and core 1 sees IO_BANK0 as core 0 does (the per-core GPIO lines are not split yet, record 0104) |
+| `0x158` | PROC1_INTS2 | Partial | PROC1 / DORMANT_WAKE: stored; there is no dormant mode, and core 1 sees IO_BANK0 as core 0 does (the per-core GPIO lines are not split yet, record 0104) |
+| `0x15c` | PROC1_INTS3 | Partial | PROC1 / DORMANT_WAKE: stored; there is no dormant mode, and core 1 sees IO_BANK0 as core 0 does (the per-core GPIO lines are not split yet, record 0104) |
+| `0x160` | DORMANT_WAKE_INTE0 | Partial | PROC1 / DORMANT_WAKE: stored; there is no dormant mode, and core 1 sees IO_BANK0 as core 0 does (the per-core GPIO lines are not split yet, record 0104) |
+| `0x164` | DORMANT_WAKE_INTE1 | Partial | PROC1 / DORMANT_WAKE: stored; there is no dormant mode, and core 1 sees IO_BANK0 as core 0 does (the per-core GPIO lines are not split yet, record 0104) |
+| `0x168` | DORMANT_WAKE_INTE2 | Partial | PROC1 / DORMANT_WAKE: stored; there is no dormant mode, and core 1 sees IO_BANK0 as core 0 does (the per-core GPIO lines are not split yet, record 0104) |
+| `0x16c` | DORMANT_WAKE_INTE3 | Partial | PROC1 / DORMANT_WAKE: stored; there is no dormant mode, and core 1 sees IO_BANK0 as core 0 does (the per-core GPIO lines are not split yet, record 0104) |
+| `0x170` | DORMANT_WAKE_INTF0 | Partial | PROC1 / DORMANT_WAKE: stored; there is no dormant mode, and core 1 sees IO_BANK0 as core 0 does (the per-core GPIO lines are not split yet, record 0104) |
+| `0x174` | DORMANT_WAKE_INTF1 | Partial | PROC1 / DORMANT_WAKE: stored; there is no dormant mode, and core 1 sees IO_BANK0 as core 0 does (the per-core GPIO lines are not split yet, record 0104) |
+| `0x178` | DORMANT_WAKE_INTF2 | Partial | PROC1 / DORMANT_WAKE: stored; there is no dormant mode, and core 1 sees IO_BANK0 as core 0 does (the per-core GPIO lines are not split yet, record 0104) |
+| `0x17c` | DORMANT_WAKE_INTF3 | Partial | PROC1 / DORMANT_WAKE: stored; there is no dormant mode, and core 1 sees IO_BANK0 as core 0 does (the per-core GPIO lines are not split yet, record 0104) |
+| `0x180` | DORMANT_WAKE_INTS0 | Partial | PROC1 / DORMANT_WAKE: stored; there is no dormant mode, and core 1 sees IO_BANK0 as core 0 does (the per-core GPIO lines are not split yet, record 0104) |
+| `0x184` | DORMANT_WAKE_INTS1 | Partial | PROC1 / DORMANT_WAKE: stored; there is no dormant mode, and core 1 sees IO_BANK0 as core 0 does (the per-core GPIO lines are not split yet, record 0104) |
+| `0x188` | DORMANT_WAKE_INTS2 | Partial | PROC1 / DORMANT_WAKE: stored; there is no dormant mode, and core 1 sees IO_BANK0 as core 0 does (the per-core GPIO lines are not split yet, record 0104) |
+| `0x18c` | DORMANT_WAKE_INTS3 | Partial | PROC1 / DORMANT_WAKE: stored; there is no dormant mode, and core 1 sees IO_BANK0 as core 0 does (the per-core GPIO lines are not split yet, record 0104) |
 
 ## IO_QSPI
 
@@ -628,12 +626,12 @@ Stubs in this block: BUS_PRIORITY, PERFSEL0-3 are stored and PERFCTR0-3 stay 0: 
 | `0x34` | PROC0_INTE | Acts |  |
 | `0x38` | PROC0_INTF | Acts |  |
 | `0x3c` | PROC0_INTS | Acts |  |
-| `0x40` | PROC1_INTE | Partial | PROC1 / DORMANT_WAKE: stored; there is no second core and no dormant mode to raise a line |
-| `0x44` | PROC1_INTF | Partial | PROC1 / DORMANT_WAKE: stored; there is no second core and no dormant mode to raise a line |
-| `0x48` | PROC1_INTS | Partial | PROC1 / DORMANT_WAKE: stored; there is no second core and no dormant mode to raise a line |
-| `0x4c` | DORMANT_WAKE_INTE | Partial | PROC1 / DORMANT_WAKE: stored; there is no second core and no dormant mode to raise a line |
-| `0x50` | DORMANT_WAKE_INTF | Partial | PROC1 / DORMANT_WAKE: stored; there is no second core and no dormant mode to raise a line |
-| `0x54` | DORMANT_WAKE_INTS | Partial | PROC1 / DORMANT_WAKE: stored; there is no second core and no dormant mode to raise a line |
+| `0x40` | PROC1_INTE | Partial | PROC1 / DORMANT_WAKE: stored; there is no dormant mode, and core 1 sees IO_BANK0 as core 0 does (the per-core GPIO lines are not split yet, record 0104) |
+| `0x44` | PROC1_INTF | Partial | PROC1 / DORMANT_WAKE: stored; there is no dormant mode, and core 1 sees IO_BANK0 as core 0 does (the per-core GPIO lines are not split yet, record 0104) |
+| `0x48` | PROC1_INTS | Partial | PROC1 / DORMANT_WAKE: stored; there is no dormant mode, and core 1 sees IO_BANK0 as core 0 does (the per-core GPIO lines are not split yet, record 0104) |
+| `0x4c` | DORMANT_WAKE_INTE | Partial | PROC1 / DORMANT_WAKE: stored; there is no dormant mode, and core 1 sees IO_BANK0 as core 0 does (the per-core GPIO lines are not split yet, record 0104) |
+| `0x50` | DORMANT_WAKE_INTF | Partial | PROC1 / DORMANT_WAKE: stored; there is no dormant mode, and core 1 sees IO_BANK0 as core 0 does (the per-core GPIO lines are not split yet, record 0104) |
+| `0x54` | DORMANT_WAKE_INTS | Partial | PROC1 / DORMANT_WAKE: stored; there is no dormant mode, and core 1 sees IO_BANK0 as core 0 does (the per-core GPIO lines are not split yet, record 0104) |
 
 ## PADS_BANK0
 

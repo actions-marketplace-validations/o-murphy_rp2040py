@@ -8,20 +8,6 @@ from rp2040py.native._clock cimport Clock
 from rp2040py.native._window_map cimport WindowHandler
 
 cdef extern from "rtc.hpp" namespace "rp2040core":
-    cdef const uint32_t kRtcWarnRead
-    cdef const uint32_t kRtcWarnReadAtomicArea
-    cdef const uint32_t kRtcWarnWrite
-
-    ctypedef void (*RtcWarnFn)(void* ctx, uint32_t kind, uint32_t offset, int64_t value)
-    ctypedef cppbool (*RtcIrqFn)(void* ctx, cppbool level)
-
-    cdef cppclass RtcHost:
-        RtcHost() noexcept
-        RtcWarnFn warn
-        RtcIrqFn irq
-        void* irq_ctx
-        void* ctx
-        const int* failed
 
     cdef cppclass RtcBlock:
         uint32_t clkdiv_m1
@@ -42,7 +28,6 @@ cdef extern from "rtc.hpp" namespace "rp2040core":
         uint32_t second
         uint32_t latched_date
         RtcBlock() noexcept
-        void init(Clock* clock, const RtcHost& host) noexcept
         void detach() noexcept
         int64_t raw_write_value() noexcept
         double clk_rtc() noexcept
@@ -65,8 +50,7 @@ cdef extern from "rtc.hpp" namespace "rp2040core":
 
 cdef class RP2040RTC:
     cdef public bint _from_mcu  # this is the view of the `Mcu`'s block
-    cdef RtcBlock* _block  # the chip's (`Mcu` builds and wires it), or `_own` for a stand-in chip that has no `Mcu`
-    cdef RtcBlock _own
+    cdef RtcBlock* _block  # the chip's own (core/mcu.hpp): this object is its Python view
     cdef public object rp2040
     cdef public object name
     cdef public object clock

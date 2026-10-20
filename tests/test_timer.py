@@ -142,3 +142,55 @@ def test_dbgpause_is_a_two_bit_register_that_resets_to_both_bits_set(rp2040_fact
     assert rp2040.read_uint32(DBGPAUSE) == 0x6
     rp2040.write_uint32(DBGPAUSE, 0x2)
     assert rp2040.read_uint32(DBGPAUSE) == 0x2
+
+
+def test_alarm_never_fires_before_the_count_reaches_its_target(rp2040_factory):
+    """With the count at a fraction of a microsecond (a PAUSE at 0.5 us), an alarm used to wait for the truncated difference and raised its interrupt while TIMELR was still target - 1 (record 0105)."""
+    from rp2040py.clock.simulation_clock import SimulationClock
+
+    clock = SimulationClock()
+    rp2040 = rp2040_factory(clock)
+    start_tick(rp2040)
+    clock.tick(500)
+    rp2040.write_uint32(0x40054030, 1)  # PAUSE
+    rp2040.write_uint32(0x40054030, 0)
+    rp2040.write_uint32(0x40054010, 100)  # ALARM0
+    for _ in range(400):
+        clock.tick(500)
+        if rp2040.read_uint32(INTR) & 1:
+            break
+    assert rp2040.read_uint32(INTR) & 1
+    assert rp2040.read_uint32(0x4005400C) >= 100  # TIMELR
+
+
+import random
+
+import pytest
+
+
+@pytest.mark.parametrize("seed", range(40))
+def test_an_alarm_is_never_visible_before_the_count_has_reached_its_target(rp2040_factory, seed):
+    """A property, not a comparison: the native TIMER and its reference were changed together and a lockstep oracle cannot tell when both are wrong (the early alarm of record 0105 was in both). Whatever
+    the PAUSE/unpause times, the tick rate and the tick sizes, the moment ALARMn's interrupt is visible TIMELR must already be at the target (a few counts past it at most, for a tick that
+    jumped over it)."""
+    from rp2040py.clock.simulation_clock import SimulationClock
+
+    rng = random.Random(seed)
+    clock = SimulationClock()
+    rp2040 = rp2040_factory(clock)
+    start_tick(rp2040)
+    for _ in range(30):
+        clock.tick(rng.choice([1, 7, 333, 500, 1234.5, 999.9]))
+        if rng.random() < 0.5:  # a PAUSE / unpause at an arbitrary fraction of a microsecond
+            rp2040.write_uint32(0x40054030, 1)
+            clock.tick(rng.choice([0, 13, 500, 2500.25]))
+            rp2040.write_uint32(0x40054030, 0)
+        target = (rp2040.read_uint32(0x4005400C) + rng.randrange(1, 60)) & 0xFFFFFFFF
+        rp2040.write_uint32(0x40054010, target)  # ALARM0
+        rp2040.write_uint32(INTR_CLEAR, 1)
+        for _ in range(2000):  # (steps of 1 and 40 ns among them: 60 us can take a while)
+            clock.tick(rng.choice([1, 40, 500, 777.7]))
+            if rp2040.read_uint32(INTR) & 1:
+                break
+        assert rp2040.read_uint32(INTR) & 1
+        assert (rp2040.read_uint32(0x4005400C) - target) & 0xFFFFFFFF < 16  # reached it, and not by much

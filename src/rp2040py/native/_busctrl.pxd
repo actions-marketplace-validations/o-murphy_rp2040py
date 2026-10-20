@@ -7,21 +7,9 @@ from libcpp cimport bool as cppbool
 from rp2040py.native._window_map cimport WindowHandler
 
 cdef extern from "busctrl.hpp" namespace "rp2040core":
-    cdef const uint32_t kBusctrlWarnRead
-    cdef const uint32_t kBusctrlWarnReadAtomicArea
-    cdef const uint32_t kBusctrlWarnWrite
-
-    ctypedef void (*BusctrlWarnFn)(void* ctx, uint32_t kind, uint32_t offset, int64_t value)
-
-    cdef cppclass BusctrlHost:
-        BusctrlHost() noexcept
-        BusctrlWarnFn warn
-        void* ctx
-        const int* failed
 
     cdef cppclass BusctrlBlock:
         BusctrlBlock() noexcept
-        void init(const BusctrlHost& host) noexcept
         int64_t raw_write_value() noexcept
         uint32_t bus_priority
         uint32_t perf_ctr[4]
@@ -34,8 +22,7 @@ cdef extern from "busctrl.hpp" namespace "rp2040core":
 
 cdef class RPBUSCTRL:
     cdef public bint _from_mcu  # this is the view of the `Mcu`'s block
-    cdef BusctrlBlock* _block  # the chip's (`Mcu` builds and wires it), or `_own` for a stand-in chip that has no `Mcu`
-    cdef BusctrlBlock _own
+    cdef BusctrlBlock* _block  # the chip's own (core/mcu.hpp): this object is its Python view
     cdef public object rp2040
     cdef public object name
     cdef public object voltage_select

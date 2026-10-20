@@ -19,18 +19,15 @@
 
 namespace rp2040core {
 
-constexpr uint32_t kXoscWarnRead = kRegWarnRead, kXoscWarnReadAtomicArea = kRegWarnReadAtomicArea, kXoscWarnWrite = kRegWarnWrite;
 // Warnings that carry data beyond the three of `RegWarn` (the host formats the message): `value` is the offending field.
 constexpr uint32_t kXoscWarnInvalidFreqRange = 3, kXoscWarnInvalidEnable = 4, kXoscWarnInvalidDormant = 5;
 
 using XoscStableFn = bool (*)(void* ctx);  // the oscillator started or stopped (STATUS.STABLE flipped by a register write): the clock tree is re-derived; false: a failure is parked
 
 struct XoscHost {
-    RegWarnFn warn = nullptr;
     XoscStableFn stable_changed = nullptr;  // optional
     void* stable_ctx = nullptr;             // the context `stable_changed` is called with; null: `ctx` (see `bind_stable_listener`)
     void* ctx = nullptr;
-    const int* failed = nullptr;  // the shared parked-failure flag (see _pending.pyx)
 };
 
 namespace xosc_regs {
@@ -42,13 +39,16 @@ constexpr uint32_t DORMANT_VALUE = 0x636F6D61u, WAKE_VALUE = 0x77616B65u;
 constexpr uint32_t STARTUP_RESET = 0xC4, STARTUP_X4 = 0x00100000u, STARTUP_DELAY_BITS = 0x00003FFFu;
 }  // namespace xosc_regs
 
-class XoscBlock {
+class XoscBlock : public RegisterBlock<XoscBlock> {
 public:
     XoscBlock() = default;
     XoscBlock(const XoscBlock&) = delete;  // the window handler holds a pointer to this object
     XoscBlock& operator=(const XoscBlock&) = delete;
 
-    void init(const XoscHost& host) noexcept { host_ = host; }
+    void init(const ChipPorts* ports, uint32_t block, const XoscHost& host) noexcept {
+        port_.init(ports, block);
+        host_ = host;
+    }
 
     // Whoever owns the clock tree asks to be told directly when the crystal starts or stops (core/clock_sinks.hpp), in place of the host's `stable_changed`; `fn == nullptr` takes it back.
     void bind_stable_listener(XoscStableFn fn, void* ctx) noexcept {
@@ -56,8 +56,6 @@ public:
         host_.stable_ctx = ctx;
     }
 
-    bool failed() const noexcept { return host_failed(host_.failed); }
-    int64_t raw_write_value() const noexcept { return raw_write_value_; }
 
     uint32_t ctrl = xosc_regs::CTRL_FREQ_RANGE_1_15MHZ;
     uint32_t status = 0;  // BADWRITE only; STABLE and ENABLED are derived from the flags
@@ -94,10 +92,7 @@ public:
         if (offset == REG_DORMANT) return dormant;
         if (offset == REG_STARTUP) return startup;
         if (offset == REG_COUNT) return count;
-        if (host_.warn) {
-            host_.warn(host_.ctx, kXoscWarnRead, offset, 0);
-            if (offset > 0x1000) host_.warn(host_.ctx, kXoscWarnReadAtomicArea, offset, 0);
-        }
+        port_.unimplemented_read(offset);
         return 0xFFFFFFFFu;
     }
 
@@ -117,7 +112,7 @@ public:
             const uint32_t masked = v & CTRL_MASK;
             if ((masked & CTRL_FREQ_RANGE_BITS) != CTRL_FREQ_RANGE_1_15MHZ) {
                 status |= STATUS_BADWRITE;
-                if (host_.warn) host_.warn(host_.ctx, kXoscWarnInvalidFreqRange, offset, masked & CTRL_FREQ_RANGE_BITS);
+                port_.warn(kXoscWarnInvalidFreqRange, offset, masked & CTRL_FREQ_RANGE_BITS);
             }
             ctrl = (masked & CTRL_ENABLE_BITS) | CTRL_FREQ_RANGE_1_15MHZ;
             const uint32_t enable_value = (masked & CTRL_ENABLE_BITS) >> CTRL_ENABLE_LSB;
@@ -131,7 +126,7 @@ public:
                 stable = false;
             } else if (enable_value != 0) {
                 status |= STATUS_BADWRITE;
-                if (host_.warn) host_.warn(host_.ctx, kXoscWarnInvalidEnable, offset, enable_value);
+                port_.warn(kXoscWarnInvalidEnable, offset, enable_value);
             }
         } else if (offset == REG_STATUS) {
             if (v & STATUS_BADWRITE) status &= ~STATUS_BADWRITE;  // write 1 to clear
@@ -143,7 +138,7 @@ public:
             } else {
                 if (v != WAKE_VALUE) {
                     status |= STATUS_BADWRITE;
-                    if (host_.warn) host_.warn(host_.ctx, kXoscWarnInvalidDormant, offset, v);
+                    port_.warn(kXoscWarnInvalidDormant, offset, v);
                 }
                 is_dormant = false;
                 if (enabled) stable = true;
@@ -153,26 +148,17 @@ public:
             startup = v & (STARTUP_X4 | STARTUP_DELAY_BITS);
         } else if (offset == REG_COUNT) {
             count = v & 0xFF;  // the countdown is not implemented
-        } else if (host_.warn) {
-            host_.warn(host_.ctx, kXoscWarnWrite, offset, value);
+        } else {
+            port_.unimplemented_write(offset, value);
         }
         return true;
     }
 
     // `BasePeripheral.write_uint32_atomic`, step for step.
-    bool write_atomic(uint32_t offset, int64_t raw, uint32_t atomic_type) noexcept {
-        raw_write_value_ = raw;
-        int64_t value = raw;
-        if (atomic_type != kAtomicNormal) value = decode_atomic(atomic_type, static_cast<int64_t>(read(offset)), raw);
-        if (failed()) return false;
-        return write(offset, value);
-    }
 
-    WindowHandler window_handler() noexcept { return BlockWindow<XoscBlock>::handler(this); }
 
 private:
     XoscHost host_;
-    int64_t raw_write_value_ = 0;
 };
 
 }  // namespace rp2040core

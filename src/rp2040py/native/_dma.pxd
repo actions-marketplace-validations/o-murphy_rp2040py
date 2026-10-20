@@ -4,31 +4,15 @@
 from libc.stdint cimport int64_t, uint32_t, uint64_t
 from libcpp cimport bool as cppbool
 
-from rp2040py.native._mcu_irq cimport McuIrqLines
 
 from rp2040py.native._bus cimport Bus
+from rp2040py.native._core_host cimport ChipPorts
 from rp2040py.native._clock cimport Clock
 from rp2040py.native._window_map cimport WindowHandler
 
 cdef extern from "dma.hpp" namespace "rp2040core":
-    cdef const uint32_t kDmaWarnRead
-    cdef const uint32_t kDmaWarnReadAtomicArea
-    cdef const uint32_t kDmaWarnWrite
 
-    ctypedef cppbool (*DmaIrqFn)(void* ctx, uint32_t line, cppbool level)
     ctypedef double (*DmaClockFn)(void* ctx)
-    ctypedef void (*DmaWarnFn)(void* ctx, uint32_t kind, uint32_t offset, int64_t value)
-
-    cdef cppclass DmaHost:
-        DmaHost() noexcept
-        DmaIrqFn irq
-        void* irq_ctx
-        DmaClockFn clk_sys
-        void* clk_ctx
-        DmaWarnFn warn
-        void* ctx
-        const int* failed
-        uint32_t lines[2]
 
     cdef cppclass DmaChannel:
         int index
@@ -55,7 +39,6 @@ cdef extern from "dma.hpp" namespace "rp2040core":
         uint32_t int_raw
         double transfer_ns
         DmaBlock() noexcept
-        void init(Bus* bus, Clock* clock, const DmaHost& host) noexcept
         void detach() noexcept
         uint32_t int_status0() noexcept
         uint32_t int_status1() noexcept
@@ -78,9 +61,7 @@ cdef extern from "dma.hpp" namespace "rp2040core":
 
 cdef class RPDMA:
     cdef public bint _from_mcu  # this is the view of the `Mcu`'s block
-    cdef McuIrqLines _irq_line  # the line straight to the chip, when it has one (core/mcu.hpp)
-    cdef DmaBlock* _block  # the chip's (`Mcu` builds and wires it), or `_own` for a block made directly (a stand-in chip, a test)
-    cdef DmaBlock _own
+    cdef DmaBlock* _block  # the chip's own (core/mcu.hpp): this object is its Python view
     cdef public object rp2040
     cdef public object name
     cdef public object clock

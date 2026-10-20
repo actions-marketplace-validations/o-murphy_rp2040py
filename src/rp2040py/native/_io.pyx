@@ -8,28 +8,17 @@ functions in the bus's window table (see `_native_window`), so a register access
 """
 
 from libc.stdint cimport int64_t, uint32_t
-from libcpp cimport bool as cppbool
 
 from rp2040py.native._gpio_pin cimport GPIOPin, GPIOPinBank
-from rp2040py.native._pending cimport park_error, pending_flag, raise_if_pending
+from rp2040py.native._pending cimport raise_if_pending
 from rp2040py.native._window_map cimport WindowHandler
 
 __all__ = ("RPIO",)
 
-cdef uint32_t _WARN_READ = 0, _WARN_READ_ATOMIC = 1
-
-
-cdef void _warn_trampoline(void* ctx, uint32_t kind, uint32_t offset, int64_t value) noexcept:
-    cdef RPIO block = <RPIO> ctx
-    try:
-        block._warn_kind(kind, offset, value)
-    except BaseException as error:
-        park_error(error)
 
 
 cdef class RPIO:
     def __init__(self, rp2040, name, pins=None, mcu_index=-1):
-        cdef IoPadsHost host
         cdef GPIOPin pin
         cdef GPIOPinBank owner = None
         cdef Py_ssize_t i
@@ -58,20 +47,9 @@ cdef class RPIO:
             # the chip's C++ `Mcu` holds this bank (and the IO and PADS blocks on it): this object is the Python view of it
             self._block = <IoBlock*> <size_t> rp2040._native_io_address(mcu_index)
             return
-        self._block = &self._own
-        host.warn = _warn_trampoline
-        host.ctx = <void*> self
-        host.failed = pending_flag()
-        self._own.init(owner._bank, qspi_layout, host)
-
-    def _warn_kind(self, kind, offset, value):
-        """A register access the block does not implement, as the logger's message (the chip's host calls this for the block it built)."""
-        if kind == _WARN_READ:
-            self.warn(f"Unimplemented peripheral read from 0x{offset:x}")
-        elif kind == _WARN_READ_ATOMIC:
-            self.warn("Unimplemented read from peripheral in the atomic operation region")
-        else:
-            self.warn(f"Unimplemented peripheral write to 0x{offset:x}: 0x{value:x}")
+        raise TypeError(
+            "the native block is a view of the chip's C++ `Mcu` block: RPIO is built by a native chip (the pure-Python chip has the pure-Python peripherals)"
+        )
 
     @property
     def raw_write_value(self):

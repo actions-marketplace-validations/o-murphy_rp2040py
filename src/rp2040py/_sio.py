@@ -44,7 +44,7 @@ INTERP_ADD_MASK = (
     0xFFFFFF  # INTERPx_ACCUMy_ADD is 23:0 (datasheet, and SIO_INTERP0_ACCUM0_ADD_BITS 0x00ffffff in pico-sdk's sio.h)
 )
 
-# INTER-CORE FIFO - not implemented, see docs/records/0053-core1-and-inter-core-fifo.md
+# INTER-CORE FIFO - the offsets; the FIFOs themselves are in RPSIO (docs/records/0104-second-core-seams-and-architecture.md)
 FIFO_ST = 0x050
 FIFO_WR = 0x054
 FIFO_RD = 0x058
@@ -104,9 +104,43 @@ def _js_trunc_rem(a: int, b: int) -> int:
     return a - b * int(a / b)
 
 
+class _CoreState:
+    """What SIO keeps per core (datasheet 2.3.1): the divider and the two interpolators. Core 0's live in the `RPSIO` itself (the attributes tests and shells have always used); core 1's are
+    here, and an access by core 1 swaps the two for its duration (`RPSIO._swap`), so the register code below is written once."""
+
+    def __init__(self) -> None:
+        self.div_dividend = 0
+        self.div_divisor = 0
+        self.div_quotient: int | float = 0
+        self.div_remainder: int | float = 0
+        self.div_csr = 1
+        self.interp0 = Interpolator(0)
+        self.interp1 = Interpolator(1)
+
+    def reset(self) -> None:
+        self.div_dividend = 0
+        self.div_divisor = 0
+        self.div_quotient = 0
+        self.div_remainder = 0
+        self.div_csr = 1
+        self.interp0.reset()
+        self.interp1.reset()
+
+
 class RPSIO:
     def __init__(self, rp2040: "RP2040"):
         self.rp2040 = rp2040
+        self._core1 = _CoreState()  # core 1's divider and interpolators, while core 0's are in the attributes below (and the other way round during an access by core 1)
+        # The inter-core FIFOs (datasheet 2.3.1.4) and the boot ROM's launch handshake, answered here (record 0104, D7 b); `multicore = False` gives back the old stub (the registers warn and read as
+        # 0xFFFFFFFF) for a test of that. `_fifo[0]` carries core 0 -> core 1, `_fifo[1]` core 1 -> core 0.
+        self.multicore = True
+        self._fifo: list[list[int]] = [[], []]
+        self._roe = [False, False]
+        self._wof = [False, False]
+        self._fifo_irq = [False, False]
+        self._launch_seq = 0
+        self._launch_words = [0, 0, 0]
+        self._core1_launched = False
 
         self.gpio_value = 0
         self.gpio_output_enable = 0
@@ -146,6 +180,106 @@ class RPSIO:
         self.spin_lock = 0
         self.interp0.reset()
         self.interp1.reset()
+        self._core1.reset()
+        self.reset_core1()
+
+    def reset_core1(self) -> None:
+        """Core 1 goes back to its boot state (PSM, a chip reset): the FIFOs are emptied and the handshake starts over."""
+        self._fifo = [[], []]
+        self._roe = [False, False]
+        self._wof = [False, False]
+        self._launch_seq = 0
+        self._core1_launched = False
+        self._update_fifo_irqs()
+
+    def core1_boot_done(self) -> None:
+        """Core 1 has come out of reset and the boot ROM it runs has drained its mailbox: it pushes a 0 to core 0 (and a SEV after it), which the pico-sdk's `multicore_reset_core1()` waits for."""
+        if not self.multicore:
+            return
+        self._fifo[1].append(0)
+        self.rp2040.send_event(0)
+        self._update_fifo_irqs()
+
+    def _swap(self) -> None:
+        """Exchange the per-core registers with core 1's (an access by core 1 runs between two of these)."""
+        other = self._core1
+        self.div_dividend, other.div_dividend = other.div_dividend, self.div_dividend
+        self.div_divisor, other.div_divisor = other.div_divisor, self.div_divisor
+        self.div_quotient, other.div_quotient = other.div_quotient, self.div_quotient
+        self.div_remainder, other.div_remainder = other.div_remainder, self.div_remainder
+        self.div_csr, other.div_csr = other.div_csr, self.div_csr
+        self.interp0, other.interp0 = other.interp0, self.interp0
+        self.interp1, other.interp1 = other.interp1, self.interp1
+
+    # -- the FIFOs -----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+    def _fifo_status(self, core: int) -> int:
+        return (
+            (8 if self._roe[core] else 0)
+            | (4 if self._wof[core] else 0)
+            | (2 if len(self._fifo[core]) < 8 else 0)
+            | (1 if self._fifo[1 - core] else 0)
+        )
+
+    def _update_fifo_irqs(self) -> None:
+        """The IRQ of each core (SIO_IRQ_PROC0 / PROC1, lines 15 and 16) is the OR of VLD, ROE and WOF of its FIFO_ST; a line is told only when it changes."""
+        for core in range(2):
+            level = (self._fifo_status(core) & 0b1101) != 0
+            if level != self._fifo_irq[core]:
+                self._fifo_irq[core] = level
+                self.rp2040.set_interrupt(15 + core, level)
+
+    def _fifo_read(self, offset: int, core: int) -> int:
+        if offset == FIFO_ST:
+            return self._fifo_status(core)
+        if offset == FIFO_WR:  # write-only
+            self.rp2040.logger.warning(LOG_NAME, f"Read from invalid SIO address: {offset:x}")
+            return 0xFFFFFFFF
+        rx = self._fifo[1 - core]
+        word = 0
+        if rx:
+            word = rx.pop(0)
+        else:
+            self._roe[core] = True  # a read of an empty FIFO is ignored, and remembered
+        self._update_fifo_irqs()
+        return word
+
+    def _fifo_write(self, offset: int, value: int, core: int) -> None:
+        if offset == FIFO_ST:  # writing anything clears the two sticky flags
+            self._roe[core] = self._wof[core] = False
+            self._update_fifo_irqs()
+            return
+        if (
+            core == 0 and not self._core1_launched and hasattr(self.rp2040, "launch_core1")
+        ):  # (a chip that cannot launch core 1 has no boot ROM to answer)
+            self._boot_rom_answer(value & 0xFFFFFFFF)
+            return
+        if len(self._fifo[core]) < 8:
+            self._fifo[core].append(value & 0xFFFFFFFF)
+        else:
+            self._wof[core] = True  # a write to a full FIFO is ignored, and remembered
+        self._update_fifo_irqs()
+
+    def _boot_rom_answer(self, word: int) -> None:
+        """Core 1 is still in the boot ROM: it echoes every word of core 0's handshake (0, 0, 1, vector table, sp, entry; datasheet 2.8.2) with a SEV after it, starts over on a wrong word and is
+        launched by the last one."""
+        expected = (0, 0, 1)
+        if self._launch_seq < 3:
+            if word == expected[self._launch_seq]:
+                self._launch_seq += 1
+            else:
+                self._launch_seq = 1 if word == 0 else 0
+        elif word == 0:
+            self._launch_seq = 1  # core 0 restarts (it drains before a 0)
+        else:
+            self._launch_words[self._launch_seq - 3] = word
+            self._launch_seq += 1
+        self._fifo[1].append(word)  # the echo
+        self.rp2040.send_event(0)  # (the ROM's SEV)
+        self._update_fifo_irqs()
+        if self._launch_seq >= 6:
+            self._launch_seq = 0
+            self._core1_launched = True
+            self.rp2040.launch_core1(*self._launch_words)
 
     def update_hardware_divider(self, signed: bool) -> None:
         if self.div_divisor == 0:
@@ -160,9 +294,18 @@ class RPSIO:
             self.div_quotient = dividend / divisor
             self.div_remainder = dividend % divisor
         self.div_csr = 0b11
-        self.rp2040.core.cycles += 8
+        (self.rp2040.cores[1] if getattr(self.rp2040, "initiator", 0) else self.rp2040.core).cycles += 8
 
     def read_uint32(self, offset: int) -> int | float:
+        if getattr(self.rp2040, "initiator", 0):  # (a stand-in chip of a test has no second core)
+            self._swap()
+            try:
+                return self._read_uint32(offset)
+            finally:
+                self._swap()
+        return self._read_uint32(offset)
+
+    def _read_uint32(self, offset: int) -> int | float:
         if SPINLOCK0 <= offset <= SPINLOCK31:
             bit_index_mask = 1 << ((offset - SPINLOCK0) // 4)
             if self.spin_lock & bit_index_mask:
@@ -203,8 +346,8 @@ class RPSIO:
         ):
             return 0  # TODO verify with silicone
         if offset == CPUID:
-            # Returns the current CPU core id (always 0 for now)
-            return 0
+            # The id of the core that is reading
+            return getattr(self.rp2040, "initiator", 0)
         if offset == SPINLOCK_ST:
             return self.spin_lock
         if offset == DIV_UDIVIDEND:
@@ -295,6 +438,8 @@ class RPSIO:
         if offset == INTERP1_ACCUM1_ADD:
             return self.interp1.smresult1
         if offset in (FIFO_ST, FIFO_WR, FIFO_RD):
+            if self.multicore:
+                return self._fifo_read(offset, getattr(self.rp2040, "initiator", 0))
             self.rp2040.logger.warning(
                 LOG_NAME,
                 "Inter-core FIFO (0x50-0x58) is not implemented. core1/_thread is unsupported "
@@ -306,6 +451,19 @@ class RPSIO:
         return 0xFFFFFFFF
 
     def write_uint32(self, offset: int, value: int) -> None:
+        if getattr(self.rp2040, "initiator", 0):
+            self._swap()
+            try:
+                self._write_uint32(offset, value)
+            finally:
+                self._swap()
+            return
+        self._write_uint32(offset, value)
+
+    def _write_uint32(self, offset: int, value: int) -> None:
+        if self.multicore and offset in (FIFO_ST, FIFO_WR):
+            self._fifo_write(offset, value, getattr(self.rp2040, "initiator", 0))
+            return
         if SPINLOCK0 <= offset <= SPINLOCK31:
             bit_index_mask = ~(1 << ((offset - SPINLOCK0) // 4))
             self.spin_lock &= bit_index_mask

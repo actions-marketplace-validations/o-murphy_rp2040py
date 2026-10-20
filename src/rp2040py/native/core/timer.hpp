@@ -4,13 +4,13 @@
 // What it owns: the counter's epoch, the latched high word, INTR/INTE/INTF, PAUSE, and four alarms
 // whose due times are scheduled on the C++ `Clock` (core/clock.hpp) - so a firmware's TIMELR poll loop, the
 // hottest register traffic of a boot (52% of the accesses of a MicroPython boot, 97.6% of CircuitPython's), never
-// leaves C++. What it does not own: logging, and the interrupt line - both are reached through a `TimerHost` of
-// plain function pointers (a Python trampoline today, the C++ NVIC/logger later), which also keeps this header free
-// of anything Python.
+// leaves C++. What it does not own: logging, and the interrupt line - both are reached through the chip's `ChipPorts`
+// (core/core_host.hpp), which also keeps this header free of anything Python.
 //
 // The count advances once per tick of the watchdog's tick generator (datasheet 4.6.4, 4.7.2): `tick_changed(hz)` is how the chip tells the block the tick's rate - nominally 1 MHz, a count per
 // microsecond - and 0 means the tick is not running, which freezes the count exactly as PAUSE does (a bare chip does not count until firmware has started the tick, as on silicon). The count
-// is continuous across a change of rate, and the armed alarms are re-timed.
+// is continuous across a change of rate, and the armed alarms are re-timed. The count is an integer (64 bits, wrapping) plus the ticks of the clock into the count after it: the `n`th count after the last
+// comes `ceil(n * period)` ticks later (16000 at 1 MHz, so exact integer arithmetic), and an alarm fires at the tick its count begins, never before (record 0105, finding 6).
 //
 // Every observable is kept, because replay of a recorded firmware session is the acceptance test: the number and
 // order of interrupt-line calls (every INTR/INTE/INTF change and every alarm fire re-announces ALL FOUR lines, in
@@ -30,21 +30,6 @@
 
 namespace rp2040core {
 
-// A function that reports an interrupt line level may fail (a Python trampoline can raise); `false` means the
-// failure is pending with the caller, and whatever was running stops at once - as an exception would stop it.
-using TimerIrqFn = bool (*)(void* ctx, uint32_t line, bool level);
-
-// The messages the Python block logs through `BasePeripheral.warn`; the host formats them (it owns the logger).
-constexpr uint32_t kTimerWarnRead = kRegWarnRead, kTimerWarnReadAtomicArea = kRegWarnReadAtomicArea, kTimerWarnWrite = kRegWarnWrite;
-using TimerWarnFn = RegWarnFn;
-
-struct TimerHost {
-    TimerIrqFn irq = nullptr;
-    void* irq_ctx = nullptr;  // the context of `irq` alone, when it is not `ctx` (a line bound straight to the chip, core/mcu.hpp)
-    TimerWarnFn warn = nullptr;
-    void* ctx = nullptr;
-    uint32_t lines[4] = {0, 1, 2, 3};  // IRQ numbers of TIMER_0..3
-};
 
 namespace timer_regs {
 constexpr uint32_t TIMEHW = 0x00, TIMELW = 0x04, TIMEHR = 0x08, TIMELR = 0x0C, ALARM0 = 0x10, ALARM1 = 0x14, ALARM2 = 0x18, ALARM3 = 0x1C;
@@ -53,7 +38,7 @@ constexpr uint32_t kDbgPauseMask = 0x6, kDbgPauseReset = 0x6;  // DBG1 (bit 2) a
 constexpr uint32_t INTR = 0x34, INTE = 0x38, INTF = 0x3C, INTS = 0x40;
 }  // namespace timer_regs
 
-class TimerBlock {
+class TimerBlock : public RegisterBlock<TimerBlock> {
 public:
     static constexpr int kAlarms = 4;
     static constexpr uint32_t kAlarmBits = 0xF;
@@ -62,10 +47,10 @@ public:
     TimerBlock(const TimerBlock&) = delete;  // the alarm nodes point into this object
     TimerBlock& operator=(const TimerBlock&) = delete;
 
-    // Binds the block to its clock and host. Must be called once, before anything else.
-    void init(Clock* clock, const TimerHost& host) noexcept {
+    // Binds the block to its clock and the chip's ports; `irq_line` is the NVIC number of TIMER_0 (the four follow). Must be called once, before anything else.
+    void init(Clock* clock, const ChipPorts* ports, uint32_t block, uint32_t irq_line) noexcept {
         clock_ = clock;
-        host_ = host;
+        port_.init(ports, block, irq_line);
         clock_->add_rebase_listener(&rebase_listener_, &TimerBlock::on_rebase, this);  // the clock's origin moved: this block's epoch is an absolute tick count
         for (int i = 0; i < kAlarms; ++i) {
             slots_[i].block = this;
@@ -82,22 +67,21 @@ public:
     }
 
     uint32_t int_status() const noexcept { return (int_raw_ & int_enable_) | int_force_; }
-    int64_t raw_write_value() const noexcept { return raw_write_value_; }
     bool alarm_armed(int index) const noexcept { return armed_[index]; }
 
     // ---- registers: every "handled" return is false for an offset this block does not implement ----------
 
     bool read32(uint32_t offset, uint32_t* out) noexcept {
         using namespace timer_regs;
-        const double time = micros();
+        const uint64_t time = count_now();
         switch (offset) {
             case TIMEHR: *out = static_cast<uint32_t>(latched_high_); return true;
             case TIMELR:
-                latched_high_ = high_word(time);
-                *out = to_uint32(time);
+                latched_high_ = static_cast<int64_t>(time >> 32);
+                *out = static_cast<uint32_t>(time);
                 return true;
-            case TIMERAWH: *out = static_cast<uint32_t>(high_word(time)); return true;
-            case TIMERAWL: *out = to_uint32(time); return true;
+            case TIMERAWH: *out = static_cast<uint32_t>(time >> 32); return true;
+            case TIMERAWL: *out = static_cast<uint32_t>(time); return true;
             case ALARM0: case ALARM1: case ALARM2: case ALARM3:
                 *out = target_[(offset - ALARM0) / 4];
                 return true;
@@ -132,10 +116,9 @@ public:
             case ALARM0: case ALARM1: case ALARM2: case ALARM3: {
                 const int index = static_cast<int>((offset - ALARM0) / 4);
                 // The due time is computed from the unmasked value (as the Python block does); the register keeps 32 bits.
-                const uint32_t delta_micros = to_uint32(static_cast<double>(value) - micros());
                 armed_[index] = true;
                 target_[index] = static_cast<uint32_t>(value);
-                if (!frozen()) clock_->schedule(&alarms_[index], nanos_for(static_cast<double>(delta_micros)));  // a frozen count: armed, and waiting for PAUSE to clear / the tick to run
+                if (!frozen()) arm_clock_alarm(index);  // a frozen count: armed, and waiting for PAUSE to clear / the tick to run
                 return kWriteHandled;
             }
             case ARMED:
@@ -153,7 +136,7 @@ public:
                 time_latch_low_ = static_cast<uint32_t>(value);
                 return kWriteHandled;
             case TIMEHW:  // "always write timelw before timehw": this write sets the whole 64-bit time
-                set_time(static_cast<double>(static_cast<uint32_t>(value)) * 4294967296.0 + static_cast<double>(time_latch_low_));
+                set_time((static_cast<uint64_t>(static_cast<uint32_t>(value)) << 32) | time_latch_low_);
                 return kWriteHandled;
             case INTR:
                 int_raw_ &= ~static_cast<uint32_t>(raw);
@@ -172,11 +155,12 @@ public:
     // (the simulation clock itself is never rewound). Returns false if an interrupt-line call failed.
     bool reset() noexcept {
         epoch_ticks_ = clock_->ticks();
-        base_micros_ = 0.0;
+        count_ = 0;
+        sub_ = 0;
         latched_high_ = 0;
         int_raw_ = int_enable_ = int_force_ = 0;
         paused_ = false;
-        frozen_micros_ = 0.0;  // the tick is not part of the block's registers: it keeps running (or not) through a reset
+        // (the tick is not part of the block's registers: it keeps running (or not) through a reset)
         time_latch_low_ = 0;
         dbgpause_ = timer_regs::kDbgPauseReset;
         for (int i = 0; i < kAlarms; ++i) {
@@ -184,7 +168,7 @@ public:
             target_[i] = 0;
         }
         for (int i = 0; i < kAlarms; ++i) {
-            if (!raise_irq(host_.lines[i], false)) return false;
+            if (!raise_irq(i, false)) return false;
         }
         return true;
     }
@@ -192,28 +176,20 @@ public:
     // ---- the register protocol as the bus (and the Python facade) uses it ---------------------------------
 
     // A read of any offset: an unimplemented one warns and reads as 0xFFFFFFFF, as `BasePeripheral` does.
+    // A write of the value after the alias decode; the raw bits the INTR clear acts on are `raw_write_value()`.
+    bool write(uint32_t offset, int64_t value) noexcept {
+        const int result = write32(offset, value, raw_write_value_);
+        if (result == kWriteUnhandled) port_.unimplemented_write(offset, value);
+        return result != kWriteFailed;
+    }
+
     uint32_t read(uint32_t offset) noexcept {
         uint32_t value;
         if (read32(offset, &value)) return value;
-        if (host_.warn) {
-            host_.warn(host_.ctx, kTimerWarnRead, offset, 0);
-            if (offset > 0x1000) host_.warn(host_.ctx, kTimerWarnReadAtomicArea, offset, 0);
-        }
+        port_.unimplemented_read(offset);
         return 0xFFFFFFFFu;
     }
 
-    // A write through the atomic aliases: `BasePeripheral.write_uint32_atomic`, step for step - remember the raw
-    // value, decode the alias against a *read* of the register (with that read's side effects), then write.
-    void write_atomic(uint32_t offset, int64_t raw, uint32_t atomic_type) noexcept {
-        raw_write_value_ = raw;
-        int64_t value = raw;
-        if (atomic_type != kAtomicNormal) {
-            value = decode_atomic(atomic_type, static_cast<int64_t>(read(offset)), raw);  // an alias that is none of the three (not reachable from an address) writes raw
-        }
-        if (write32(offset, value, raw) == kWriteUnhandled && host_.warn) {
-            host_.warn(host_.ctx, kTimerWarnWrite, offset, value);
-        }
-    }
 
     // ---- the watchdog's tick --------------------------------------------------------------------------------------
 
@@ -226,7 +202,6 @@ public:
 
     // ---- window handler entry points: what the bus's C++ window registry calls ---------------------------
 
-    WindowHandler window_handler() noexcept { return BlockWindow<TimerBlock>::handler(this); }
 
 private:
     struct Slot {
@@ -236,32 +211,55 @@ private:
 
     // The count does not advance: PAUSE is set, or the watchdog's tick is not running.
     bool frozen() const noexcept { return paused_ || tick_hz_ == 0.0; }
-    // Counts per microsecond of simulated time: the tick is nominally 1 MHz (one count per microsecond).
-    double scale() const noexcept { return tick_hz_ / 1e6; }
-    // Simulated nanoseconds until the count has advanced by `counts` (at the current tick).
-    double nanos_for(double counts) const noexcept { return counts * 1000.0 / scale(); }
-    // This block's own count - one per tick - since its epoch, not the simulation's clock. Every read and every
-    // alarm arming goes through here, so the two cannot disagree about what "now" is. Frozen while PAUSE is set or the tick is stopped.
-    double micros() const noexcept { return frozen() ? frozen_micros_ : base_micros_ + static_cast<double>(clock_->ticks() - epoch_ticks_) / (1000.0 * static_cast<double>(kTicksPerNano)) * scale(); }
-    static int64_t high_word(double time) noexcept { return static_cast<int64_t>(time / 4294967296.0); }  // time >= 0
-    // Python's `int(value) & 0xFFFFFFFF` for any finite double - truncate toward zero, then the low 32 bits of the two's-complement integer - read from the bits of the double, so that
-    // a count beyond int64 (a TIMEHW write can put the 64-bit time anywhere) has no undefined behaviour and no libm is needed.
-    static uint32_t to_uint32(double value) noexcept {
-        uint64_t bits;
-        std::memcpy(&bits, &value, sizeof bits);
-        const bool negative = (bits >> 63) != 0;
-        const int exponent = static_cast<int>((bits >> 52) & 0x7FF);
-        if (exponent == 0 || exponent == 0x7FF) return 0;  // zero and denormals truncate to 0; inf/NaN are never reached
-        const uint64_t mantissa = (bits & ((uint64_t{1} << 52) - 1)) | (uint64_t{1} << 52);
-        const int shift = exponent - 1075;  // value = mantissa * 2^shift
-        uint64_t magnitude = 0;
-        if (shift >= 0) {
-            if (shift < 64) magnitude = mantissa << shift;  // from shift 32 up the low 32 bits are 0 anyway
-        } else if (-shift < 64) {
-            magnitude = mantissa >> -shift;
+    // Ticks of the clock (1/16 ns) per count: 16000 at the nominal 1 MHz tick; not a whole number for a tick that clk_ref / CYCLES does not divide evenly.
+    double period() const noexcept {
+        const double p = static_cast<double>(kTicksPerNano) * 1e9 / tick_hz_;
+        return p < 1.0 ? 1.0 : p;
+    }
+    // Ticks from a count to the `counts`th after it: ceil(counts * period), exact when the period is a whole number. (ceil without libm; the product is far below 2^53.)
+    static int64_t ticks_of(int64_t counts, double period) noexcept {
+        const int64_t whole = static_cast<int64_t>(period);
+        if (static_cast<double>(whole) == period) return counts * whole;
+        const double product = static_cast<double>(counts) * period;
+        int64_t ticks = static_cast<int64_t>(product);  // truncates toward zero
+        if (static_cast<double>(ticks) < product) ++ticks;
+        return ticks;
+    }
+    // `total` ticks after a count: the counts that have passed, and (in `*sub`) the ticks since the last of them.
+    int64_t split(int64_t total, int64_t* sub) const noexcept {
+        const double p = period();
+        const int64_t whole = static_cast<int64_t>(p);
+        if (static_cast<double>(whole) == p) {
+            *sub = total % whole;
+            return total / whole;
         }
-        const uint32_t low = static_cast<uint32_t>(magnitude);
-        return negative ? 0u - low : low;
+        int64_t counts = static_cast<int64_t>(static_cast<double>(total) / p);
+        while (ticks_of(counts + 1, p) <= total) ++counts;
+        while (counts > 0 && ticks_of(counts, p) > total) --counts;
+        *sub = total - ticks_of(counts, p);
+        return counts;
+    }
+    int64_t ticks_into_count() const noexcept { return sub_ + (clock_->ticks() - epoch_ticks_); }
+    // The count (64 bits, wrapping), and in `*sub` the ticks since it last changed. Frozen while PAUSE is set or the tick is stopped.
+    uint64_t count_and_sub(int64_t* sub) const noexcept {
+        if (frozen()) {
+            *sub = sub_;
+            return count_;
+        }
+        const int64_t passed = split(ticks_into_count(), sub);
+        return count_ + static_cast<uint64_t>(passed);
+    }
+    uint64_t count_now() const noexcept {
+        int64_t sub;
+        return count_and_sub(&sub);
+    }
+    // (Re)schedules alarm `index` for the moment the low 32 bits of the count reach its target, exactly: the tick at which that count begins (a target the count is already on fires at once).
+    void arm_clock_alarm(int index) noexcept {
+        const int64_t total = ticks_into_count();
+        int64_t sub;
+        const int64_t passed = split(total, &sub);
+        const uint32_t counts = target_[index] - static_cast<uint32_t>(count_ + static_cast<uint64_t>(passed));
+        clock_->schedule_ticks(&alarms_[index], counts == 0 ? 0 : ticks_of(passed + counts, period()) - total);
     }
 
     // PAUSE: the count freezes and no alarm can come due; clearing it resumes from the frozen count.
@@ -269,38 +267,41 @@ private:
         if (paused != paused_) apply(paused, tick_hz_);
     }
 
-    // Switch to a new PAUSE / tick state with the count continuous across it.
+    // Switch to a new PAUSE / tick state with the count continuous across it (the ticks into the current count are kept in proportion when the period changes).
     void apply(bool paused, double tick_hz) noexcept {
         const bool was_frozen = frozen();
-        const double now_micros = micros();
+        int64_t sub;
+        const uint64_t count = count_and_sub(&sub);
+        const double old_period = was_frozen ? 0.0 : period();
         paused_ = paused;
         tick_hz_ = tick_hz;
         if (frozen()) {
-            frozen_micros_ = now_micros;
+            count_ = count;
+            sub_ = sub;
             if (!was_frozen) {
                 for (int i = 0; i < kAlarms; ++i) clock_->cancel(&alarms_[i]);
             }
         } else {
-            base_micros_ = now_micros;
+            if (!was_frozen) sub = static_cast<int64_t>(static_cast<double>(sub) * period() / old_period);
+            count_ = count;
+            sub_ = sub;
             epoch_ticks_ = clock_->ticks();
             reschedule_armed_alarms();
         }
     }
 
-    // The count is now `micros_value`; every armed alarm is re-timed against it (an alarm matches the counter, not a moment of simulated time).
-    void set_time(double micros_value) noexcept {
-        if (frozen()) {
-            frozen_micros_ = micros_value;
-            return;
-        }
-        base_micros_ = micros_value;
+    // The count is now `count`; every armed alarm is re-timed against it (an alarm matches the counter, not a moment of simulated time).
+    void set_time(uint64_t count) noexcept {
+        count_ = count;
+        sub_ = 0;
+        if (frozen()) return;
         epoch_ticks_ = clock_->ticks();
         reschedule_armed_alarms();
     }
 
     void reschedule_armed_alarms() noexcept {
         for (int i = 0; i < kAlarms; ++i) {
-            if (armed_[i]) clock_->schedule(&alarms_[i], nanos_for(static_cast<double>(to_uint32(static_cast<double>(target_[i]) - micros()))));
+            if (armed_[i]) arm_clock_alarm(i);
         }
     }
 
@@ -313,7 +314,7 @@ private:
     bool check_interrupts() noexcept {
         const uint32_t status = int_status();
         for (int i = 0; i < kAlarms; ++i) {
-            if (!raise_irq(host_.lines[i], (status & (1u << i)) != 0)) return false;
+            if (!raise_irq(i, (status & (1u << i)) != 0)) return false;
         }
         return true;
     }
@@ -327,25 +328,24 @@ private:
     }
 
     Clock* clock_ = nullptr;
-    bool raise_irq(uint32_t line, bool level) noexcept { return host_.irq(host_.irq_ctx != nullptr ? host_.irq_ctx : host_.ctx, line, level); }
-    TimerHost host_;
+    bool raise_irq(int alarm, bool level) noexcept { return port_.irq(level, static_cast<uint32_t>(alarm)); }
     static void on_rebase(void* ctx, int64_t delta) noexcept {
         auto* self = static_cast<TimerBlock*>(ctx);
         self->epoch_ticks_ -= delta;  // (the epoch is always near the clock's time, so this cannot run away)
-        if (!self->frozen()) self->base_micros_ = self->micros();
+        if (!self->frozen()) self->count_ = self->count_and_sub(&self->sub_);
         self->epoch_ticks_ = self->clock_->ticks();
     }
 
     RebaseListener rebase_listener_;
-    int64_t epoch_ticks_ = 0;  // the clock's time, in ticks, at which this block's count was `base_micros_`
-    double base_micros_ = 0.0;  // the count at the epoch (folded into whenever the clock's origin moves, so the epoch never drifts away from the clock's time)
+    int64_t epoch_ticks_ = 0;  // the clock's time, in ticks, at which this block's count was `count_` (plus `sub_` ticks)
+    uint64_t count_ = 0;  // the count (64 bits, wrapping) at the epoch, or frozen
+    int64_t sub_ = 0;  // the ticks of the clock into the count after it (0 <= sub_ < one period)
+    // (both are folded into whenever the clock's origin moves, so the epoch never drifts away from the clock's time)
     int64_t latched_high_ = 0;
     uint32_t int_raw_ = 0, int_enable_ = 0, int_force_ = 0;
     bool paused_ = false;
     double tick_hz_ = 0.0;        // the watchdog's tick; 0 = not running, the count is frozen
-    double frozen_micros_ = 0.0;  // the count, frozen, while PAUSE is set or the tick is not running
     uint32_t time_latch_low_ = 0, dbgpause_ = timer_regs::kDbgPauseReset;
-    int64_t raw_write_value_ = 0;
     bool armed_[kAlarms] = {false, false, false, false};
     uint32_t target_[kAlarms] = {0, 0, 0, 0};
     Alarm alarms_[kAlarms];

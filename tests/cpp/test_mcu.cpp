@@ -181,17 +181,11 @@ int main() {
         Clock clock;
         DmaHost dma_host;
         DmaBlock dma;
-        dma.init(&m.bus, &clock, dma_host);
+        dma.init(&m.bus, &clock, nullptr, 0, 0, dma_host);  // (a block on its own: no ports)
         CHECK(m.set_dreq(5, true) && !dma.dreq(5));  // no DMA attached: nowhere to go, not a failure
         m.attach_dma(&dma);
         CHECK(m.set_dreq(5, true) && dma.dreq(5));
         CHECK(m.set_dreq(5, false) && !dma.dreq(5));
-
-        McuDreqLine line;
-        line.mcu = &m;
-        line.number = 36;
-        CHECK(mcu_dreq_line(&line, true) && dma.dreq(36));
-        CHECK(mcu_dreq_line(&line, false) && !dma.dreq(36));
 
         McuDreqPair pair;
         pair.mcu = &m;
@@ -200,13 +194,6 @@ int main() {
         CHECK(mcu_dreq_pair(&pair, true, true) && dma.dreq(20) && !dma.dreq(21));
         CHECK(mcu_dreq_pair(&pair, false, true) && dma.dreq(21));
         CHECK(mcu_dreq_pair(&pair, true, false) && !dma.dreq(20) && dma.dreq(21));
-
-        McuDreqBase base;
-        base.mcu = &m;
-        base.base = 24;
-        CHECK(mcu_dreq_base(&base, 3) && dma.dreq(27));  // the PWM only ever asserts (a wrap)
-
-        CHECK(mcu_dreq_number(&m, 9, true) && dma.dreq(9) && mcu_dreq_number(&m, 9, false) && !dma.dreq(9));  // the PIO: the number is already absolute
 
         struct Seen {
             int n = 0;
@@ -242,7 +229,7 @@ int main() {
             int uart_bytes = 0;
             int resets = 0, triggers = 0, ticks = 0;
             int pin_changes = 0;
-            int bus_resets = 0, usb_resets = 0;
+            int bus_resets = 0, usb_resets = 0, usb_enabled = 0;
             uint64_t reset_blocks = 0;
             uint32_t pin_bank = 99, pin_number = 99;
             int pin_new = -1, pin_old = -1;
@@ -309,6 +296,13 @@ int main() {
         };
         for (uint32_t i = 0; i < sizeof flash_image; ++i) flash_image[i] = static_cast<uint8_t>(i * 7 + 3);
         m.set_flash(flash_image, sizeof flash_image);
+        UsbHost usb_wire;  // the host's end of the USB wire, given in the host and read by `build()`
+        usb_wire.ctx = &world;
+        usb_wire.usb_enabled = [](void* ctx) {
+            ++static_cast<World*>(ctx)->usb_enabled;
+            return true;
+        };
+        host.usb_wire = &usb_wire;
         m.set_usb_dpram(usb_dpram);
         m.build(host);
         const uint32_t rtc = 0x4005C000;  // (literal: the constant under test must not vouch for itself)
@@ -320,7 +314,7 @@ int main() {
 
         CHECK(world.warns == 0);
         (void)m.bus.read32(rtc + 0x3C);  // no such register
-        CHECK(world.warns == 1 && world.block == kMcuBlockRtc && world.kind == kRtcWarnRead && world.offset == 0x3C);
+        CHECK(world.warns == 1 && world.block == kMcuBlockRtc && world.kind == kRegWarnRead && world.offset == 0x3C);
 
         // 1 Hz clk_rtc, 2024-02-29 (a leap year) 23:59:58: two seconds later it is 2024-03-01 00:00:00.
         CHECK(m.rtc().clk_rtc_changed(1.0));
@@ -341,7 +335,7 @@ int main() {
         m.bus.write32(tbman, 0xFFFFFFFFu);
         CHECK(m.bus.read32(tbman) == 1 && world.warns == warns);
         (void)m.bus.read32(tbman + 0x10);
-        CHECK(world.warns == warns + 1 && world.block == kMcuBlockTbman && world.kind == kTbmanWarnRead && world.offset == 0x10);
+        CHECK(world.warns == warns + 1 && world.block == kMcuBlockTbman && world.kind == kRegWarnRead && world.offset == 0x10);
 
         // BUSCTRL, VREG, SYSINFO and SYSCFG, built by the same call (group 1 of step 3a). Addresses and values are literals, so a wrong constant fails here.
         static uint8_t rom[0x40];
@@ -446,6 +440,51 @@ int main() {
         m.bus.write32(0x40058000 + 0x2C, 12 | (1u << 9));  // WATCHDOG.TICK: 12 cycles of clk_ref, enabled -> 1 MHz
         CHECK(m.timer().tick_hz() == 1e6 && m.ppb().tick_hz() == 1e6);  // the TIMER and SysTick follow it in C++ ...
         CHECK(world.ticks >= 1 && world.last_tick == 1e6);              // ... and then the host hears of it
+        CHECK(m.ppb(1).tick_hz() == 1e6);  // core 1's SysTick is fed the tick as well (the watchdog tells each core's PPB)
+
+        // The second core's seams (record 0104, P0): present, inactive, and reached only through the bus's `initiator`.
+        {
+            CHECK(m.cpu1.initialised() && &m.core(0) == &m.cpu && &m.core(1) == &m.cpu1 && m.bus.initiator == 0);
+            // CPUID is the initiator; the divider and the interpolators are per core.
+            CHECK(m.bus.read32(0xD0000000 + 0x000) == 0);
+            m.bus.initiator = 1;
+            CHECK(m.bus.read32(0xD0000000 + 0x000) == 1);
+            m.bus.write32(0xD0000000 + 0x60, 100);  // DIV_UDIVIDEND
+            m.bus.write32(0xD0000000 + 0x64, 7);    // DIV_UDIVISOR
+            CHECK(m.bus.read32(0xD0000000 + 0x70) == 14);  // DIV_QUOTIENT: core 1's own result
+            const uint64_t cycles0 = m.cpu.cycles, cycles1 = m.cpu1.cycles;
+            m.bus.write32(0xD0000000 + 0x64, 9);  // another divide: its cycles go to the initiating core
+            CHECK(m.cpu1.cycles > cycles1 && m.cpu.cycles == cycles0);
+            m.bus.initiator = 0;
+            CHECK(m.bus.read32(0xD0000000 + 0x60) == 0 && m.bus.read32(0xD0000000 + 0x70) == 0);  // core 0's divider was never written
+            // The PPB window is banked: core 1's SysTick reload is not core 0's.
+            m.bus.write32(0xE000E014, 0x1234);  // SYST_RVR on core 0
+            m.bus.initiator = 1;
+            CHECK(m.bus.read32(0xE000E014) != 0x1234);
+            m.bus.write32(0xE000E014, 0x4321);
+            CHECK(m.bus.read32(0xE000E014) == 0x4321);
+            m.bus.initiator = 0;
+            CHECK(m.bus.read32(0xE000E014) == 0x1234);
+            // A system interrupt reaches both NVICs; a GPIO bank one reaches the core it is for.
+            CHECK((m.cpu1.pending_interrupts & (1u << 5)) == 0 && !m.core1_running());
+            CHECK(m.set_interrupt(5, true) && (m.cpu.pending_interrupts & (1u << 5)) && !(m.cpu1.pending_interrupts & (1u << 5)));  // (not delivered while core 1 is not running ...)
+            m.start_core1_interrupts();
+            CHECK(m.core1_running() && (m.cpu1.pending_interrupts & (1u << 5)));  // ... but it starts with the levels the lines have
+            CHECK(m.set_interrupt(5, false) && !(m.cpu.pending_interrupts & (1u << 5)) && !(m.cpu1.pending_interrupts & (1u << 5)));
+            CHECK(m.set_interrupt(5, true) && (m.cpu1.pending_interrupts & (1u << 5)));
+            CHECK(m.set_interrupt(5, false) && !(m.cpu1.pending_interrupts & (1u << 5)));
+            CHECK(m.set_interrupt(kIrqIoBank0, true) && (m.cpu.pending_interrupts & (1u << kIrqIoBank0)) && !(m.cpu1.pending_interrupts & (1u << kIrqIoBank0)));
+            CHECK(m.set_interrupt_core(1, kIrqIoBank0, true) && (m.cpu1.pending_interrupts & (1u << kIrqIoBank0)));
+            CHECK(m.set_interrupt(kIrqIoBank0, false) && m.set_interrupt_core(1, kIrqIoBank0, false));
+            // SEV on one core sets the other's event register (datasheet 2.3.3).
+            m.cpu1.event_registered = false;
+            static uint8_t sev_ram[16] = {0x40, 0xBF};  // sev
+            m.bus.mem.attach({0x30000000, 16, 16, 0xFFFFFFFF, sev_ram, kSubWord});
+            m.cpu.registers[15] = 0x30000000;
+            const int sev_cycles = m.cpu.execute();
+            CHECK(sev_cycles >= 0 && m.cpu1.event_registered);
+            m.cpu1.event_registered = false;
+        }
         m.bus.write32(0xE000ED0C, 0x05FA0004);  // AIRCR: VECTKEY | SYSRESETREQ
         CHECK(world.resets == 1);
 
@@ -570,12 +609,10 @@ int main() {
             (void)m.bus.read32(0x50110000 + 0x300);
             CHECK(world.warns == w + 1 && world.block == kMcuBlockUsb);
         }
-        {
-            UsbHost wire;
-            int marker = 0;
-            wire.ctx = &marker;  // (a host's context: neither the line nor the warning goes through it)
-            m.usb().set_wire(wire);
-        }
+        // the wire the host gave reaches the block: a controller enabled in device mode tells the host (and the line and the warning, which are the chip's, still work)
+        CHECK(world.usb_enabled == 0);
+        m.bus.write32(0x50110000 + 0x40, 1);  // MAIN_CTRL.CONTROLLER_EN
+        CHECK(world.usb_enabled == 1);
         CHECK((m.cpu.pending_interrupts & (1u << 5)) == 0);
         m.bus.write32(0x50110000 + 0x90, 1);  // INTE
         m.bus.write32(0x50110000 + 0x94, 1);  // INTF: forced
@@ -586,6 +623,18 @@ int main() {
             const int w = world.warns;
             (void)m.bus.read32(0x50110000 + 0x300);
             CHECK(world.warns == w + 1 && world.block == kMcuBlockUsb);  // still the chip's warning after the wire
+        }
+
+        // a host that gives no wire: nothing is connected, and nothing the firmware does calls a null pointer
+        {
+            static uint8_t bare_dpram[4096];
+            Mcu bare;
+            bare.set_usb_dpram(bare_dpram);
+            McuHost none;
+            bare.build(none);
+            bare.bus.write32(0x50110000 + 0x40, 1);   // MAIN_CTRL.CONTROLLER_EN, device mode: the host is not asked
+            bare.bus.write32(0x50110000 + 0x4C, 0x20);  // SIE_CTRL: some control bit
+            CHECK(bare.bus.read32(0x50110000 + 0x40) == 1);
         }
 
         // RESETS and PSM (group 8): built by the Mcu - their windows, the warnings under their ids, the registers the cascade will read (WDSEL).
@@ -627,15 +676,28 @@ int main() {
             m.bus.write32(0x4000C000 + 0x4, 1u << 24);  // USBCTRL alone
             CHECK(m.reset(true, true));
             CHECK(m.bus.read32(kUsbAddrEndp) == 0 && m.bus.read32(kUart0Ibrd) == 67 && m.bus.read32(kPwmCh0Top) == 7);
-            // PSM.WDSEL naming the RESETS controller itself resets every peripheral whatever RESETS.WDSEL says; the XIP domain is its own bit
+            // PSM.WDSEL naming the RESETS controller itself resets every peripheral whatever RESETS.WDSEL says - and, the power-on sequence being what it is (datasheet 2.13.4: a selected block takes every
+            // block after it with it; the bits are in sequence order), the XIP domain and the SIO behind it
             dirty();
             m.bus.write32(0x4000C000 + 0x4, 0);
             m.bus.write32(0x40010000 + 0x8, 0x8);
             CHECK(m.reset(true, true));
-            CHECK(m.bus.read32(kUart0Ibrd) == 0 && m.bus.read32(kPwmCh0Top) == 0xFFFF && m.bus.read32(kBusPriority) == 0 && m.bus.read32(0x14000000) == 1 && m.bus.read32(kUsbAddrEndp) == 0);
-            m.bus.write32(0x40010000 + 0x8, 0x1000);  // XIP
+            CHECK(m.bus.read32(kUart0Ibrd) == 0 && m.bus.read32(kPwmCh0Top) == 0xFFFF && m.bus.read32(kBusPriority) == 0 && m.bus.read32(0x14000000) == 3 && m.bus.read32(kUsbAddrEndp) == 0);
+            // the XIP domain (bit 12) takes the SIO and the blocks above, but not the peripherals before it
+            dirty();
+            m.bus.write32(0x40010000 + 0x8, 0x1000);
             CHECK(m.reset(true, true));
-            CHECK(m.bus.read32(0x14000000) == 3);
+            CHECK(m.bus.read32(0x14000000) == 3 && m.bus.read32(kUart0Ibrd) == 67 && m.bus.read32(kPwmCh0Top) == 7);
+            // the SIO alone (bit 14) resets only itself and what is above it: the peripherals and the XIP are left
+            dirty();
+            m.bus.write32(0x40010000 + 0x8, 0x4000);
+            CHECK(m.reset(true, true));
+            CHECK(m.bus.read32(0x14000000) == 1 && m.bus.read32(kUart0Ibrd) == 67 && m.bus.read32(kBusPriority) == 0x11);
+            // the CLOCKS (bit 2) take the RESETS controller - so every peripheral - and the XIP behind them
+            dirty();
+            m.bus.write32(0x40010000 + 0x8, 0x4);
+            CHECK(m.reset(true, true));
+            CHECK(m.bus.read32(kUart0Ibrd) == 0 && m.bus.read32(0x14000000) == 3 && m.bus.read32(kUsbAddrEndp) == 0);
             // any other reset covers everything, whatever the WDSEL registers hold
             dirty();
             m.bus.write32(0x40010000 + 0x8, 0);

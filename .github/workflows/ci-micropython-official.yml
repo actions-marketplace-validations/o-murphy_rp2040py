@@ -57,6 +57,18 @@ jobs:
             push: "import/*:"
             exclude: "import/import_file.py"
             strict: true
+          # extmod_hardware: the tests that want pins wired together (MicroPython's tests/target_wiring/rp2.py: GPIO0 to GPIO1; the board file has a Jumper). machine_pwm passes; the CAN, counter,
+          # encoder and SD card files skip themselves (not in the Pico build). Excluded: the UART IRQ tests (UART pins are not routed to the pads by the model) and the I2C target test (no slave mode).
+          - name: extmod_hardware (GPIO0 wired to GPIO1)
+            globs: "extmod_hardware/*.py"
+            push: "target_wiring/rp2.py:target_wiring.py"
+            board_spec: "tests/micropython_official/wired_board.py:BOARD"
+            exclude: "extmod_hardware/machine_uart_irq_break.py extmod_hardware/machine_uart_irq_rx.py extmod_hardware/machine_uart_irq_rxidle.py extmod_hardware/machine_i2c_target.py"
+            strict: true
+          # The second core (record 0104): MicroPython's threads run on core 1. Report only: 24 of 33 pass, 9 skip themselves, none fails or hangs (a core 1 whose entry function returns parks, record 0104). It can gate once it has stayed green for a few runs (stress_create.py hung once).
+          - name: thread/ (the second core)
+            globs: "thread/*.py"
+            core1: "1"
           - name: CPU - float, inline assembly
             globs: "float/*.py inlineasm/thumb/*.py"
           - name: CPU - basics a-l
@@ -88,6 +100,8 @@ jobs:
         env:
           STRICT: ${{ matrix.group.strict && '1' || '0' }}
           PUSH: ${{ matrix.group.push }}
+          BOARD_SPEC: ${{ matrix.group.board_spec }}  # a board file: the extmod_hardware group wants GPIO0 wired to GPIO1
+          CORE1: ${{ matrix.group.core1 }}  # "1": run the files that use `_thread` (skipped in the groups that gate the build)
           EXCLUDE: ${{ matrix.group.exclude }}
           PER_TEST_TIMEOUT: "90"  # a CI runner is slower than a workstation: the stochastic basics/class_setname_hazard_rand.py took longer than 45 s there
         run: |

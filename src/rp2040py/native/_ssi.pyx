@@ -14,7 +14,6 @@ command (all the block keeps) and the *count* as its length.
 """
 
 from libc.stdint cimport int64_t, uint8_t, uint32_t
-from libcpp cimport bool as cppbool
 
 from rp2040py.native._pending cimport raise_if_pending
 from rp2040py.native._window_map cimport WindowHandler
@@ -89,15 +88,6 @@ cdef class RPSSI:
         self._block = <SsiBlock*> <size_t> native_ssi()
         self.rp2040 = rp2040
         self.name = name
-
-    def _warn_kind(self, kind, offset, value):
-        """A register access the block does not implement, as the logger's message (the chip's host calls this for the block it built)."""
-        if kind == kSsiWarnRead:
-            self.warn(f"Unimplemented peripheral read from 0x{offset:x}")
-        elif kind == kSsiWarnReadAtomicArea:
-            self.warn("Unimplemented read from peripheral in the atomic operation region")
-        else:
-            self.warn(f"Unimplemented peripheral write to 0x{offset:x}: 0x{value:x}")
 
     def _detach(self):
         """Takes the block off the chip-select pin (the oracle's rig replaces an SSI after construction; a second one listening would apply every

@@ -93,6 +93,10 @@ class CortexM0Core:
 
         self.event_registered = False
         self.waiting = False
+        self.event_wait = False  # `waiting` because of a WFE (not a WFI): the other core's SEV wakes it
+        self.peer: CortexM0Core | None = (
+            None  # the other core, if there is one: `SEV` sets its event register too (datasheet 2.3.3)
+        )
 
         # APSR fields
         self.n = False
@@ -135,6 +139,10 @@ class CortexM0Core:
     def logger(self):
         return self.rp2040.logger
 
+    def reset_state(self) -> None:
+        """Back to the power-on state with no bus access (no vector fetch): what a core that is not running - core 1 until it is launched - is kept in."""
+        self._clear_state()
+
     def reset(self) -> None:
         """Full architectural reset: every field here goes back to the same value `__init__`
         gives it (registers[0:12]/lr included - real hardware leaves those unpredictable after
@@ -143,6 +151,11 @@ class CortexM0Core:
         setup (registers already at these defaults there, so this is a no-op) and for a live,
         mid-execution reset (RPWatchdog.on_watchdog_trigger, via a real machine.reset()/
         machine.bootloader()) - the latter is why this can no longer just touch sp/pc/cycles."""
+        self._clear_state()
+        self.sp = self.rp2040.read_uint32(self.vtor)
+        self.pc = self.rp2040.read_uint32(self.vtor + 4) & 0xFFFFFFFE
+
+    def _clear_state(self) -> None:
         for i in range(16):
             self.registers[i] = 0
         self.banked_sp = 0
@@ -150,6 +163,7 @@ class CortexM0Core:
 
         self.event_registered = False
         self.waiting = False
+        self.event_wait = False
 
         self.n = False
         self.c = False
@@ -180,9 +194,6 @@ class CortexM0Core:
         self.vtor = 0
         self.shpr2 = 0
         self.shpr3 = 0
-
-        self.sp = self.rp2040.read_uint32(self.vtor)
-        self.pc = self.rp2040.read_uint32(self.vtor + 4) & 0xFFFFFFFE
 
     @property
     def sp(self) -> int:
@@ -1207,6 +1218,15 @@ class CortexM0Core:
         # else sets `event_registered` outside exception entry/return. See
         # docs/records/0050-sev-event-register.md.
         self.event_registered = True
+        peer = self.peer
+        if (
+            peer is not None
+        ):  # the other core: asleep in a WFE it wakes (and the event is consumed); otherwise the flag is sticky and its next WFE does not sleep
+            if peer.waiting and peer.event_wait:
+                peer.waiting = False
+                peer.event_wait = False
+            else:
+                peer.event_registered = True
         self.logger.info(LOG_NAME, "SEV")
         return delta_cycles
 
@@ -1410,6 +1430,7 @@ class CortexM0Core:
             self.event_registered = False
         else:
             self.waiting = True
+            self.event_wait = True
         return delta_cycles
 
     def _op_wfi(self, opcode: int, opcode2: int, opcode_pc: int) -> int:
@@ -1417,6 +1438,7 @@ class CortexM0Core:
         delta_cycles = 1
         delta_cycles += 1
         self.waiting = True
+        self.event_wait = False
         return delta_cycles
 
     def _op_yield(self, opcode: int, opcode2: int, opcode_pc: int) -> int:

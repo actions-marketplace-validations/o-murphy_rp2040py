@@ -37,13 +37,8 @@ ALARM_3 = 1 << 3
 TIMER_INTERRUPTS = [IRQ.TIMER_0, IRQ.TIMER_1, IRQ.TIMER_2, IRQ.TIMER_3]
 
 ALARM_REGS = (ALARM0, ALARM1, ALARM2, ALARM3)
-SCRATCH_LIKE_MASK = 0xFFFFFFFF
 DBGPAUSE_MASK = 0x6  # DBG1 (bit 2) and DBG0 (bit 1); bit 0 is reserved
 DBGPAUSE_RESET = 0x6  # both reset to 1 (RP2040 datasheet, TIMER DBGPAUSE). No debugger is ever attached here, so they change nothing.
-
-
-def _to_uint32(value: float) -> int:
-    return int(value) & SCRATCH_LIKE_MASK
 
 
 class RPTimerAlarm:
@@ -64,14 +59,18 @@ class RPTimer(BasePeripheral):
         self._int_force = 0
         self._paused = False
         self._tick_hz = 0.0  # the watchdog's tick (RP2040 datasheet 4.6.4, 4.7.2): the count advances once per tick; 0 = the tick is not running, the count is frozen
-        self._frozen_micros = 0.0  # the count, frozen, while PAUSE is set or the tick is not running
         self._time_latch_low = 0  # TIMELW's latch: "writes do not get copied to time until timehw is written"
         self._dbgpause = DBGPAUSE_RESET
         # Simulated-time origin for this block's own count, so `reset()` can restart it from zero
         # the way real silicon does - `clock.nanos` is the *simulation's* time base and is never
         # reset (USB SOF, every other peripheral's alarms and the engine room all share it).
         self._epoch_ticks: int = 0  # in ticks of 1/16 ns, so that a difference with the clock stays exact however far into the run (docs/records/0100)
-        self._base_micros = 0.0  # the count at the epoch: the epoch is folded into it whenever the clock's origin moves, so neither grows without bound
+        # The count is an INTEGER (64 bits, wrapping): `_count` whole counts at the epoch, plus `_sub` ticks of the clock into the count after it (0 <= _sub < one period). The `n`th count after the
+        # last one comes `ceil(n * period)` ticks later, so on the nominal 1 MHz tick (16000 ticks a count) everything is exact integer arithmetic, and a count is reached at a tick, never a fraction
+        # of one before it. Frozen (PAUSE, or no tick): these two are the count and the epoch is not used. The epoch is folded into them whenever the clock's origin moves, so nothing grows
+        # without bound (docs/records/0105, finding 6: the count used to be a `double` of microseconds with a fractional base).
+        self._count = 0
+        self._sub = 0
         self.clock.add_rebase_listener(self._rebased)  # ... and follows the clock when its origin moves
         self.alarms = [
             RPTimerAlarm(ALARM_0, self.clock.create_alarm(lambda: self._fire_alarm(0))),
@@ -83,7 +82,7 @@ class RPTimer(BasePeripheral):
     def _rebased(self, delta: int) -> None:
         self._epoch_ticks -= delta  # (the epoch is always near the clock's time, so this cannot run away)
         if not self._frozen():
-            self._base_micros = self._micros()
+            self._count, self._sub = self._count_and_sub()
         self._epoch_ticks = self.clock.ticks
 
     def reset(self) -> None:
@@ -100,15 +99,14 @@ class RPTimer(BasePeripheral):
         fidelity gap rather than a detail.
         """
         self._epoch_ticks = self.clock.ticks
-        self._base_micros = 0.0
+        self._count = 0
+        self._sub = 0
         self._latched_time_high = 0
         self._int_raw = 0
         self._int_enable = 0
         self._int_force = 0
         self._paused = False
-        self._frozen_micros = (
-            0.0  # the tick is not part of the block's registers: it keeps running (or not) through a reset
-        )
+        # the tick is not part of the block's registers: it keeps running (or not) through a reset
         self._time_latch_low = 0
         self._dbgpause = DBGPAUSE_RESET
         for alarm in self.alarms:
@@ -131,37 +129,61 @@ class RPTimer(BasePeripheral):
         """The count does not advance: PAUSE is set, or the watchdog's tick is not running ("The Watchdog tick must be running for the timer to start counting", datasheet 4.6.4)."""
         return self._paused or self._tick_hz == 0.0
 
-    def _scale(self) -> float:
-        """Counts per microsecond of simulated time: the tick is nominally 1 MHz (one count per microsecond) and `tick_hz` is what clk_ref / CYCLES really gives."""
-        return self._tick_hz / 1e6
+    def _period(self) -> float:
+        """Ticks of the clock (1/16 ns) per count: 16000 at the nominal 1 MHz tick. Not a whole number for a tick that clk_ref / CYCLES does not divide evenly."""
+        return max(TICKS_PER_NANO * 1e9 / self._tick_hz, 1.0)
 
-    def _micros(self) -> float:
-        """This block's own count - one per tick, a microsecond each at the nominal tick - since its epoch, not the simulation's clock.
-        Every read *and* every alarm arming goes through here, so the two cannot disagree about
-        what "now" is (an alarm is armed as `target - now`, relative). Frozen while PAUSE is set or the tick is stopped."""
+    @staticmethod
+    def _ticks_of(counts: int, period: float) -> int:
+        """Ticks from a count to the `counts`th after it: `ceil(counts * period)`, exact when the period is a whole number."""
+        whole = int(period)
+        return counts * whole if whole == period else math.ceil(counts * period)
+
+    def _split(self, total: int) -> tuple[int, int]:
+        """`total` ticks after a count: (the counts that have passed, the ticks since the last of them)."""
+        period = self._period()
+        whole = int(period)
+        if whole == period:
+            return divmod(total, whole)
+        counts = int(total / period)
+        while self._ticks_of(counts + 1, period) <= total:
+            counts += 1
+        while counts > 0 and self._ticks_of(counts, period) > total:
+            counts -= 1
+        return counts, total - self._ticks_of(counts, period)
+
+    def _count_and_sub(self) -> tuple[int, int]:
+        """The count (64 bits, wrapping) and the ticks since it last changed. Frozen while PAUSE is set or the tick is stopped."""
         if self._frozen():
-            return self._frozen_micros
-        return self._base_micros + (self.clock.ticks - self._epoch_ticks) / (1000 * TICKS_PER_NANO) * self._scale()
+            return self._count, self._sub
+        counts, sub = self._split(self._sub + self.clock.ticks - self._epoch_ticks)
+        return (self._count + counts) & 0xFFFFFFFFFFFFFFFF, sub
 
-    def _nanos_for(self, counts: float) -> float:
-        """Simulated nanoseconds until the count has advanced by `counts` (at the current tick)."""
-        return counts * 1000.0 / self._scale()
+    def _arm_clock_alarm(self, alarm: "RPTimerAlarm") -> None:
+        """(Re)schedules `alarm`'s clock alarm for the moment the low 32 bits of the count reach its target, exactly: the tick at which that count begins (a target the count is already on fires at once)."""
+        total = self._sub + self.clock.ticks - self._epoch_ticks
+        passed, _sub = self._split(total)
+        counts = (alarm.target_micros - self._count - passed) & 0xFFFFFFFF
+        if counts == 0:
+            alarm.clock_alarm.schedule_ticks(0)
+            return
+        alarm.clock_alarm.schedule_ticks(self._ticks_of(passed + counts, self._period()) - total)
 
     def read_uint32(self, offset: int) -> int:
-        time = self._micros()
+        time = self._count_and_sub()[0]
 
         if offset == TIMEHR:
             return self._latched_time_high
 
         if offset == TIMELR:
-            self._latched_time_high = math.floor(time / 2**32) & 0xFFFFFFFF  # the 64-bit counter wraps
-            return _to_uint32(time)
+            self._latched_time_high = time >> 32  # the 64-bit counter wraps
+            return time & 0xFFFFFFFF
 
         if offset == TIMERAWH:
-            return math.floor(time / 2**32) & 0xFFFFFFFF
+            return time >> 32
 
         if offset == TIMERAWL:
-            return _to_uint32(time)
+            return time & 0xFFFFFFFF
 
         if offset == ALARM0:
             return self.alarms[0].target_micros
@@ -200,7 +222,6 @@ class RPTimer(BasePeripheral):
         if offset in ALARM_REGS:
             alarm_index = (offset - ALARM0) // 4
             alarm = self.alarms[alarm_index]
-            delta_micros = _to_uint32(value - self._micros())
             alarm.armed = True
             # ALARMn is a 32-bit register: keep what a read of it would return, not the raw Python int the caller passed
             # (a negative or wider one made the bus's 32-bit read-back raise OverflowError).
@@ -208,7 +229,7 @@ class RPTimer(BasePeripheral):
             if (
                 not self._frozen()
             ):  # the count is frozen: the alarm is armed and waits for PAUSE to be cleared / the tick to run
-                alarm.clock_alarm.schedule(self._nanos_for(delta_micros))
+                self._arm_clock_alarm(alarm)
 
         elif offset == ARMED:
             for alarm in self.alarms:
@@ -226,7 +247,7 @@ class RPTimer(BasePeripheral):
 
         elif offset == TIMEHW:
             # "always write timelw before timehw": the write of TIMEHW sets the whole 64-bit time (RP2040 datasheet, TIMER TIMEHW/TIMELW)
-            self._set_time(float(value & 0xFFFFFFFF) * 4294967296.0 + float(self._time_latch_low))
+            self._set_time(((value & 0xFFFFFFFF) << 32) | self._time_latch_low)
 
         elif offset == INTR:
             self._int_raw &= ~self.raw_write_value
@@ -254,31 +275,34 @@ class RPTimer(BasePeripheral):
             self._apply(self._paused, tick_hz)
 
     def _apply(self, paused: bool, tick_hz: float) -> None:
-        """Switch to a new PAUSE / tick state with the count continuous across it."""
+        """Switch to a new PAUSE / tick state with the count continuous across it (the ticks into the current count are kept in proportion when the period changes)."""
         was_frozen = self._frozen()
-        micros = self._micros()
+        count, sub = self._count_and_sub()
+        old_period = None if was_frozen else self._period()
         self._paused, self._tick_hz = paused, tick_hz
         if self._frozen():
-            self._frozen_micros = micros
+            self._count, self._sub = count, sub
             if not was_frozen:
                 for alarm in self.alarms:
                     alarm.clock_alarm.cancel()
         else:
-            self._base_micros, self._epoch_ticks = micros, self.clock.ticks
+            if old_period is not None:
+                sub = int(sub * self._period() / old_period)
+            self._count, self._sub, self._epoch_ticks = count, sub, self.clock.ticks
             self._reschedule_armed_alarms()
 
-    def _set_time(self, micros: float) -> None:
-        """The count is now `micros`; every armed alarm is re-timed against it (an alarm matches the counter, not a moment of simulated time)."""
+    def _set_time(self, count: int) -> None:
+        """The count is now `count`; every armed alarm is re-timed against it (an alarm matches the counter, not a moment of simulated time)."""
         if self._frozen():
-            self._frozen_micros = micros
+            self._count, self._sub = count, 0
             return
-        self._base_micros, self._epoch_ticks = micros, self.clock.ticks
+        self._count, self._sub, self._epoch_ticks = count, 0, self.clock.ticks
         self._reschedule_armed_alarms()
 
     def _reschedule_armed_alarms(self) -> None:
         for alarm in self.alarms:
             if alarm.armed:
-                alarm.clock_alarm.schedule(self._nanos_for(_to_uint32(alarm.target_micros - self._micros())))
+                self._arm_clock_alarm(alarm)
 
     def _fire_alarm(self, index: int) -> None:
         alarm = self.alarms[index]

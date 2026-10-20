@@ -9,17 +9,8 @@ from rp2040py.native._pin cimport PinBank
 from rp2040py.native._window_map cimport WindowHandler
 
 cdef extern from "io.hpp" namespace "rp2040core":
-    ctypedef void (*IoPadsWarnFn)(void* ctx, uint32_t kind, uint32_t offset, int64_t value)
-
-    cdef cppclass IoPadsHost:
-        IoPadsHost() noexcept
-        IoPadsWarnFn warn
-        void* ctx
-        const int* failed
-
     cdef cppclass IoBlock:
         IoBlock() noexcept
-        void init(PinBank* bank, cppbool qspi_layout, const IoPadsHost& host) noexcept
         int64_t raw_write_value() noexcept
         void reset() noexcept
         uint32_t extra(uint32_t dest, cppbool force, uint32_t pin) noexcept
@@ -30,8 +21,7 @@ cdef extern from "io.hpp" namespace "rp2040core":
 
 cdef class RPIO:
     cdef public bint _from_mcu  # this is the view of the `Mcu`'s block
-    cdef IoBlock* _block  # the chip's (`Mcu` builds it on its bank), or `_own` for a block made directly (a stand-in chip, a test)
-    cdef IoBlock _own
+    cdef IoBlock* _block  # the chip's own (core/mcu.hpp): this object is its Python view
     cdef public object rp2040
     cdef public object name
     cdef public list pins

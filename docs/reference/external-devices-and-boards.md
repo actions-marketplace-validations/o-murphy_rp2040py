@@ -53,7 +53,7 @@ separate question, covered by [record 0030](../records/0030-external-device-conc
 The whole contract is `attach(rp2040) -> None`: wire up whatever GPIO/SPI/peripheral surface your
 device needs, using the `rp2040` object handed to you. `external/led_mock.py`'s `LEDMock` is the
 minimal end of that spectrum - one GPIO pin, a state flag, a toggle counter - kept deliberately
-tiny as a validation vehicle for this exact mechanism. Its own `attach()`, trimmed of comments:
+tiny as a validation vehicle for this exact mechanism. (`external/jumper.py`'s `Jumper(a, b)` is the other small one: a wire between two pads - what one drives, the other reads - used by the `extmod_hardware` tests of MicroPython's suite; it carries SIO, PWM and PIO outputs, not yet a UART/SPI/I2C function, which the model does not route to pads: record 0106.) Its own `attach()`, trimmed of comments:
 
 ```python
 def attach(self, rp2040: "RP2040") -> None:

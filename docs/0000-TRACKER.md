@@ -56,9 +56,15 @@ and `reference/` for those). The structure itself is decided in
 
 ### In progress / Proposed
 
+- [ ] [0096] a C++ MCU core, statically linked through Cython, WASM host last | phases 0-4 and the gate G1-G8 done; next: Phase 5b (bottlenecks and fewer abstractions, both implementations), then Phase 6 beyond the PoC ([0103]), Phase 7; the second core is [0104]
+- [ ] [0106] routing the UART, SPI and I2C functions to the pads | proposed, nothing built - found by `extmod_hardware`; Wokwi routes by FUNCSEL over bit-level models; layer vs pin-bank sources is open
+- [ ] [0105] the time architecture: an audit of the clock, the tick generators and who counts what | audit done, TIMER/PIO fixes landed; `Timer32` and PIO-from-clock still proposed
+- [ ] [0104] the second core: seams, architecture, core 1 in the C++ core and the reference | P0-P2 done, core 1 on by default, `thread/` 24 of 33, dual-core CoreMark demo; open: per-core GPIO IRQs, GDB/wasm
+- [ ] [0103] a wasm backend: toolchain, packaging, backend selection and testing | headless module built and measured (0.4-0.6x of the Cython build); next: `RP2040PY_BACKEND` and a backend axis in the tests
+- [ ] [0102] a C ABI around the core, for wasm (and, later, cffi) | first slice built inside [0103]; the host callbacks (pins, UART input, I2C/SPI devices, ADC, USB) are not designed
+- [ ] [0101] the chip's reset values, read on a real board | proposed, waiting for a board - the 56 registers on which a fresh chip is meant to differ from the SVD, to be measured; nothing changes in the chip until then
 - [ ] [0099] a WASM drop-in for the original rp2040js | proposed, nothing designed - once Phase 6 of 0096 boots MicroPython on wasmtime/node, try a TypeScript wrapper with rp2040js's public API and run its own specs against the core
-- [ ] [0098] the ported blocks against the RP2040 datasheet | code shipped, record open - every block ported so far is read against the datasheet and fixed (TIMER, ADC, PWM, UART, SPI, I2C, SIO, DMA, SSI, CLOCKS/PLL, PIO, SYSINFO, TBMAN, BUSCTRL, SYSCFG, VREG_AND_CHIP_RESET, PSM, XOSC, RESETS, WATCHDOG, RTC); the remaining blocks are read as they are ported; open features (PIO FJOIN/OUT_STICKY, DMA sniffer, clock frequency counter) are listed in the record
-- [ ] [0096] a C++ MCU core, statically linked through Cython, WASM host last | phased plan (phases 0-7) - Phases 0-3 done the SSI and the DMA of Phase 4 (clock/alarms, TIMER, SIO, the bus, the CPU, the batch loop, the pins, the CYW43 gSPI shifter, the PIO, the SSI flash path and the DMA are C++; the CDC host no longer ping-pongs; the PPB stays a Python window by decision; synthetic loop 14 -> ~110 Minstr/s, CircuitPython boot 12.4 -> 1.1 s, Pico W scan 9.8 -> 1.7 s), the UART, the SPI, the I2C, the ADC and the PWM (with its `Timer32`) are C++ too (record 0096); a real-world pacing fix keeps simulated time from outrunning the wall clock while the NAT waits on a reply; **the C++ port was paused on 2026-10-05 while the engine-room thread was removed (`Simulator.pump()`, thread-free by default, see the record) and resumed the same day with the PWM**; order now: the rest of Phase 4 (the USB controller - the small blocks, the RTC the last of them, are done; the PWM's reference bugs and the clock tree - PLLs, clk_sys/clk_peri, listeners - are done, with rp2040js 1.4.0 copied in full; seven ADC and three I2C reference bugs fixed, DMA with the I2C is in the backlog) -> QSPI pads/shared pin banks with WASM; USB has no speed case but is still owed to C++ (Phase 4 exit, WASM), CYW43 is a board peripheral and leaves this record (a native CYW43 may follow separately); **state 2026-10-14: every block is C++ (USB, XIP_CTRL, CLOCKS/PLL last); decided that the C++ core becomes autonomous by owning the chip's orchestration - the reset cascade, the wiring, the chip-level interrupt lines - with `native/_rp2040.pyx` a thin shell and `_rp2040.py` kept as the pure-Python reference and fallback (own copy, chip-level oracle); step 0 (small closures) done 2026-10-14 (the DMA reads `clk_sys` from the tree, the pin banks exist in both builds and the chip asks the bank, the oscillators reach the tree directly; `multicore_launch_core1` failing loudly was tried and withdrawn - stock MicroPython touches the SIO FIFO at boot); step 1 (the plan: what moves into a C++ `Mcu`, the host interface, the step API, the threading contract, the chip-level oracle, and five findings F1-F5 - among them that the reset-cause bookkeeping lives in the device layer, not the chip) is written (record 0096, 2026-10-14); step 2a (`core/mcu.hpp`: the `Mcu` owns the CPU, the bus, the PIO blocks and the run flags, with `run()` returning why it stopped and what it covered) is done; step 2b (the interrupt lines go from the C++ blocks straight to `Mcu::set_interrupt`, a replaced `set_interrupt` still sees them) and 2c (the DREQs go straight to `Mcu::set_dreq`, a replaced `dma` still sees them) are done; next, in this order: the plan's step 3, revised 2026-10-14 (3a `Mcu` builds and wires each block itself - Cython stays a thin binding, one block per commit with a C++ test and no Cython; 3b the reset cascade in C++ with a chip-level oracle; 3c the address table and its proxy; 3d the shell audit), then the gate G1-G8 (an empty host boots stock MicroPython with no other Python callback, every reset trigger equal to the pure chip, `machine.freq()` headless, the shell holding no behaviour); the 0098 feature backlog and core 1 are not on the way to the gate**; CI green on Linux/macOS/Windows; Python API unchanged
+- [ ] [0098] the ported blocks against the RP2040 datasheet | code shipped, record open - every ported block read and fixed; open: PIO autopull timing, DMA sniffer/arbitration, RTC synchroniser, CLOCKS resus and gating, I2C and SPI slave modes, USB token wire (pads -> [0106])
 - [ ] [0094] a Zephyr guest boots here - MicroPython's `ports/zephyr` on `rpi_pico` | measured, nothing built - the RP2040 model needed no changes; its console is USB CDC, so the `micropython` subcommand sees silence
 - [ ] [0093] CircuitPython 8.0.2 never comes back after a chip reset | open, not root-caused - red on 8.x, green on 9.2.9/10.2.1; five hypotheses killed by measurement
 - [ ] [0092] a power button, and what a power cycle would have to destroy | documented, nothing built - the `HAD_POR` cause exists; a trigger and an SRAM/USB decision do not
@@ -69,15 +75,15 @@ and `reference/` for those). The structure itself is decided in
 - [ ] [0061] one firmware command with `--family` | deferred, documented - step 1 is nearly free since [0059]
 - [ ] [0064] read-only state server (WebSocket/Socket.IO) + web visualizer | deferred, documented - the watching half of [0060]; blocked on devices describing themselves ([0049])
 - [ ] [0060] external I/O bridges (web viewer, host GPIO) | deferred, documented - names the wall-clock ceiling a pin-level bridge cannot escape
-- [ ] [0053] second core (core1) + inter-core FIFO | proposed - core1 and the real FIFO unbuilt; the addendum settles the execution model
 - [ ] [0048] CYW43 step 4 NAT bridge (supersedes [0045]) | 4a-4e merged and live-verified; open only for its own gaps - backpressure, AP mode, multi-guest, IPv6
 
 ### Implemented
 
-- [x] [0098] CLOCKS and PLL: audit against datasheet 2.15 / 2.18, then the C++ port | the PLL's power bits / `LOCK`, `ENABLED0/1` and a stopped crystal giving 0 Hz fixed in the reference (`tests/test_clocks_xosc_pll.py`), `core/clocks.hpp` + `core/pll.hpp` + `core/clock_sinks.hpp` + `_clocks.pyx` / `_pll.pyx` held to a lockstep oracle (57 logic mutants) and mutation-tested C++ checks; the CPU's instruction time follows `clk_sys`, the crystal starting retunes the tree; resus, switch delays, clock gating documented not built (the row of 0098 below stays open for the rest of the blocks)
-- [x] [0098] USB: audit against datasheet 4.1 and TinyUSB, then the C++ port | the reference follows the datasheet (twelve findings, `tests/test_usb_datasheet.py`), `core/usb.hpp` + `_usb.pyx` held to a lockstep oracle (66 logic mutants) and to `tests/cpp/test_usb.cpp`; first mutation testing of a C++ block (`scripts/audit/cpp_mutants.py`); token-level wire, suspend/resume, device SOF documented not built (the row of 0098 below stays open for the rest of the blocks)
+- [x] [0098] CLOCKS and PLL: audit against datasheet 2.15 / 2.18, then the C++ port | reference fixed, `core/clocks.hpp` + `core/pll.hpp` held to a lockstep oracle; resus, switch delays, clock gating documented not built
+- [x] [0098] USB: audit against datasheet 4.1 and TinyUSB, then the C++ port | twelve findings fixed, `core/usb.hpp` held to a lockstep oracle; token-level wire, suspend/resume, device SOF documented not built
+- [x] [0053] second core (core1) + inter-core FIFO | built under [0104] (P0-P2, on by default); the no-OS-thread addendum stands
 - [x] [0100] an integer time base for the simulation clock | int64 ticks of 1/16 ns end to end; `rp2_dma` passes in the full official-suite sequence; the benchmark is within noise
-- [x] [0097] a Pyodide/WASM wheel for rp2040py | root-caused and fixed - a native clock/block reference cycle invisible to the GC exhausted the 32-bit/wasm address space one leaked chip at a time; `[tool.cibuildwheel.pyodide]`/`publish.yml`'s pyodide row now run the full test suite like every other platform
+- [x] [0097] a Pyodide/WASM wheel for rp2040py | fixed - a native clock/block reference cycle exhausted the 32-bit address space; the pyodide row runs the full suite
 - [x] [0095] `setup-rp2040py` action moved to the repo root, with branding | Marketplace-publishable; external consumers on the old `.github/actions/...` path need to update
 
 - [x] [0087] CircuitPython's CIRCUITPY is writable over the raw REPL we already have | closed 2026-08-20 - the demos push `code.py` over the REPL; the host-side FAT12 builder is gone
@@ -159,14 +165,11 @@ and `reference/` for those). The structure itself is decided in
 - [x] [0004] buffer overflow / race conditions | `#7`
 - [x] [0002] mklittlefs image handling | `#6`
 - [x] [0001] CLI tool + public device API | `#3,#5,#10`
-
-### Rejected / Superseded
-
-- [ ] [0086] a FAT12 library dependency + a `mkfat12` CLI subcommand | rejected 2026-08-20, and `demo/mkfat12.py` deleted with it - the firmware writes its own CIRCUITPY ([0087])
-- [ ] [0045] CYW43 step 4 NAT bridge via `gVisor`'s `pkg/tcpip` | **Superseded → [0048]** - kept for its research trail
-- [ ] [0016] basic-block fusion / mini-JIT | **Rejected** - net negative in every integration attempt
-- [ ] [0015] HLE memcpy hook | **Rejected** - net negative (measurements kept)
-- [ ] [0014] threading model | **Superseded → [0025]**
+- [x] [0086] a FAT12 library dependency + a `mkfat12` CLI subcommand | rejected 2026-08-20, and `demo/mkfat12.py` deleted with it - the firmware writes its own CIRCUITPY ([0087])
+- [x] [0045] CYW43 step 4 NAT bridge via `gVisor`'s `pkg/tcpip` | **Superseded → [0048]** - kept for its research trail
+- [x] [0016] basic-block fusion / mini-JIT | **Rejected** - net negative in every integration attempt
+- [x] [0015] HLE memcpy hook | **Rejected** - net negative (measurements kept)
+- [x] [0014] threading model | **Superseded → [0025]**
 
 ## Notes (no state row — linked from ideas)
 
@@ -285,5 +288,11 @@ record is added.
 [0095]: records/0095-github-action-at-repo-root.md
 [0096]: records/0096-cpp-mcu-core.md
 [0098]: records/0098-datasheet-conformance-audit.md
+[0104]: records/0104-second-core-seams-and-architecture.md
+[0106]: records/0106-peripheral-routing-to-pads.md
+[0105]: records/0105-time-architecture-audit.md
+[0103]: records/0103-wasm-backend.md
+[0102]: records/0102-c-abi-for-the-core.md
+[0101]: records/0101-reset-values-on-a-real-board.md
 [0100]: records/0100-integer-clock.md
 [0099]: records/0099-wasm-drop-in-for-rp2040js.md

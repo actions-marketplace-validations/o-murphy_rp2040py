@@ -63,7 +63,11 @@ static bool h_dreq(void* ctx, uint32_t channel, bool set) {
     h->add(kDreq, channel, set);
     return h->dreq_calls++ != h->fail_on_dreq_call;
 }
-static void h_log(void* ctx, uint32_t kind, uint32_t a, uint32_t b) { static_cast<Host*>(ctx)->add(kLog, kind * 0x10000u + (a & 0xFFFF), b); }
+static constexpr uint32_t kTestBlock = 42;  // the id the block reports its warnings under
+static void h_warn(void* ctx, uint32_t block, uint32_t kind, uint32_t a, int64_t b) {
+    CHECK(block == kTestBlock);
+    static_cast<Host*>(ctx)->add(kLog, kind * 0x10000u + (a & 0xFFFF), static_cast<uint32_t>(b));
+}
 static bool h_pin_update(void* ctx, uint32_t pin) {
     static_cast<Host*>(ctx)->add(kPinUpdate, pin, 0);
     return true;
@@ -79,17 +83,19 @@ static bool h_started(void* ctx) {
 
 struct Rig {
     Host host;
+    ChipPorts ports;
     PioBlock pio;
     explicit Rig(uint32_t index = 0) {
+        ports.irq = h_irq;
+        ports.dreq = h_dreq;
+        ports.warn = h_warn;
+        ports.chip = &host;
         PioHost h;
-        h.set_irq = h_irq;
-        h.dreq = h_dreq;
-        h.log = h_log;
         h.pin_update = h_pin_update;
         h.pin_input = h_pin_input;
         h.started = h_started;
         h.ctx = &host;
-        CHECK(pio.init(h, index == 0 ? 7 : 9, index));
+        CHECK(pio.init(&ports, kTestBlock, h, index == 0 ? 7 : 9, index));
         host.count = 0;
         host.dreq_calls = 0;
     }
@@ -135,10 +141,12 @@ static void test_fifo_is_the_python_ring() {
 static void test_construction_publishes_the_dreq_levels_rx_then_tx() {
     Host host;
     PioBlock pio;
+    ChipPorts ports;
+    ports.dreq = h_dreq;
+    ports.chip = &host;
     PioHost h;
-    h.dreq = h_dreq;
     h.ctx = &host;
-    CHECK(pio.init(h, 9, 1));
+    CHECK(pio.init(&ports, kTestBlock, h, 9, 1));
     CHECK(host.count == 8);
     for (uint32_t m = 0; m < 4; ++m) {
         CHECK(host.events[2 * m].kind == kDreq && host.events[2 * m].a == 12 + m && host.events[2 * m].b == 0);      // RX channel, no data: clear
@@ -373,7 +381,7 @@ static void test_wait_gpio_pin_and_irq_and_the_irq_instruction() {
     q.exec(op(IRQ_OP, (1 << 5) | 2), 0);  // IRQ set 2 and wait
     CHECK(q.pio.irq == (1u << 2) && q.sm().waiting && q.sm().wait_type == kPioWaitIrq);
     CHECK(q.pio.write32(IRQ, 0));
-    q.pio.raw_write_value = 1u << 2;  // the guest cleared flag 2
+    q.pio.set_raw_write_value(1u << 2);  // the guest cleared flag 2
     CHECK(q.pio.write32(IRQ, 0));
     CHECK(q.pio.irq == 0 && !q.sm().waiting);
     // WAIT IRQ with polarity 1 consumes the flag
@@ -614,12 +622,12 @@ static void test_reset_and_stop() {
     r.pio.instructions[3] = 7;
     r.pio.irq = 3;
     r.pio.pin_values = 0xFF;
-    r.pio.raw_write_value = 99;
+    r.pio.set_raw_write_value(99);
     r.pio.stopped = 0;
     r.host.count = 0;
     CHECK(r.pio.reset());
     CHECK(!r.sm().enabled && r.sm().x == 0 && r.sm().tx.empty() && r.pio.instructions[3] == 0 && r.pio.irq == 0 && r.pio.pin_values == 0 && r.pio.stopped);
-    CHECK(r.pio.raw_write_value == 99);  // not state
+    CHECK(r.pio.raw_write_value() == 99);  // not state
     CHECK(r.host.count_of(kDreq) == 8 && r.host.count_of(kIrq) == 2);  // every machine republishes its DREQs; both lines re-announced
     r.sm().enabled = true;
     r.pio.stopped = 0;

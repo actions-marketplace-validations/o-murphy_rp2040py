@@ -18,15 +18,16 @@ static int failures = 0;
     } while (0)
 
 struct Env {
-    uint32_t warn_kind[16] = {}, warn_offset[16] = {};
+    uint32_t warn_block[16] = {}, warn_kind[16] = {}, warn_offset[16] = {};
     int64_t warn_value[16] = {};
     int warns = 0;
     int failed = 0;
 };
 static Env env;
 
-static void on_warn(void*, uint32_t kind, uint32_t offset, int64_t value) {
+static void on_warn(void*, uint32_t block_id, uint32_t kind, uint32_t offset, int64_t value) {
     if (env.warns < 16) {
+        env.warn_block[env.warns] = block_id;
         env.warn_kind[env.warns] = kind;
         env.warn_offset[env.warns] = offset;
         env.warn_value[env.warns] = value;
@@ -35,13 +36,14 @@ static void on_warn(void*, uint32_t kind, uint32_t offset, int64_t value) {
 }
 
 static BusctrlBlock block;
+static ChipPorts ports;
+static constexpr uint32_t kTestBlock = 42;  // the id the block reports its warnings under
 
 static void fresh() {
     env = Env();
-    BusctrlHost host;
-    host.warn = on_warn;
-    host.failed = &env.failed;
-    block.init(host);
+    ports.warn = on_warn;
+    ports.failed = &env.failed;
+    block.init(&ports, kTestBlock);
     block.reset();
 }
 
@@ -98,11 +100,11 @@ static void test_a_new_block_is_in_its_reset_state() {
 static void test_unimplemented_offsets_warn() {
     fresh();
     CHECK(block.read(0x28) == 0xFFFFFFFFu);
-    CHECK(env.warns == 1 && env.warn_kind[0] == kBusctrlWarnRead && env.warn_offset[0] == 0x28);
+    CHECK(env.warns == 1 && env.warn_kind[0] == kRegWarnRead && env.warn_offset[0] == 0x28);
     CHECK(block.read(0x3000) == 0xFFFFFFFFu);
-    CHECK(env.warns == 3 && env.warn_kind[2] == kBusctrlWarnReadAtomicArea);
+    CHECK(env.warns == 3 && env.warn_kind[2] == kRegWarnReadAtomicArea);
     CHECK(block.write(0x2C, 9));
-    CHECK(env.warns == 4 && env.warn_kind[3] == kBusctrlWarnWrite && env.warn_offset[3] == 0x2C && env.warn_value[3] == 9);
+    CHECK(env.warns == 4 && env.warn_kind[3] == kRegWarnWrite && env.warn_offset[3] == 0x2C && env.warn_value[3] == 9);
     CHECK(block.read(0x02) == 0xFFFFFFFFu);  // not word aligned: no register
 }
 
@@ -120,7 +122,14 @@ static void test_the_window_handler() {
     CHECK(handler.read32(handler.ctx, BUS_PRIORITY) == 0x1111);
 }
 
+static void test_warnings_carry_the_blocks_id() {
+    fresh();
+    (void)block.read(0x7C);
+    CHECK(env.warns == 1 && env.warn_block[0] == kTestBlock);
+}
+
 int main() {
+    test_warnings_carry_the_blocks_id();
     test_reset_state();
     test_bus_priority_keeps_four_bits();
     test_ack_is_read_only();

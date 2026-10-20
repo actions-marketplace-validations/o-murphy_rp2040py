@@ -27,17 +27,14 @@
 
 namespace rp2040core {
 
-constexpr uint32_t kWatchdogWarnRead = kRegWarnRead, kWatchdogWarnReadAtomicArea = kRegWarnReadAtomicArea, kWatchdogWarnWrite = kRegWarnWrite;
 
 using WatchdogTriggerFn = bool (*)(void* ctx);  // the chip's reset; false: the failure is parked with the host
 using WatchdogTickFn = bool (*)(void* ctx, double tick_hz);  // the tick changed (0: stopped): the TIMER and SysTick follow it; false: the failure is parked with the host
 
 struct WatchdogHost {
-    RegWarnFn warn = nullptr;
     WatchdogTriggerFn trigger = nullptr;
     WatchdogTickFn tick_changed = nullptr;
     void* ctx = nullptr;
-    const int* failed = nullptr;  // the shared parked-failure flag (see _pending.pyx)
 };
 
 namespace watchdog_regs {
@@ -56,7 +53,7 @@ inline double tick_frequency(bool enable, uint32_t cycles, double clk_ref) noexc
 }
 }  // namespace watchdog_regs
 
-class WatchdogBlock {
+class WatchdogBlock : public RegisterBlock<WatchdogBlock> {
 public:
     WatchdogBlock() = default;
     WatchdogBlock(const WatchdogBlock&) = delete;  // the alarm and the clock hold pointers into this object
@@ -73,7 +70,8 @@ public:
     bool pause_dbg0 = true, pause_dbg1 = true, pause_jtag = true;
 
     // Binds the block to the chip's clock and the host, and runs the reference's constructor: the timer counts down at TICK_FREQUENCY, stopped, with an alarm at 0, disabled.
-    void init(Clock* clock, const WatchdogHost& host) noexcept {
+    void init(Clock* clock, const ChipPorts* ports, uint32_t block, const WatchdogHost& host) noexcept {
+        port_.init(ports, block);
         host_ = host;
         timer.init(clock, watchdog_regs::TICK_FREQUENCY);
         timer.set_mode(TimerMode::kDecrement);
@@ -86,8 +84,6 @@ public:
     // Unlinks the alarm from the clock; the owner calls it before the block goes away.
     void detach() noexcept { alarm.detach(); }
 
-    bool failed() const noexcept { return host_failed(host_.failed); }
-    int64_t raw_write_value() const noexcept { return raw_write_value_; }
 
     // clk_ref is now `hz` (called by the chip's clock tree): the tick follows it. False: the host's tick listener failed.
     bool clk_ref_changed(double hz) noexcept {
@@ -123,10 +119,7 @@ public:
         if (offset == REG_REASON) return reason;
         if (offset >= SCRATCH0 && offset <= SCRATCH7 && (offset & 3) == 0) return scratch[(offset - SCRATCH0) >> 2];
         if (offset == REG_TICK) return tick_cycles | (tick_hz != 0.0 ? TICK_RUNNING : 0u) | (tick_enable ? TICK_ENABLE : 0u);
-        if (host_.warn) {
-            host_.warn(host_.ctx, kWatchdogWarnRead, offset, 0);
-            if (offset > 0x1000) host_.warn(host_.ctx, kWatchdogWarnReadAtomicArea, offset, 0);
-        }
+        port_.unimplemented_read(offset);
         return 0xFFFFFFFFu;
     }
 
@@ -154,22 +147,14 @@ public:
             tick_enable = (v & TICK_ENABLE) != 0;
             tick_cycles = v & CYCLES_MASK;
             if (!retick()) return false;
-        } else if (host_.warn) {
-            host_.warn(host_.ctx, kWatchdogWarnWrite, offset, value);
+        } else {
+            port_.unimplemented_write(offset, value);
         }
         return true;
     }
 
     // `BasePeripheral.write_uint32_atomic`, step for step.
-    bool write_atomic(uint32_t offset, int64_t raw, uint32_t atomic_type) noexcept {
-        raw_write_value_ = raw;
-        int64_t value = raw;
-        if (atomic_type != kAtomicNormal) value = decode_atomic(atomic_type, static_cast<int64_t>(read(offset)), raw);
-        if (failed()) return false;
-        return write(offset, value);
-    }
 
-    WindowHandler window_handler() noexcept { return BlockWindow<WatchdogBlock>::handler(this); }
 
 private:
     static bool on_alarm(void* ctx) noexcept { return static_cast<WatchdogBlock*>(ctx)->fire_timeout(); }
@@ -190,7 +175,6 @@ private:
 
     WatchdogHost host_;
     double clk_ref_ = 0.0;  // clk_ref in Hz, pushed by the chip: the tick is derived from it
-    int64_t raw_write_value_ = 0;
 };
 
 }  // namespace rp2040core

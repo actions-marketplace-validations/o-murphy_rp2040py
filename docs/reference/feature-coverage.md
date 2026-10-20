@@ -12,8 +12,8 @@ One place to see, block by block and datasheet section by section, what is model
 
 | Block | Model | Read against the datasheet | C++ core | Main gaps |
 |---|---|---|---|---|
-| Cortex-M0+ CPU, NVIC, SysTick, PPB | Partial | n/a (ARMv6-M tests; MicroPython interpreter tests) | Ported | System control and MPU registers present (0098); `SCR` and the MPU are stored, not acted on; core 1 |
-| SIO | Partial | Yes | Ported | inter-core FIFO; CPUID of core 1 |
+| Cortex-M0+ CPU, NVIC, SysTick, PPB | Partial | n/a (ARMv6-M tests; MicroPython interpreter tests) | Ported | System control and MPU registers present (0098); `SCR` and the MPU are stored, not acted on; core 1 has its own NVIC, SysTick, VTOR and NMI mask in both builds (the Python view of core 1's PPB on the native chip and the GDB stub's core selection are not done: record 0104) |
+| SIO | Partial | Yes | Ported (the inter-core FIFOs, core 1's own divider and interpolators, `CPUID` of the initiating core and the boot ROM's launch handshake, in the reference and the C++ core alike - record 0104) | the real boot ROM on core 1 as an option |
 | TIMER | Partial | Yes | Ported | `DBGPAUSE` is stored (no debug halt) |
 | WATCHDOG | Partial | Yes | Ported | `PAUSE_DBG*`/`PAUSE_JTAG` are stored (no debug halt) |
 | RTC | Partial | Yes | Ported | clk_rtc synchroniser latency, dormant wake, GPIN reference |
@@ -30,10 +30,10 @@ One place to see, block by block and datasheet section by section, what is model
 | XOSC | Partial | Yes | Ported | DORMANT, the start-up delay and `COUNT` are stored; `STABLE` is set at once |
 | ROSC | Partial | Yes (read with the port) | Ported | the oscillator never stops (DORMANT and DISABLE are stored), STABLE is immediate, the drive strengths and the phase output do nothing |
 | PSM, RESETS, SYSINFO, TBMAN | Done | Yes | Ported | - |
-| SYSCFG | Stub | Yes | Ported | only `PROC0_NMI_MASK` acts |
+| SYSCFG | Stub | Yes | Ported | only `PROC0_NMI_MASK` and `PROC1_NMI_MASK` act (each core's own NMI mask) |
 | VREG_AND_CHIP_RESET | Partial | Yes | Ported | `VREG`, `BOD` are stored; `CHIP_RESET` acts |
 | BUSCTRL | Stub | Yes | Ported | no arbitration, no performance counters |
-| IO_BANK0 | Partial | Yes | C++ (`core/io.hpp`) over the shared pin bank; also IO_QSPI, PADS_BANK0, PADS_QSPI (`core/pads.hpp`) | `PROC1_*` / `DORMANT_WAKE_*` are stored and raise nothing (no core 1, no dormant); the pad electrical model (drive, slew, Schmitt, `VOLTAGE_SELECT`) is absent; PIO pin-write arbitration (`OUT_STICKY`...) is not done |
+| IO_BANK0 | Partial | Yes | C++ (`core/io.hpp`) over the shared pin bank; also IO_QSPI, PADS_BANK0, PADS_QSPI (`core/pads.hpp`) | `PROC1_*` / `DORMANT_WAKE_*` are stored and raise nothing (the per-core GPIO lines are not split: core 1 sees the lines as core 0 does; no dormant); the pad electrical model (drive, slew, Schmitt, `VOLTAGE_SELECT`) is absent; PIO pin-write arbitration (`OUT_STICKY`...) is not done |
 | PADS_BANK0 / PADS_QSPI / IO_QSPI | Partial | Yes | C++ (with IO_BANK0, above) | `VOLTAGE_SELECT` and `SWCLK` / `SWD` are stored; pad drive, slew and Schmitt have no electrical model |
 | GPIO: input synchronisers | Missing | Yes | - | two clk_sys cycles of latency (2.21), bypassed by `SYSCFG.PROC_IN_SYNC_BYPASS(_HI)` and the PIO's `INPUT_SYNC_BYPASS`, both stored; needs a go-ahead |
 | XIP_CTRL | Done | Yes | Ported | tag-only 2-way cache, aliases, counters, flush, cache-as-SRAM, streaming FIFO + `DREQ_XIP_STREAM`, `XIP_AUX`; the XIP window is read-only to the bus (0098); no bus fault is raised |
@@ -53,8 +53,8 @@ Follows the datasheet's own table of contents (chapter.section), so a row is som
 | 2.1.4 | Narrow IO register writes | Unchecked | | - |
 | 2.2 | Address map | Done | memory_map, the window table | - |
 | 2.3.1 | SIO: divider, interpolators, spinlocks, GPIO ops | Done | 0098 | - |
-| 2.3.1 | SIO: inter-core FIFO | Missing | needs core 1 (record 0053) | Needs core 1 |
-| 2.3.2 | Interrupts: every IRQ line | Partial | to core 0 only | Needs core 1 |
+| 2.3.1 | SIO: inter-core FIFO | Done | two 8-deep FIFOs, `FIFO_ST` VLD / RDY / ROE / WOF, the two IRQ lines (15, 16); the Python reference and the C++ core, held by `tests/test_core1_parity.py` (record 0104) | - |
+| 2.3.2 | Interrupts: every IRQ line | Partial | both cores' NVICs get every line (each core enables its own); only the two GPIO lines are meant to be per core and are not split yet (`IO_BANK0` `PROC1_*`) | The per-core GPIO lines (record 0104, next steps) |
 | 2.3.3 | Event signals (SEV / WFE) | Done | | - |
 | 2.3.4 | Debug | Partial | a GDB stub, not an SWD/DAP model | - |
 | 2.4.1-2.4.3 | Cortex-M0+ core and programmer's model | Done | MicroPython interpreter tests: 664 files, no failure | - |
@@ -78,7 +78,7 @@ Follows the datasheet's own table of contents (chapter.section), so a row is som
 | 2.6.3 | Flash and the XIP cache | Done | 0098; tags only (the data comes from the image); LRU, flush time and stream pace are model choices | - |
 | 2.7 | Boot sequence | Done | flash boot with boot2: MicroPython, CircuitPython, Kaluma, SDK examples in CI | - |
 | 2.8.1, 2.8.3 | Bootrom: processor-controlled boot, ROM contents | Done | flash routines go through the SSI | - |
-| 2.8.2 | Bootrom: launching code on core 1 | Missing | | Needs core 1 |
+| 2.8.2 | Bootrom: launching code on core 1 | Partial | the SIO answers the handshake instead of the ROM (both builds) (`0, 0, 1, vector table, sp, entry`, echoes, restart on a wrong word) and `PSM.FRCE_OFF` `PROC1` returns core 1 to it; an entry function that returns lands in the ROM's wait (LR is left at `kCore1RomReturn`, the core parks and is put back as after a reset; a relaunch with or without `multicore_reset_core1()` works); MicroPython's `_thread` runs (tests/test_gate_core1.py), CoreMark on both cores gives a valid result (`demo/coremark_dual_core.py`) | the ROM image on core 1 (exact) as an option |
 | 2.8.4, 2.8.5 | Bootrom: USB mass storage, PICOBOOT | Unchecked | | - |
 | 2.9, 2.10 | Power supplies, core regulator (analogue) | n/a | the `VREG` / `BOD` registers are stored (Stub) | - |
 | 2.11.1 | Top-level clock gates | Missing | | Go-ahead |
@@ -186,10 +186,12 @@ Introduction (1), electrical and mechanical (5): n/a.
 
 | Suite | What it checks | Where | State |
 |---|---|---|---|
-| MicroPython `tests/` against the emulated board (CI: *MicroPython official tests*, four parallel report-only groups; `tests/micropython_official/run_suite.sh`) | peripherals (`ports/rp2`, `extmod/machine_*`; gating) and the interpreter (`micropython/` gating; `float`, `basics`, `inlineasm/thumb` report-only) | 0098, "MicroPython's own test suite" and "The interpreter tests" | interpreter: 0 failures; peripherals: the DMA copy time and the UART timing tests (UART now passes), `machine_spi_rate` (not diagnosed; probably the missing transmitter time), and core 1 (`_thread` files are skipped) |
+| MicroPython `tests/` against the emulated board (CI: *MicroPython official tests*, ten parallel groups; `tests/micropython_official/run_suite.sh`) | peripherals (`ports/rp2`, `extmod/machine_*`; gating) and the interpreter (`micropython/` gating; `float`, `basics`, `inlineasm/thumb` report-only) | 0098, "MicroPython's own test suite" and "The interpreter tests" | interpreter: 0 failures; peripherals: the DMA copy time and the UART timing tests (UART now passes), `machine_spi_rate` (not diagnosed; probably the missing transmitter time), and core 1 (the `thread/` group below) |
 | MicroPython `tests/` (CI, gating) | `extmod` beyond `machine_*` (140 pass / 0 fail / 50 skip) | 0098 | Done; the 50 skips are modules the Pico build does not have |
 | MicroPython `tests/` (CI, gating) | `unicode`, `stress`, `misc`, `io` (data files pushed onto the board; 6 board-incompatible tests excluded), `import` (modules pushed; 1 excluded) | 0098 | Done; the exclusions are board-vs-unix differences, each explained in 0098 |
-| MicroPython `tests/` not run | `cmdline` (tests the unix binary's flags), `thread` (needs core 1), network and Bluetooth (no radio), benchmarks | - | Not meaningful on the emulated board, or needs core 1 |
+| MicroPython `tests/` (CI, gating) | `extmod_hardware` with GPIO0 wired to GPIO1 (`external/jumper.py`; 4 of 10 files excluded: UART IRQ x3, I2C target) | 0098 | `machine_pwm.py` passes; CAN, counter, encoder and SD card skip themselves; the UART IRQ tests need the UART function routed to the pads (not modelled: record 0106) |
+| MicroPython `tests/` (CI, report only) | `thread` on core 1 (`CORE1=1`: 24 pass / 0 fail / 9 skip themselves / 0 hang) | 0104 | Done; the 9 skips are the files' own (`mutate_*`, `stress_heap`, `thread_lock2/3`, `thread_shared2`) |
+| MicroPython `tests/` not run | `cmdline` (tests the unix binary's flags), `cpydiff` (documentation scripts), `multi_*` (several boards at once), network and Bluetooth (no radio), `internal_bench`/`perf_bench` | - | Not meaningful on the emulated board, or planned |
 | pico-sdk / pico-examples | firmware boots and prints (`hello_usb`), eight SDK versions | CI: *Test Pi Pico SDK* | passing |
 | CircuitPython, Kaluma | boot and run a script, several releases | CI | passing |
 

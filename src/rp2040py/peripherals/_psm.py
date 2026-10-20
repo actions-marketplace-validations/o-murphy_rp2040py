@@ -46,6 +46,7 @@ class RPPSM(BasePeripheral):
         self._frce_on = 0
         self._frce_off = 0
         self._wdsel = 0
+        self._proc1_was_held = False
 
     @property
     def wdsel(self) -> int:
@@ -69,11 +70,28 @@ class RPPSM(BasePeripheral):
     def write_uint32(self, offset: int, value: int) -> None:
         if offset == FRCE_ON:
             self._frce_on = value & PSM_BITS_MASK
+            self._proc1_changed()
         elif offset == FRCE_OFF:
             self._frce_off = value & PSM_BITS_MASK
+            self._proc1_changed()
         elif offset == WDSEL:
             self._wdsel = value & PSM_BITS_MASK
         elif offset == DONE:
             return  # read-only (table 200): the write has no effect
         else:
             super().write_uint32(offset, value)
+
+    def _proc1_changed(self) -> None:
+        """PROC1 (bit 16) forced off holds core 1 in reset (`multicore_reset_core1()` sets it and clears it again; FRCE_ON overrides FRCE_OFF): the chip is told each time the held state changes."""
+        held = bool(self._frce_off & ~self._frce_on & WDSEL_PROC1)
+        if held != self._proc1_was_held:
+            self._proc1_was_held = held
+            hold = getattr(
+                self.rp2040, "hold_core1", None
+            )  # (a stand-in chip, or the native chip under an oracle, has no second core to hold: its C++ PSM does it)
+            if hold is None:
+                return
+            if held:
+                hold()
+            else:
+                self.rp2040.sio.core1_boot_done()  # out of reset: the boot ROM drains its FIFO and tells core 0 with a 0

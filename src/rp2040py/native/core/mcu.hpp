@@ -24,6 +24,7 @@
 #include "batch.hpp"
 #include "bus.hpp"
 #include "clock.hpp"
+#include "batch_dual.hpp"
 #include "cpu.hpp"
 #include "dma.hpp"
 #include "i2c.hpp"
@@ -98,6 +99,9 @@ struct McuHost {
     // The flash path. An SSI the host has replaced is asked for its BAUDR (`ssi_baudr`) by the XIP stream's pace; with a clock tree the host has put over the chip's, `clk_sys` is the host's. Both optional.
     bool (*ssi_baudr)(void* ctx, double* value) = nullptr;
     bool (*clk_sys)(void* ctx, double* hz) = nullptr;
+    // The host's end of the USB wire (the device at the other end of the link: its setup / IN / OUT handling, the endpoint transfers and the notifications of `core/usb.hpp`'s `UsbHost`). Optional: with
+    // none, the controller has nothing connected. Read once, by `build()`; the line, the warning and the failure flag of that struct are the chip's, not the host's.
+    const UsbHost* usb_wire = nullptr;
     // The reset cascade (`Mcu::reset`). A block the host has replaced (named in the `world` mask the host passes) is the host's to reset: `reset_block(block)`. `usb_reset` comes before the USB block's own
     // reset (the host drops the device and the transfers it queued), `bus_reset` is the USB link seeing the chip reset (the device's `on_reset`), `record_cause` is a host's own VREG_AND_CHIP_RESET block
     // being told the cause flag. All optional.
@@ -115,10 +119,10 @@ struct McuHost {
 constexpr uint32_t kRtcBase = 0x4005C000;    // RTC_BASE
 constexpr uint32_t kPwmBase = 0x40050000, kIrqPwm = 4, kDreqPwm0 = 24;  // PWM_BASE, PWM_IRQ_WRAP, DREQ_PWM_WRAP0
 constexpr uint32_t kUsbBase = 0x50110000, kIrqUsb = 5;  // USBCTRL_REGS_BASE, USBCTRL_IRQ
-constexpr uint32_t kXipCtrlBase = 0x14000000, kSsiBase = 0x18000000, kXipAuxBase = 0x50400000, kIrqXip = 6, kDreqXipStream = 37, kDreqXipSsiTx = 38, kDreqXipSsiRx = 39;  // XIP_CTRL_BASE, XIP_SSI_BASE, XIP_AUX_BASE, XIP_IRQ, DREQ_XIP_STREAM / _SSITX / _SSIRX
+constexpr uint32_t kXipCtrlBase = 0x14000000, kSsiBase = 0x18000000, kXipAuxBase = 0x50400000, kIrqXip = 6, kDreqXipStream = 37, kDreqXipSsiTx = 38;  // XIP_CTRL_BASE, XIP_SSI_BASE, XIP_AUX_BASE, XIP_IRQ, DREQ_XIP_STREAM / _SSITX (DREQ_XIP_SSIRX, 39, follows it)
 constexpr uint32_t kPio0Base = 0x50200000, kPio1Base = 0x50300000, kIrqPio0 = 7, kIrqPio1 = 9;  // PIO0_BASE, PIO1_BASE, PIO0_IRQ_0, PIO1_IRQ_0
 constexpr uint32_t kIoBank0Base = 0x40014000, kIoQspiBase = 0x40018000, kPadsBank0Base = 0x4001C000, kPadsQspiBase = 0x40020000;
-constexpr uint32_t kIrqIoBank0 = 13;  // IO_IRQ_BANK0
+constexpr uint32_t kIrqIoBank0 = 13, kIrqIoQspi = 14;  // IO_IRQ_BANK0, IO_IRQ_QSPI
 constexpr uint32_t kWatchdogBase = 0x40058000, kDmaBase = 0x50000000;
 constexpr uint32_t kIrqDma[2] = {11, 12};
 constexpr uint32_t kMaxHardwareIrq = 25;  // the highest NVIC line the chip wires (RTC_IRQ)
@@ -145,6 +149,18 @@ struct McuInstance {  // the context of one UART / SPI / I2C: the chip and which
     uint32_t index = 0;
 };
 
+// The chip's memory: the host's buffers (see `Mcu::set_memory()`).
+struct McuMemory {
+    uint8_t* rom = nullptr;
+    uint32_t rom_size = 16 * 1024;
+    uint8_t* flash = nullptr;
+    uint32_t flash_size = 16 * 1024 * 1024;
+    uint8_t* sram = nullptr;
+    uint32_t sram_size = 264 * 1024;
+    uint8_t* dpram = nullptr;
+    uint32_t dpram_size = 4 * 1024;
+};
+
 class Mcu {
 public:
     static constexpr int kPioBlocks = 2;
@@ -165,6 +181,7 @@ public:
         clocks_.detach();
         watchdog_.detach();
         ppb_.detach();
+        ppb1_.detach();
         own_dma_.detach();
         rosc_.detach();
         timer_.detach();
@@ -183,36 +200,44 @@ public:
     // after `use_clock()` (the RTC's second is an alarm of that clock) and with the host that answers for what the chip cannot. The blocks come over one at a time (record 0096, 3a): the RTC first.
     void build(const McuHost& host) noexcept {
         host_world_ = host;
+        ports_.warn = ports_warn;
+        ports_.irq = ports_irq;
+        ports_.dreq = ports_dreq;
+        ports_.chip = this;
+        ports_.failed = host.failed;
+        if (!cpu.initialised()) {  // the core on the bus; a shell that wants the core's break / BL / log notices has initialised it with its own host already
+            CpuHost cpu_host;
+            cpu_host.failed = host.failed;
+            cpu.init(&bus, cpu_host, kMaxHardwareIrq);
+        }
+        if (!cpu1.initialised()) {  // core 1: present from the start, never run until it is launched (record 0104, P0); it shares the bus and the opcode table
+            CpuHost cpu_host;
+            cpu_host.failed = host.failed;
+            cpu1.init(&bus, cpu_host, kMaxHardwareIrq);
+            cpu1.reset_state();
+        }
+        cpu.peer = &cpu1;
+        cpu1.peer = &cpu;
         // The clock tree (CLOCKS, both PLLs, the crystal and the ring oscillator): built before the blocks that run from it. The PLLs take the crystal from the tree, the oscillators and the PLL
         // registers tell the tree when they change, and the tree reads both oscillators off their blocks. The crystal's frequency is the board's: `set_crystal_hz()`.
         PllHost ps;
-        ps.warn = block_warn<kMcuBlockPllSys>;
         ps.changed = tree_changed;
         ps.ctx = this;
-        ps.failed = host.failed;
-        pll_[0].init(ps);
-        PllHost pu = ps;
-        pu.warn = block_warn<kMcuBlockPllUsb>;
-        pll_[1].init(pu);
+        pll_[0].init(&ports_, kMcuBlockPllSys, ps);
+        pll_[1].init(&ports_, kMcuBlockPllUsb, ps);
         XoscHost xo;
-        xo.warn = block_warn<kMcuBlockXosc>;
         xo.stable_changed = tree_changed;
         xo.ctx = this;
-        xo.failed = host.failed;
-        xosc_.init(xo);
+        xosc_.init(&ports_, kMcuBlockXosc, xo);
         RoscHost ro;
-        ro.warn = block_warn<kMcuBlockRosc>;
         ro.frequency_changed = rosc_changed;  // (no random source: the block has its own)
         ro.ctx = this;
-        ro.failed = host.failed;
-        rosc_.init(clock_, ro);
+        rosc_.init(clock_, &ports_, kMcuBlockRosc, ro);
         ClocksHost ch;
-        ch.warn = block_warn<kMcuBlockClocks>;
         ch.xosc_hz = tree_xosc_hz;  // (read only while a host's own oscillator block stands in for the chip's)
         ch.rosc_hz = tree_rosc_hz;
         ch.ctx = this;
-        ch.failed = host.failed;
-        clocks_.init(clock_, ch, &pll_[0], &pll_[1]);
+        clocks_.init(clock_, &ports_, kMcuBlockClocks, ch, &pll_[0], &pll_[1]);
         for (int i = 0; i < 2; ++i) pll_[i].bind_reference(clocks_xosc_hz, &clocks_);
         clocks_.bind_xosc(&xosc_);
         clocks_.bind_rosc(&rosc_);
@@ -236,17 +261,10 @@ public:
             for (uint32_t k = 0; k < PinBank::kMaxPins; ++k) always[k] = b == 1;
             (void)(b == 0 ? gpio_bank_ : qspi_bank_).init(b == 0 ? 30 : 6, ph, always, 0);
         }
-        IoPadsHost io;
-        io.warn = block_warn<kMcuBlockIoBank0>;
-        io.ctx = this;
-        io.failed = host.failed;
-        io_bank0_.init(&gpio_bank_, false, io);
-        io.warn = block_warn<kMcuBlockIoQspi>;
-        io_qspi_.init(&qspi_bank_, true, io);
-        io.warn = block_warn<kMcuBlockPadsBank0>;
-        pads_bank0_.init(&gpio_bank_, false, io);
-        io.warn = block_warn<kMcuBlockPadsQspi>;
-        pads_qspi_.init(&qspi_bank_, true, io);
+        io_bank0_.init(&gpio_bank_, false, &ports_, kMcuBlockIoBank0);
+        io_qspi_.init(&qspi_bank_, true, &ports_, kMcuBlockIoQspi);
+        pads_bank0_.init(&gpio_bank_, false, &ports_, kMcuBlockPadsBank0);
+        pads_qspi_.init(&qspi_bank_, true, &ports_, kMcuBlockPadsQspi);
         bus.windows.attach(kIoBank0Base, io_bank0_.window_handler());
         bus.windows.attach(kIoQspiBase, io_qspi_.window_handler());
         bus.windows.attach(kPadsBank0Base, pads_bank0_.window_handler());
@@ -259,9 +277,11 @@ public:
         sh.qspi_in = sio_qspi_in;
         sh.update_pins = sio_update_pins;
         sh.add_cycles = sio_add_cycles;
-        sh.warn = block_warn<kMcuBlockSio>;
+        sh.launch_core1 = sio_launch_core1;
+        sh.send_event = sio_send_event;
         sh.ctx = this;
-        sio_.init(sh);
+        sio_.init(&ports_, kMcuBlockSio, sh);
+        sio_.bind_initiator(&bus.initiator);  // the divider, interpolators and CPUID are per core: the bus says which
         bus.set_sio(sio_.window_handler());
         for (uint32_t b = 0; b < 2; ++b) {
             PinBank& bank = pins(b);
@@ -278,14 +298,10 @@ public:
         // The PWM: its line, its requests and its pins are the chip's own; the pins read its direction and value words by address. Its pin reads and changes go to the GPIO bank (or the host's, for a bank
         // the host holds).
         PwmHost pw;
-        pw.irq = pwm_irq;
-        pw.dreq = pwm_dreq;
         pw.pin_changed = pwm_pin_changed;
         pw.pin_read = pwm_pin_read;
-        pw.warn = block_warn<kMcuBlockPwm>;
         pw.ctx = this;
-        pw.failed = host.failed;
-        pwm_.init(clock_, pw, clocks_.clk_sys());
+        pwm_.init(clock_, &ports_, kMcuBlockPwm, kIrqPwm, kDreqPwm0, pw, clocks_.clk_sys());
         bus.windows.attach(kPwmBase, pwm_.window_handler());
         for (uint32_t b = 0; b < 2; ++b) {
             pins(b).bind_source(kSrcPwmDirection, &pwm_.gpio_direction);
@@ -294,29 +310,23 @@ public:
 
         // The core's own peripherals and the DMA: PPB (SysTick, NVIC, SCB on the CPU), the watchdog (it tells the TIMER and SysTick their tick) and the DMA (on the bus, reading clk_sys from the tree).
         PpbHost pp;
-        pp.warn = block_warn<kMcuBlockPpb>;
         pp.system_reset_request = ppb_reset_request;
         pp.ctx = this;
-        ppb_.init(&cpu, clock_, pp, clocks_.clk_sys(), kMaxHardwareIrq);
+        ppb_.init(&cpu, clock_, &ports_, kMcuBlockPpb, pp, clocks_.clk_sys(), kMaxHardwareIrq);
         bus.set_ppb(ppb_.window_handler());
+        ppb1_.init(&cpu1, clock_, &ports_, kMcuBlockPpb, pp, clocks_.clk_sys(), kMaxHardwareIrq);  // core 1's own SysTick / SCR / MPU / NVIC window, reached when the bus's initiator is 1
+        bus.set_ppb_core(1, ppb1_.window_handler());
 
         WatchdogHost wd;
-        wd.warn = block_warn<kMcuBlockWatchdog>;
         wd.trigger = watchdog_trigger;
         wd.tick_changed = watchdog_tick;
         wd.ctx = this;
-        wd.failed = host.failed;
-        watchdog_.init(clock_, wd);
+        watchdog_.init(clock_, &ports_, kMcuBlockWatchdog, wd);
         bus.windows.attach(kWatchdogBase, watchdog_.window_handler());
 
         DmaHost dm;
-        dm.irq = timer_irq;  // (the DMA passes the absolute NVIC line, like the TIMER)
-        dm.warn = block_warn<kMcuBlockDma>;
         dm.ctx = this;
-        dm.failed = host.failed;
-        dm.lines[0] = kIrqDma[0];
-        dm.lines[1] = kIrqDma[1];
-        own_dma_.init(&bus, clock_, dm);
+        own_dma_.init(&bus, clock_, &ports_, kMcuBlockDma, kIrqDma[0], dm);  // (DMA_IRQ_1 is the next line)
         own_dma_.bind_clock(clocks_clk_sys, &clocks_, clocks_.clk_sys());
         bus.windows.attach(kDmaBase, own_dma_.window_handler());
         attach_dma(&own_dma_);
@@ -327,16 +337,11 @@ public:
             pio_ctx_[i].mcu = this;
             pio_ctx_[i].index = i;
             PioHost ph;
-            ph.set_irq = pio_irq;
-            ph.set_irq_ctx = this;
-            ph.dreq = pio_dreq;
-            ph.dreq_ctx = this;
-            ph.log = pio_log;
             ph.pin_update = pio_pin_update;
             ph.pin_input = pio_pin_input;
             ph.started = pio_started;
             ph.ctx = &pio_ctx_[i];
-            (void)pio_[i].init(ph, i == 0 ? kIrqPio0 : kIrqPio1, i);
+            (void)pio_[i].init(&ports_, i == 0 ? kMcuBlockPio0 : kMcuBlockPio1, ph, i == 0 ? kIrqPio0 : kIrqPio1, i);
             bus.windows.attach(i == 0 ? kPio0Base : kPio1Base, pio_[i].window_handler());
         }
         bind_pio_pins();
@@ -344,25 +349,15 @@ public:
         // The flash path: the SSI (the bootrom's flash commands, its chip select the QSPI_SS pin) and XIP_CTRL (the cache, the flash window and the stream) work on the chip's flash buffer
         // (`set_flash`). The XIP stream's pace derives from `clk_sys` (the tree) and SSI.BAUDR.
         if (flash_ != nullptr) {  // (an embedder with no flash image has neither block)
-            SsiHost sd;
-            sd.warn = block_warn<kMcuBlockSsi>;
-            sd.irq = ssi_irq;
-            sd.irq_ctx = this;
-            sd.dreq = ssi_dreq;
-            sd.dreq_ctx = this;
-            sd.ctx = this;
-            ssi_.init(flash_, flash_size_, sd);
+            SsiHost sd;  // (no Python chip-select here)
+            ssi_.init(flash_, flash_size_, &ports_, kMcuBlockSsi, kIrqXip, kDreqXipSsiTx, sd);  // (the chip-select is a pin of the bank: `bind_ssi_cs`, no host edge)
             bus.windows.attach(kSsiBase, ssi_.window_handler());
             bind_ssi_cs();
             XipHost xh;
-            xh.warn = block_warn<kMcuBlockXip>;
-            xh.dreq = xip_dreq;
-            xh.dreq_ctx = this;
             xh.clk_sys = xip_clk_sys;
             xh.baudr = xip_baudr;
             xh.ctx = this;
-            xh.failed = host.failed;
-            xip_.init(clock_, flash_, flash_size_, xh);
+            xip_.init(clock_, flash_, flash_size_, &ports_, kMcuBlockXip, kDreqXipStream, xh);
             bus.windows.attach(kXipCtrlBase, xip_.window_handler());
             bus.windows.attach(kXipAuxBase, xip_.aux_window_handler());
             bus.mem.set_xip(xip_.hooks());
@@ -372,131 +367,79 @@ public:
         // The USB controller: its line is the chip's own; the other end of the wire (the host's device, endpoints and callbacks) is the host's, given to the block by `usb().set_wire()`. The DPRAM is the
         // bus's memory region, handed over by `set_usb_dpram`.
         if (usb_dpram_ != nullptr) {
-            UsbHost uh;
-            uh.irq = usb_irq;
-            uh.irq_ctx = this;
-            uh.warn = block_warn<kMcuBlockUsb>;
-            uh.warn_ctx = this;
-            uh.failed = host.failed;
-            usb_.init(clock_, usb_dpram_, uh);
+            usb_.init(clock_, usb_dpram_, &ports_, kMcuBlockUsb, kIrqUsb, host.usb_wire != nullptr ? *host.usb_wire : UsbHost());
             bus.windows.attach(kUsbBase, usb_.window_handler());
         }
 
-        RtcHost h;
-        h.warn = block_warn<kMcuBlockRtc>;
-        h.irq = rtc_irq;
-        h.ctx = this;
-        h.failed = host.failed;
-        rtc_.init(clock_, h);
+        rtc_.init(clock_, &ports_, kMcuBlockRtc, kIrqRtc);
         bus.windows.attach(kRtcBase, rtc_.window_handler());
 
-        TbmanHost t;
-        t.warn = block_warn<kMcuBlockTbman>;
-        t.ctx = this;
-        t.failed = host.failed;
-        tbman_.init(t);
+        // The blocks that only report (group 1 of the clean-up): the chip's one `ChipPorts` and their own id, no per-block host.
+        tbman_.init(&ports_, kMcuBlockTbman);
         bus.windows.attach(kTbmanBase, tbman_.window_handler());
 
-        BusctrlHost b;
-        b.warn = block_warn<kMcuBlockBusctrl>;
-        b.ctx = this;
-        b.failed = host.failed;
-        busctrl_.init(b);
+        busctrl_.init(&ports_, kMcuBlockBusctrl);
         bus.windows.attach(kBusctrlBase, busctrl_.window_handler());
 
-        ResetsHost rh;
-        rh.warn = block_warn<kMcuBlockResets>;
-        rh.ctx = this;
-        rh.failed = host.failed;
-        resets_.init(rh);
+        resets_.init(&ports_, kMcuBlockResets);
         bus.windows.attach(kResetsBase, resets_.window_handler());
 
-        PsmHost pm;
-        pm.warn = block_warn<kMcuBlockPsm>;
-        pm.ctx = this;
-        pm.failed = host.failed;
-        psm_.init(pm);
+        psm_.init(&ports_, kMcuBlockPsm);
+        psm_.bind_proc1(psm_proc1, this);
         bus.windows.attach(kPsmBase, psm_.window_handler());
 
-        VregHost v;
-        v.warn = block_warn<kMcuBlockVreg>;
-        v.ctx = this;
-        v.failed = host.failed;
-        vreg_.init(v);
+        vreg_.init(&ports_, kMcuBlockVreg);
         bus.windows.attach(kVregBase, vreg_.window_handler());
 
         SysInfoHost i;
         i.rom_version = sysinfo_rom_version;  // read off the chip's own bus: the bootrom the chip holds
-        i.warn = block_warn<kMcuBlockSysinfo>;
         i.ctx = this;
-        i.failed = host.failed;
-        sysinfo_.init(i);
+        sysinfo_.init(&ports_, kMcuBlockSysinfo, i);
         bus.windows.attach(kSysinfoBase, sysinfo_.window_handler());
 
-        SyscfgHost c;
-        c.warn = block_warn<kMcuBlockSyscfg>;
-        c.ctx = this;
-        c.failed = host.failed;
-        syscfg_.init(&cpu, c);  // (PROC0_NMI_MASK is the chip's own CPU)
+        syscfg_.init(&cpu, &ports_, kMcuBlockSyscfg);  // (PROC0_NMI_MASK is the chip's own CPU)
+        syscfg_.bind_core1(&cpu1);
         bus.windows.attach(kSyscfgBase, syscfg_.window_handler());
 
         // The blocks with lines, requests and devices (group 2). Each instance's callbacks get its own `McuInstance` as their context.
-        TimerHost tm;
-        tm.irq = timer_irq;
-        tm.warn = block_warn<kMcuBlockTimer>;
-        tm.ctx = this;
-        timer_.init(clock_, tm);
+        timer_.init(clock_, &ports_, kMcuBlockTimer, 0);  // (TIMER_0..3 are NVIC lines 0..3)
         bus.windows.attach(kTimerBase, timer_.window_handler());
 
         AdcHost ad;
-        ad.irq = adc_irq;
-        ad.dreq = adc_dreq;
         ad.read = adc_read;
         ad.channel_value = adc_channel_value;
-        ad.warn = block_warn<kMcuBlockAdc>;
         ad.ctx = this;
-        ad.failed = host.failed;
-        adc_.init(clock_, ad);
+        adc_.init(clock_, &ports_, kMcuBlockAdc, kIrqAdc, kDreqAdc, ad);
         bus.windows.attach(kAdcBase, adc_.window_handler());
 
         for (uint32_t i = 0; i < 2; ++i) {
             instance_[i] = {this, i};
             UartHost u;
-            u.irq = uart_irq;
-            u.dreq = uart_dreq;
             u.on_byte = uart_byte;
             u.baud_changed = uart_baud;
             u.bit_ns = uart_bit_ns;
-            u.warn = i == 0 ? instance_warn<kMcuBlockUart0> : instance_warn<kMcuBlockUart1>;
             u.ctx = &instance_[i];
-            u.failed = host.failed;
-            uart_[i].init(clock_, u);
+            uart_[i].init(clock_, &ports_, i == 0 ? kMcuBlockUart0 : kMcuBlockUart1, kIrqUart[i], kDreqUartTx[i], u);
             bus.windows.attach(kUartBase[i], uart_[i].window_handler());
 
             SpiHost sp;
-            sp.irq = spi_irq;
-            sp.dreq = spi_dreq;
             sp.transmit = spi_transmit;
             sp.bit_ns = spi_bit_ns;
-            sp.warn = i == 0 ? instance_warn<kMcuBlockSpi0> : instance_warn<kMcuBlockSpi1>;
             sp.ctx = &instance_[i];
-            sp.failed = host.failed;
-            spi_[i].init(clock_, sp);
+            spi_[i].init(clock_, &ports_, i == 0 ? kMcuBlockSpi0 : kMcuBlockSpi1, kIrqSpi[i], kDreqSpiTx[i], sp);
             bus.windows.attach(kSpiBase[i], spi_[i].window_handler());
 
             I2cHost ic;
-            ic.irq = i2c_irq;
             ic.start = i2c_start;
             ic.connect = i2c_connect;
             ic.write_byte = i2c_write;
             ic.read_byte = i2c_read;
             ic.stop = i2c_stop;
-            ic.warn = i == 0 ? instance_warn<kMcuBlockI2c0> : instance_warn<kMcuBlockI2c1>;
             ic.ctx = &instance_[i];
-            ic.failed = host.failed;
-            i2c_[i].init(ic);
+            i2c_[i].init(&ports_, i == 0 ? kMcuBlockI2c0 : kMcuBlockI2c1, kIrqI2c[i], ic);
             bus.windows.attach(kI2cBase[i], i2c_[i].window_handler());
         }
+        bind_tree_sinks();
     }
     RtcBlock& rtc() noexcept { return rtc_; }
     TbmanBlock& tbman() noexcept { return tbman_; }
@@ -511,12 +454,19 @@ public:
     bool reset(bool from_watchdog, bool preserve_flash, uint64_t world = 0) noexcept { return reset(from_watchdog, preserve_flash, psm_.wdsel, resets_.wdsel, world); }
     bool reset(bool from_watchdog, bool preserve_flash, uint32_t psm_wdsel, uint32_t resets_wdsel, uint64_t world) noexcept {
         if (from_watchdog) {
+            psm_wdsel &= kPsmBitsMask;
+            // "if a peripheral in the power-on state machine has the WDSEL bit set, every peripheral after it in the power-on sequence will also be reset" (datasheet 2.13.4): the bits of PSM.WDSEL
+            // are in sequence order (ROSC 0 .. PROC1 16), so the lowest bit set selects itself and everything above it.
+            if (psm_wdsel != 0) psm_wdsel = kPsmBitsMask & ~((psm_wdsel & (~psm_wdsel + 1u)) - 1u);
             if ((psm_wdsel & kPsmWdselResets) != 0) resets_wdsel = kResetsBitsMask;
         } else {
             psm_wdsel = kPsmBitsMask;
             resets_wdsel = kResetsBitsMask;
         }
         if (!cpu.reset()) return false;
+        cpu1_running_ = false;
+        irq_slow_ = irq_hook_ != nullptr ? 1 : 0;
+        cpu1.reset_state();  // (core 1 is not running: its state goes back to power-on without a vector fetch)
         if (!reset_step(kMcuBlockPpb, world)) return false;
         if ((psm_wdsel & kPsmWdselSio) != 0 && !reset_step(kMcuBlockSio, world)) return false;
         if ((psm_wdsel & kPsmWdselClocks) != 0 && !reset_step(kMcuBlockClocks, world)) return false;
@@ -556,7 +506,7 @@ public:
     bool enter_reset_code(uint32_t cause, uint32_t psm_wdsel, uint32_t resets_wdsel, uint64_t world) noexcept { return enter_reset(static_cast<McuResetCause>(cause), psm_wdsel, resets_wdsel, world); }
     // Out of reset: the core at the flash's entry point, where the boot ROM would have left it (the ROM image is optional for a host, record 0096 F2).
     void leave_reset() noexcept { cpu.registers[15] = kFlashStart; }
-    static constexpr uint32_t kFlashStart = 0x10000000;
+    static constexpr uint32_t kFlashStart = 0x10000000, kFlashEnd = 0x14000000, kRamStart = 0x20000000, kDpramStart = 0x50100000;
 
     ResetsBlock& resets() noexcept { return resets_; }
     PsmBlock& psm() noexcept { return psm_; }
@@ -569,6 +519,7 @@ public:
     SioBlock& sio() noexcept { return sio_; }
     PwmBlock& pwm() noexcept { return pwm_; }
     PpbBlock& ppb() noexcept { return ppb_; }
+    PpbBlock& ppb(uint8_t core) noexcept { return core != 0 ? ppb1_ : ppb_; }
     WatchdogBlock& watchdog() noexcept { return watchdog_; }
     DmaBlock& dma() noexcept { return own_dma_; }
     ClocksBlock& clocks() noexcept { return clocks_; }
@@ -583,7 +534,10 @@ public:
 
     // The parts the chip owns. A host fills the bus's memory map and window table and calls `cpu.init(&bus, host, max_irq)` itself until the host interface does it.
     Cpu cpu;
+    Cpu cpu1;  // core 1: initialised by build(), inactive (nothing steps it) until a launch makes it run
     Bus bus;
+    // The core by number (0 or 1).
+    Cpu& core(uint8_t index) noexcept { return index != 0 ? cpu1 : cpu; }
 
     // The clock the chip runs on: its own, or the one the host gave it. Re-point whenever the host replaces it (a stale pointer is the only way to misuse this class).
     Clock& clock() noexcept { return *clock_; }
@@ -595,11 +549,37 @@ public:
     // False: waking the core took an exception and its bus access failed (the host has parked its error).
     using IrqHook = bool (*)(void* ctx, uint32_t irq, bool level);
     bool set_interrupt(uint32_t irq, bool level) noexcept {
-        return irq_hook_ != nullptr ? irq_hook_(irq_hook_ctx_, irq, level) : cpu.set_interrupt(irq, level);
+        if (irq_slow_ == 0) return cpu.set_interrupt(irq, level);  // (the one test the line has always paid: a hook, or - new - a running core 1, takes the longer way)
+        return set_interrupt_slow(irq, level);
+    }
+    RP2040PY_NOINLINE bool set_interrupt_slow(uint32_t irq, bool level) noexcept {
+        if (irq_hook_ != nullptr) return irq_hook_(irq_hook_ctx_, irq, level);
+        return set_interrupt_unhooked(irq, level);
+    }
+    // The line to the cores, whatever hook is installed (what a hook that spies on the lines calls to let one through). Every NVIC has the same system interrupts routed to it (datasheet 2.3.2) -
+    // except the two GPIO ones, which are one per bank PER CORE and are delivered by `set_interrupt_core()`; core 1 is reached once it runs.
+    bool set_interrupt_unhooked(uint32_t irq, bool level) noexcept {
+        if (!cpu.set_interrupt(irq, level)) return false;
+        return !cpu1_running_ || irq == kIrqIoBank0 || irq == kIrqIoQspi || cpu1.set_interrupt(irq, level);
+    }
+    // Core 1 starts to take the system lines. Until then nothing reaches it (the RTC and friends re-announce their lines a half-million times through an idle boot, and any extra work per
+    // announcement shows): its pending bits are, at the start, those core 0 has now - a line's pending bit is its level here - without the two per-core GPIO lines.
+    void start_core1_interrupts() noexcept {
+        cpu1.pending_interrupts = cpu.pending_interrupts & ~((1u << kIrqIoBank0) | (1u << kIrqIoQspi));
+        cpu1.interrupts_updated = true;
+        cpu1_running_ = true;
+        irq_slow_ = 1;
+    }
+    bool core1_running() const noexcept { return cpu1_running_; }
+    // One core's own line (IO_IRQ_BANK0 / IO_IRQ_QSPI carry a different level on each core).
+    bool set_interrupt_core(uint8_t index, uint32_t irq, bool level) noexcept {
+        if (irq_hook_ != nullptr && index == 0) return irq_hook_(irq_hook_ctx_, irq, level);
+        return core(index).set_interrupt(irq, level);
     }
     void set_irq_hook(IrqHook hook, void* ctx) noexcept {
         irq_hook_ = hook;
         irq_hook_ctx_ = ctx;
+        irq_slow_ = (hook != nullptr || cpu1_running_) ? 1 : 0;
     }
 
     // The DMA requests (step 2c). Every block with a DREQ calls this (directly, through the adapters below, once its shell has bound it) and it reaches the DMA block the host
@@ -634,7 +614,44 @@ public:
         ssi_world_ = world;
         bind_ssi_cs();
     }
-    // The chip's flash image: the host's buffer, which outlives the chip. Set before `build()`.
+    // The chip's memory, the host's buffers (they outlive the chip and are never moved): the boot ROM, the flash image, the SRAM and the USB DPRAM, mapped on the bus as the RP2040 has them (the ROM
+    // word-indexed at 0; the flash as four 16 MiB read aliases - XIP, NOALLOC, NOCACHE, NOCACHE_NOALLOC - read-only to the bus, writes and sub-word accesses only below the real size, every access
+    // reported to the XIP block once it is built; the SRAM at 0x20000000; the DPRAM at 0x50100000, a completed word write reported to the host's `dpram_written`). Call once, before `build()`;
+    // it hands the flash and the DPRAM to the blocks that work on them (`set_flash`, `set_usb_dpram`).
+    void set_memory(const McuMemory& m) noexcept {
+        Region region;
+        region.base = 0;
+        region.window = m.rom_size;
+        region.size = m.rom_size;
+        region.mask = 0xFFFFFFFFu;
+        region.data = m.rom;
+        region.flags = kWordIndexed;
+        bus.mem.attach(region);
+        region.base = kFlashStart;
+        region.window = kFlashEnd - kFlashStart;
+        region.size = m.flash_size;
+        region.mask = 0x00FFFFFFu;
+        region.data = m.flash;
+        region.flags = kSubWord | kXip;
+        bus.mem.attach(region);
+        region.base = kRamStart;
+        region.window = m.sram_size;
+        region.size = m.sram_size;
+        region.mask = 0xFFFFFFFFu;
+        region.data = m.sram;
+        region.flags = kSubWord;
+        bus.mem.attach(region);
+        region.base = kDpramStart;
+        region.window = m.dpram_size;
+        region.size = m.dpram_size;
+        region.mask = 0xFFFFFFFFu;
+        region.data = m.dpram;
+        region.flags = kNotifyOnWrite;
+        bus.mem.attach(region);
+        set_flash(m.flash, m.flash_size);
+        set_usb_dpram(m.dpram);
+    }
+    // The chip's flash image: the host's buffer, which outlives the chip. Set before `build()` (`set_memory()` does it).
     void set_flash(uint8_t* data, uint32_t size) noexcept {
         flash_ = data;
         flash_size_ = size;
@@ -670,16 +687,74 @@ public:
     void set_clk_changed_flag(const volatile uint8_t* flag) noexcept { host_.clk_changed = flag; }
     void set_monotonic(double (*monotonic)(void* chip)) noexcept { host_.monotonic = monotonic != nullptr ? monotonic : no_time; }
 
+    // The clock tree tells its consumers when a rate changes: SysTick, the PWM counters and the DMA (`clk_sys`), the watchdog's tick (`clk_ref`) and the RTC (`clk_rtc`), then the flag below. Registered by
+    // `build()` in the reference's order (`update_clocks()`); a shell that puts its own consumer over one of them (an oracle's reference) clears the lists and registers its own.
+    void bind_tree_sinks() noexcept {
+        clocks_.clear_sinks();
+        (void)clocks_.add_sys_sink(ppb_sys_sink, &ppb_);
+        (void)clocks_.add_sys_sink(ppb_sys_sink, &ppb1_);  // the tree feeds each core's SysTick itself
+        (void)clocks_.add_sys_sink(pwm_sys_sink, &pwm_);
+        (void)clocks_.add_sys_sink(dma_sys_sink, &own_dma_);
+        (void)clocks_.add_sys_sink(sys_changed_sink, this);
+        (void)clocks_.add_ref_sink(watchdog_ref_sink, &watchdog_);
+        (void)clocks_.add_rtc_sink(rtc_rtc_sink, &rtc_);
+    }
+    // Runs at the rate the clock tree has now: one instruction costs one `clk_sys` cycle, and a batch ends when `clk_sys` changes (so the next call starts at the new rate). What a wrapper calls in a loop
+    // when it has no clock tree of its own to follow (the Python `Simulator` does it itself, with its own flag, and calls `run()`).
+    int run_at_sys_clock(McuLimits limits, McuResult* result = nullptr) noexcept {
+        clk_changed_ = 0;
+        host_.clk_changed = &clk_changed_;
+        limits.cycle_nanos = 1e9 / clocks_.clk_sys();
+        return run(limits, result);
+    }
+
     // Runs until the limits or a request end it. Returns 0, or `kBatchFault` when a clock alarm, the CPU or a host call failed - the host has parked its own error, and
     // `result->reason` is `kStopFault`.
-    int run(const McuLimits& limits, McuResult* result = nullptr) noexcept { return run_batch(cpu, *clock_, host_, limits, result); }
+    int run(const McuLimits& limits, McuResult* result = nullptr) noexcept {
+        if (cpu1_running_) {  // (the loop for two cores; the single-core one is not touched)
+            const int status = run_batch_dual(cpu, cpu1, bus, *clock_, host_, limits, result);
+            if ((cpu1.registers[15] & ~1u) == kCore1RomReturn && cpu1.waiting) hold_core1();  // core 1 returned to the ROM: it waits to be launched again
+            return status;
+        }
+        return run_batch(cpu, *clock_, host_, limits, result);
+    }
+
+    // ---- core 1 (record 0104, P1) ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+    // On by default: the inter-core FIFOs and the launch handshake work. `set_core1_enabled(false)` gives back the old stub (the registers warn and read as 0xFFFFFFFF, nothing can launch core 1).
+    void set_core1_enabled(bool on) noexcept { sio_.set_multicore(on); }
+    // Core 1 starts at the vector table, stack and entry core 0 sent it (the handshake of datasheet 2.8.2, answered by the SIO). The batch ends at its next iteration (`clk_changed_`, the flag the loop
+    // already tests) so that `run()` picks the loop for two cores for the next one.
+    bool launch_core1(uint32_t vtor, uint32_t sp, uint32_t pc) noexcept {
+        cpu1.reset_state();
+        cpu1.vtor = vtor;
+        cpu1.registers[13] = sp & 0xFFFFFFFCu;
+        cpu1.registers[15] = pc & 0xFFFFFFFEu;
+        cpu1.registers[14] = kCore1RomReturn | 1u;  // (an entry function that returns lands back in the ROM: see batch_dual.hpp)
+        start_core1_interrupts();
+        end_batch();
+        return true;
+    }
+    // Core 1 goes back to the boot ROM (PSM.FRCE_OFF PROC1, `multicore_reset_core1()`): it stops, its FIFOs are emptied and a new handshake is needed.
+    void hold_core1() noexcept {
+        cpu1_running_ = false;
+        irq_slow_ = irq_hook_ != nullptr ? 1 : 0;
+        cpu1.reset_state();
+        (void)sio_.reset_core1();
+        end_batch();
+    }
+    // Ends the batch in progress at its next iteration, so that `run()` can pick the other loop for the next one: the flag the loop already tests - the chip's own, and the host's if it gave one
+    // (`set_clk_changed_flag`; the host's must be writable, as the Simulator's byte is).
+    void end_batch() noexcept {
+        clk_changed_ = 1;
+        if (host_.clk_changed != nullptr) *const_cast<volatile uint8_t*>(host_.clk_changed) = 1;
+    }
 
 private:
     // One block of the cascade: the host's if it holds that block (`world`), the `Mcu`'s own otherwise.
     bool reset_step(McuBlock block, uint64_t world) noexcept {
         if ((world >> block & 1u) != 0) return host_world_.reset_block == nullptr || host_world_.reset_block(host_world_.ctx, block);
         switch (block) {
-            case kMcuBlockPpb: ppb_.reset(); return true;
+            case kMcuBlockPpb: ppb_.reset(); ppb1_.reset(); return true;
             case kMcuBlockSio: sio_.reset(); return true;
             case kMcuBlockClocks: clocks_.reset(); return clocks_.reset_tree();
             case kMcuBlockIoBank0:
@@ -729,33 +804,25 @@ private:
             default: return true;
         }
     }
+    static bool sys_changed_sink(void* chip, double, double) noexcept {
+        static_cast<Mcu*>(chip)->clk_changed_ = 1;
+        return true;
+    }
     static bool step_pio(void* chip, int index, int64_t cycles) noexcept { return static_cast<Mcu*>(chip)->pio_[index].advance(cycles); }
     static double no_time(void*) noexcept { return 0.0; }
-    // A block's `warn(ctx, kind, offset, value)` onto the host's `warn(ctx, block, kind, offset, value)`: the block id is the template's, so every block shares this one function.
-    template <McuBlock Block>
-    static void block_warn(void* chip, uint32_t kind, uint32_t offset, int64_t value) noexcept {
+    // The chip's `ChipPorts::warn`: the block's own id and the numbers onto the host's `warn(ctx, block, kind, offset, value)`.
+    static void ports_warn(void* chip, uint32_t block, uint32_t kind, uint32_t offset, int64_t value) noexcept {
         Mcu* mcu = static_cast<Mcu*>(chip);
-        if (mcu->host_world_.warn != nullptr) mcu->host_world_.warn(mcu->host_world_.ctx, Block, kind, offset, value);
+        if (mcu->host_world_.warn != nullptr) mcu->host_world_.warn(mcu->host_world_.ctx, block, kind, offset, value);
     }
-    // The same for a block whose context is a `McuInstance` (a UART, SPI or I2C).
-    template <McuBlock Block>
-    static void instance_warn(void* ctx, uint32_t kind, uint32_t offset, int64_t value) noexcept {
-        const McuInstance* i = static_cast<const McuInstance*>(ctx);
-        if (i->mcu->host_world_.warn != nullptr) i->mcu->host_world_.warn(i->mcu->host_world_.ctx, Block, kind, offset, value);
-    }
+    static bool ports_irq(void* chip, uint32_t line, bool level) noexcept { return static_cast<Mcu*>(chip)->set_interrupt(line, level); }
+    static bool ports_dreq(void* chip, uint32_t number, bool asserted) noexcept { return static_cast<Mcu*>(chip)->set_dreq(number, asserted); }
     static bool tree_changed(void* chip) noexcept {
         Mcu* m = static_cast<Mcu*>(chip);
         return m->tree_hook_ != nullptr ? m->tree_hook_(m->tree_hook_ctx_) : m->clocks_.retune();
     }
     // SIO's host: the pins' effective inputs, the pins whose SIO-driven state moved, and the cycles SIO charges the CPU.
     // The PIOs' host: `chip` is the `Mcu` for the line and the requests (the PIO passes absolute numbers), a `McuInstance` for the rest.
-    static bool pio_irq(void* chip, uint32_t line, bool level) noexcept { return static_cast<Mcu*>(chip)->set_interrupt(line, level); }
-    static bool pio_dreq(void* chip, uint32_t number, bool set) noexcept { return static_cast<Mcu*>(chip)->set_dreq(number, set); }
-    static void pio_log(void* ctx, uint32_t kind, uint32_t a, uint32_t b) noexcept {
-        const McuInstance* i = static_cast<const McuInstance*>(ctx);
-        const McuHost& w = i->mcu->host_world_;
-        if (w.warn != nullptr) w.warn(w.ctx, i->index == 0 ? kMcuBlockPio0 : kMcuBlockPio1, kind, a, b);
-    }
     // (reached only for a pin of a bank the host holds: the others the block reads and updates directly)
     static bool pio_pin_update(void* ctx, uint32_t pin) noexcept { return sio_update_pins(static_cast<const McuInstance*>(ctx)->mcu, 1u << pin, false); }
     static bool pio_pin_input(void* ctx, uint32_t pin, bool* level) noexcept {
@@ -773,11 +840,7 @@ private:
             for (uint32_t pin = 0; pin < 30; ++pin) pio_[p].bind_pin(pin, pins_world_[0] ? nullptr : &gpio_bank_, pin);
         }
     }
-    static bool usb_irq(void* chip, bool level) noexcept { return static_cast<Mcu*>(chip)->set_interrupt(kIrqUsb, level); }
     // The SSI's and XIP_CTRL's hosts.
-    static bool ssi_irq(void* chip, bool level) noexcept { return static_cast<Mcu*>(chip)->set_interrupt(kIrqXip, level); }
-    static bool ssi_dreq(void* chip, bool tx, bool asserted) noexcept { return static_cast<Mcu*>(chip)->set_dreq(tx ? kDreqXipSsiTx : kDreqXipSsiRx, asserted); }
-    static bool xip_dreq(void* chip, bool asserted) noexcept { return static_cast<Mcu*>(chip)->set_dreq(kDreqXipStream, asserted); }
     static bool xip_clk_sys(void* chip, double* hz) noexcept {
         Mcu* m = static_cast<Mcu*>(chip);
         const McuHost& w = m->host_world_;
@@ -798,8 +861,6 @@ private:
         if (!ssi_world_) (void)ssi_.bind_cs(&qspi_bank_, 1);
     }
     // The PWM's host: its line and requests, and the pins it drives and reads (the GPIO bank).
-    static bool pwm_irq(void* chip, bool level) noexcept { return static_cast<Mcu*>(chip)->set_interrupt(kIrqPwm, level); }
-    static bool pwm_dreq(void* chip, uint32_t channel) noexcept { return static_cast<Mcu*>(chip)->set_dreq(kDreqPwm0 + channel, true); }
     static bool pwm_pin_changed(void* chip, uint32_t pin) noexcept { return sio_update_pins(chip, 1u << pin, false); }
     static bool pwm_pin_read(void* chip, uint32_t pin, bool* level) noexcept {
         *level = (sio_inputs(static_cast<Mcu*>(chip), 0) >> pin & 1u) != 0;
@@ -825,7 +886,27 @@ private:
         }
         return true;
     }
-    static void sio_add_cycles(void* chip, uint32_t cycles) noexcept { static_cast<Mcu*>(chip)->cpu.cycles += cycles; }
+    static void sio_send_event(void* chip, uint32_t core) noexcept {
+        Cpu& target = static_cast<Mcu*>(chip)->core(static_cast<uint8_t>(core));
+        if (target.waiting && target.event_wait) {
+            target.waiting = target.event_wait = false;
+        } else {
+            target.event_registered = true;
+        }
+    }
+    static bool sio_launch_core1(void* chip, uint32_t vtor, uint32_t sp, uint32_t pc) noexcept { return static_cast<Mcu*>(chip)->launch_core1(vtor, sp, pc); }
+    static void psm_proc1(void* chip, bool held) noexcept {
+        Mcu* m = static_cast<Mcu*>(chip);
+        if (held) {
+            m->hold_core1();
+        } else {
+            (void)m->sio_.core1_boot_done();  // out of reset: the boot ROM drains its FIFO and tells core 0 with a 0
+        }
+    }
+    static void sio_add_cycles(void* chip, uint32_t cycles) noexcept {
+        Mcu* m = static_cast<Mcu*>(chip);
+        m->core(m->bus.initiator).cycles += cycles;  // the initiating core pays (always core 0 until core 1 runs)
+    }
     // The pin banks' host: `ctx` is a `McuInstance` (the bank).
     static bool pin_source(void* ctx, uint32_t source, uint32_t* out) noexcept {
         const McuInstance* i = static_cast<const McuInstance*>(ctx);
@@ -886,6 +967,7 @@ private:
         Mcu* m = static_cast<Mcu*>(chip);
         m->timer_.tick_changed(tick_hz);
         m->ppb_.tick_changed(tick_hz);
+        m->ppb1_.tick_changed(tick_hz);
         return m->host_world_.watchdog_tick == nullptr || m->host_world_.watchdog_tick(m->host_world_.ctx, tick_hz);
     }
     static double tree_xosc_hz(void* chip) noexcept {
@@ -902,9 +984,6 @@ private:
         return true;
     }
     // The blocks of group 2 call these; each raises its line / request on the chip, or hands the world the part it answers for. `ctx` is the Mcu (TIMER, ADC) or a `McuInstance`.
-    static bool timer_irq(void* chip, uint32_t line, bool level) noexcept { return static_cast<Mcu*>(chip)->set_interrupt(line, level); }
-    static bool adc_irq(void* chip, bool level) noexcept { return static_cast<Mcu*>(chip)->set_interrupt(kIrqAdc, level); }
-    static bool adc_dreq(void* chip, bool asserted) noexcept { return static_cast<Mcu*>(chip)->set_dreq(kDreqAdc, asserted); }
     static bool adc_read(void* chip, uint32_t channel) noexcept {
         Mcu* m = static_cast<Mcu*>(chip);
         if (m->host_world_.adc_read != nullptr) return m->host_world_.adc_read(m->host_world_.ctx, channel);
@@ -916,14 +995,6 @@ private:
         if (m->host_world_.adc_channel_value != nullptr) return m->host_world_.adc_channel_value(m->host_world_.ctx, channel, value);
         *value = 0;
         return true;
-    }
-    static bool uart_irq(void* ctx, bool level) noexcept {
-        const McuInstance* i = static_cast<const McuInstance*>(ctx);
-        return i->mcu->set_interrupt(kIrqUart[i->index], level);
-    }
-    static bool uart_dreq(void* ctx, bool rx, bool asserted) noexcept {
-        const McuInstance* i = static_cast<const McuInstance*>(ctx);
-        return i->mcu->set_dreq(kDreqUartTx[i->index] + (rx ? 1u : 0u), asserted);
     }
     static bool uart_byte(void* ctx, uint32_t byte) noexcept {
         const McuInstance* i = static_cast<const McuInstance*>(ctx);
@@ -943,14 +1014,6 @@ private:
         *nanos = (divider <= 0 || clk_peri <= 0) ? 0.0 : 16 * divider * 1e9 / clk_peri;
         return true;
     }
-    static bool spi_irq(void* ctx, bool level) noexcept {
-        const McuInstance* i = static_cast<const McuInstance*>(ctx);
-        return i->mcu->set_interrupt(kIrqSpi[i->index], level);
-    }
-    static bool spi_dreq(void* ctx, bool tx, bool asserted) noexcept {
-        const McuInstance* i = static_cast<const McuInstance*>(ctx);
-        return i->mcu->set_dreq(kDreqSpiTx[i->index] + (tx ? 0u : 1u), asserted);
-    }
     static bool spi_transmit(void* ctx, uint32_t value) noexcept {
         const McuInstance* i = static_cast<const McuInstance*>(ctx);
         const McuHost& w = i->mcu->host_world_;
@@ -964,10 +1027,6 @@ private:
         const double frequency = sp.clock_divisor == 0 ? 0.0 : i->mcu->clocks_.clk_peri() / (static_cast<double>(sp.clock_divisor) * (1 + scr));
         *nanos = frequency != 0.0 ? 1e9 / frequency : 0.0;
         return true;
-    }
-    static bool i2c_irq(void* ctx, bool level) noexcept {
-        const McuInstance* i = static_cast<const McuInstance*>(ctx);
-        return i->mcu->set_interrupt(kIrqI2c[i->index], level);
     }
     static bool i2c_start(void* ctx, bool repeated) noexcept {
         const McuInstance* i = static_cast<const McuInstance*>(ctx);
@@ -994,7 +1053,6 @@ private:
         const McuHost& w = i->mcu->host_world_;
         return w.i2c_stop != nullptr ? w.i2c_stop(w.ctx, i->index) : i->mcu->i2c_[i->index].complete_stop();
     }
-    static bool rtc_irq(void* chip, bool level) noexcept { return static_cast<Mcu*>(chip)->set_interrupt(kIrqRtc, level); }
 
     PioBlock pio_[kPioBlocks];
     ClocksBlock clocks_;
@@ -1004,6 +1062,7 @@ private:
     TreeHook tree_hook_ = nullptr;
     void* tree_hook_ctx_ = nullptr;
     RtcBlock rtc_;
+    ChipPorts ports_;  // the lines every block shares (core_host.hpp): the host's `warn` with the block's id, and the failure flag
     TbmanBlock tbman_;
     BusctrlBlock busctrl_;
     ResetsBlock resets_;
@@ -1022,6 +1081,9 @@ private:
     PwmBlock pwm_;
     McuInstance pio_ctx_[2];
     SsiBlock ssi_;
+    bool cpu1_running_ = false;
+    uint8_t irq_slow_ = 0;  // nonzero: an IRQ hook is installed or core 1 is running, so `set_interrupt` does more than hand the line to core 0
+    volatile uint8_t clk_changed_ = 0;  // raised by the tree when clk_sys changes (`run_at_sys_clock()`)
     UsbBlock usb_;
     uint8_t* usb_dpram_ = nullptr;
     XipBlock xip_;
@@ -1030,6 +1092,7 @@ private:
     bool ssi_world_ = false;
     SioBlock sio_;
     PpbBlock ppb_;
+    PpbBlock ppb1_;  // core 1's
     WatchdogBlock watchdog_;
     DmaBlock own_dma_;  // (`dma_` is the block the requests go to: this one, unless the host attached another)
     AdcBlock adc_;
@@ -1070,17 +1133,8 @@ inline bool mcu_irq_lines(void* ctx, uint32_t line, bool level) noexcept {
 }
 
 // A block's DMA request, bound to the chip: the context a shell hands the block as its `dreq_ctx`, and the function that goes with it, by the shape of the block's own `dreq`.
-// `McuDreqLine`: one request, `dreq(ctx, asserted)` (ADC, XIP stream). `McuDreqPair`: a TX and an RX request, `dreq(ctx, which, asserted)` - `if_true` is the request `which == true`
-// selects (the UART passes `rx`, the SPI and SSI `tx`, so each shell says which is which). `McuDreqBase`: the PWM's `dreq(ctx, channel)`, which only ever asserts (the pulse of a
-// wrap), the request being `base + channel`. The PIO needs no adapter state: its `dreq(ctx, number, asserted)` already carries the absolute number, so its context is the `Mcu`.
-struct McuDreqLine {
-    Mcu* mcu = nullptr;
-    uint32_t number = 0;
-};
-inline bool mcu_dreq_line(void* ctx, bool asserted) noexcept {
-    const McuDreqLine* l = static_cast<const McuDreqLine*>(ctx);
-    return l->mcu->set_dreq(l->number, asserted);
-}
+// `McuDreqPair`: a TX and an RX request, `dreq(ctx, which, asserted)` - `if_true` is the request `which == true` selects (the UART passes `rx`). Only the UART's stand-in path still hands this to a
+// block; the blocks the `Mcu` builds are wired inside it (`Mcu::set_dreq`).
 struct McuDreqPair {
     Mcu* mcu = nullptr;
     uint32_t if_true = 0, if_false = 0;
@@ -1089,15 +1143,6 @@ inline bool mcu_dreq_pair(void* ctx, bool which, bool asserted) noexcept {
     const McuDreqPair* l = static_cast<const McuDreqPair*>(ctx);
     return l->mcu->set_dreq(which ? l->if_true : l->if_false, asserted);
 }
-struct McuDreqBase {
-    Mcu* mcu = nullptr;
-    uint32_t base = 0;
-};
-inline bool mcu_dreq_base(void* ctx, uint32_t channel) noexcept {
-    const McuDreqBase* l = static_cast<const McuDreqBase*>(ctx);
-    return l->mcu->set_dreq(l->base + channel, true);
-}
-inline bool mcu_dreq_number(void* ctx, uint32_t number, bool asserted) noexcept { return static_cast<Mcu*>(ctx)->set_dreq(number, asserted); }
 
 // The IO_BANK0 interrupt line: the level of it is "any pin's IRQ value is set", re-evaluated on the pin bank whenever a pin says its own value may have changed.
 struct McuIoIrq {

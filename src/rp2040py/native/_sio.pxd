@@ -4,13 +4,13 @@
 from libc.stdint cimport int64_t, uint32_t
 from libcpp cimport bool
 
+from rp2040py.native._core_host cimport ChipPorts
 from rp2040py.native._window_map cimport WindowHandler
 
 cdef extern from "sio.hpp" namespace "rp2040core":
     ctypedef uint32_t (*SioInputFn)(void* ctx)
     ctypedef bool (*SioUpdatePinsFn)(void* ctx, uint32_t pin_mask, bool qspi)
     ctypedef void (*SioCyclesFn)(void* ctx, uint32_t cycles)
-    ctypedef void (*SioWarnFn)(void* ctx, uint32_t kind, uint32_t offset, int64_t value)
 
     cdef const uint32_t kSioWarnFifo
     cdef const uint32_t kSioWarnReadInvalid
@@ -22,7 +22,6 @@ cdef extern from "sio.hpp" namespace "rp2040core":
         SioInputFn qspi_in
         SioUpdatePinsFn update_pins
         SioCyclesFn add_cycles
-        SioWarnFn warn
         void* ctx
 
     cdef cppclass Interpolator:
@@ -33,13 +32,17 @@ cdef extern from "sio.hpp" namespace "rp2040core":
         void set_base01(int64_t value) noexcept
         void reset() noexcept
 
-    cdef cppclass SioBlock:
-        uint32_t gpio_value, gpio_output_enable, qspi_gpio_value, qspi_gpio_output_enable
+    cdef cppclass SioCoreState:
         int64_t div_dividend, div_divisor, div_remainder
         double div_quotient
-        uint32_t div_csr, spin_lock
+        uint32_t div_csr
+
+    cdef cppclass SioBlock:
+        uint32_t gpio_value, gpio_output_enable, qspi_gpio_value, qspi_gpio_output_enable
+        uint32_t spin_lock
+        SioCoreState& core(int index) noexcept
         SioBlock() noexcept
-        void init(const SioHost& host) noexcept
+        void init(const ChipPorts* ports, uint32_t block, const SioHost& host) noexcept
         void reset() noexcept
         Interpolator& interp(int index) noexcept
         bool update_hardware_divider(bool signed_division) noexcept
@@ -58,6 +61,7 @@ cdef class RPSIO:
     cdef public bint _from_mcu  # this is the view of the `Mcu`'s block
     cdef SioBlock* _block  # the chip's (`Mcu` builds it), or `_own` for a block made directly (a stand-in chip, a test)
     cdef SioBlock _own
+    cdef ChipPorts _ports  # a block made directly (`_own`) reaches the chip through these
     cdef public object rp2040
     cdef public object name
     cdef object _interp0

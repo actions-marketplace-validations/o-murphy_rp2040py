@@ -38,21 +38,12 @@
 namespace rp2040core {
 
 // The messages the Python block logs through `BasePeripheral.warn`; the host formats them (it owns the logger).
-constexpr uint32_t kSsiWarnRead = kRegWarnRead, kSsiWarnReadAtomicArea = kRegWarnReadAtomicArea, kSsiWarnWrite = kRegWarnWrite;
-using SsiWarnFn = RegWarnFn;
 // Only when no native pin is bound (a Python chip-select): whether the pin reads LOW now. False: a failure is pending with the caller.
 using SsiCsLowFn = bool (*)(void* ctx, bool* low);
 
-using SsiIrqFn = bool (*)(void* ctx, bool level);               // the combined interrupt (XIP_IRQ) moved; false: a failure is pending with the caller
-using SsiDreqFn = bool (*)(void* ctx, bool tx, bool asserted);  // a DMA request (DREQ_XIP_SSITX / DREQ_XIP_SSIRX) moved; false: a failure is pending
-
+// The one thing outside the chip's `ChipPorts` (core/core_host.hpp) the block asks of its host.
 struct SsiHost {
-    SsiWarnFn warn = nullptr;
     SsiCsLowFn cs_low = nullptr;
-    SsiIrqFn irq = nullptr;
-    void* irq_ctx = nullptr;  // the context of `irq` alone, when it is not `ctx` (a line bound straight to the chip, core/mcu.hpp)
-    SsiDreqFn dreq = nullptr;
-    void* dreq_ctx = nullptr;  // the context of `dreq` alone, when it is not `ctx` (a request bound straight to the chip, core/mcu.hpp)
     void* ctx = nullptr;
 };
 
@@ -88,7 +79,7 @@ constexpr uint32_t STATUS_WEL = 0x02, STATUS2_QE = 0x02;
 constexpr uint8_t JEDEC_ID[3] = {0xEF, 0x40, 0x15};
 }  // namespace ssi_regs
 
-class SsiBlock {
+class SsiBlock : public RegisterBlock<SsiBlock> {
 public:
     static constexpr uint32_t kRxCapacity = 16;  // the hardware FIFO
     static constexpr uint32_t kTxKept = 4 + ssi_regs::FLASH_PAGE_SIZE;  // opcode + address + the data bytes of a page
@@ -98,9 +89,11 @@ public:
     SsiBlock& operator=(const SsiBlock&) = delete;
 
     // The flash is the caller's buffer and must outlive the block.
-    void init(uint8_t* flash, uint32_t flash_size, const SsiHost& host) noexcept {
+    // `irq_line` is XIP_IRQ; `dreq_base` DREQ_XIP_SSITX (DREQ_XIP_SSIRX follows).
+    void init(uint8_t* flash, uint32_t flash_size, const ChipPorts* ports, uint32_t block, uint32_t irq_line, uint32_t dreq_base, const SsiHost& host) noexcept {
         flash_ = flash;
         flash_size_ = flash_size;
+        port_.init(ports, block, irq_line, dreq_base);
         host_ = host;
     }
 
@@ -157,7 +150,6 @@ public:
     uint8_t rx_at(uint32_t i) const noexcept { return rx_[(rx_head_ + i) % kRxCapacity]; }
     uint32_t tx_length() const noexcept { return tx_len_; }
     uint8_t tx_at(uint32_t i) const noexcept { return i < kTxKept ? tx_[i] : 0; }
-    int64_t raw_write_value() const noexcept { return raw_write_value_; }
     void set_write_enabled(bool value) noexcept { write_enabled_ = value; }
     void set_ssienr(uint32_t value) noexcept { ssienr_ = value; }
     void tx_append(uint8_t byte) noexcept { push_tx(byte); }
@@ -202,63 +194,50 @@ public:
             case SPI_CTRL_R0: return spictrl0_;
             default: break;
         }
-        if (host_.warn != nullptr) {
-            host_.warn(host_.ctx, kSsiWarnRead, offset, 0);
-            if (offset > 0x1000) host_.warn(host_.ctx, kSsiWarnReadAtomicArea, offset, 0);
-        }
+        port_.unimplemented_read(offset);
         return 0xFFFFFFFFu;
     }
 
     // `value` is the value after any atomic-alias decode.
-    void write(uint32_t offset, int64_t value) noexcept {
+    bool write(uint32_t offset, int64_t value) noexcept {
         using namespace ssi_regs;
         const uint32_t word = static_cast<uint32_t>(value);
         if (const int slot = stored_index(offset); slot >= 0) {
             stored_[slot] = word & STORED_MASK[slot];
             update();
-            return;
+            return true;
         }
         if (is_data_register(offset)) {
             if (ssienr_ != 0) {
                 receive(cs_asserted_ ? shift_byte(static_cast<uint8_t>(word & 0xFFu)) : static_cast<uint8_t>(0xFF));
                 update();
             }
-            return;
+            return true;
         }
         switch (offset) {
-            case TXFLR: case RXFLR: case ISR: case RISR: case TXOICR: case RXOICR: case RXUICR: case MSTICR: case ICR: return;  // read-only status: a write is a no-op
-            case CTRLR0: ctrlr0_ = word & CTRLR0_MASK; return;
-            case CTRLR1: ctrlr1_ = word & CTRLR1_MASK; return;
+            case TXFLR: case RXFLR: case ISR: case RISR: case TXOICR: case RXOICR: case RXUICR: case MSTICR: case ICR: return true;  // read-only status: a write is a no-op
+            case CTRLR0: ctrlr0_ = word & CTRLR0_MASK; return true;
+            case CTRLR1: ctrlr1_ = word & CTRLR1_MASK; return true;
             case SSIENR:
                 ssienr_ = word & SSIENR_MASK;
                 if (ssienr_ == 0) {  // "The transmit and receive FIFO buffers are cleared when the DW_apb_ssi is disabled (SSI_EN = 0)" (datasheet 4.10.5)
                     rx_head_ = rx_count_ = 0;
                     update();
                 }
-                return;
-            case BAUDR: baudr_ = word & BAUDR_MASK; return;
-            case RX_SAMPLE_DLY: rxsampdly_ = word & 0xFFu; return;
-            case TXD_DRIVE_EDGE: txddriveedge_ = word & 0xFFu; return;
-            case SPI_CTRL_R0: spictrl0_ = word & SPI_CTRLR0_MASK; return;
+                return true;
+            case BAUDR: baudr_ = word & BAUDR_MASK; return true;
+            case RX_SAMPLE_DLY: rxsampdly_ = word & 0xFFu; return true;
+            case TXD_DRIVE_EDGE: txddriveedge_ = word & 0xFFu; return true;
+            case SPI_CTRL_R0: spictrl0_ = word & SPI_CTRLR0_MASK; return true;
             default: break;
         }
-        if (host_.warn != nullptr) host_.warn(host_.ctx, kSsiWarnWrite, offset, value);
+        port_.unimplemented_write(offset, value);
+        return true;
     }
 
-    // `BasePeripheral.write_uint32_atomic`, step for step - remember the raw value, decode the alias against a *read* of the register (with that read's side
-    // effects: a DR0 alias pops the RX queue), then write.
-    void write_atomic(uint32_t offset, int64_t raw, uint32_t atomic_type) noexcept {
-        raw_write_value_ = raw;
-        int64_t value = raw;
-        if (atomic_type != kAtomicNormal) {
-            value = decode_atomic(atomic_type, static_cast<int64_t>(read(offset)), raw);
-        }
-        write(offset, value);
-    }
 
     // ---- window handler entry points: what the bus's C++ window registry calls ---------------------------
 
-    WindowHandler window_handler() noexcept { return BlockWindow<SsiBlock>::handler(this); }
 
     // SSI.BAUDR as read (the XIP stream's pace derives from it).
     uint32_t baudr() const noexcept { return baudr_; }
@@ -326,17 +305,17 @@ private:
         const bool level = isr() != 0;
         if (level != irq_level_) {
             irq_level_ = level;
-            if (host_.irq != nullptr && !raise_irq(level)) return false;
+            if (!port_.irq(level)) return false;
         }
         const bool tx = (stored_[DMACR_INDEX] & DMACR_TDMAE) != 0 && txflr_ <= stored_[DMATDLR_INDEX];
         if (tx != dreq_tx_) {
             dreq_tx_ = tx;
-            if (host_.dreq != nullptr && !raise_dreq(true, tx)) return false;
+            if (!port_.dreq(0, tx)) return false;
         }
         const bool rx = (stored_[DMACR_INDEX] & DMACR_RDMAE) != 0 && rx_count_ >= stored_[DMARDLR_INDEX] + 1;
         if (rx != dreq_rx_) {
             dreq_rx_ = rx;
-            if (host_.dreq != nullptr && !raise_dreq(false, rx)) return false;
+            if (!port_.dreq(1, rx)) return false;
         }
         return true;
     }
@@ -403,8 +382,6 @@ private:
 
     uint8_t* flash_ = nullptr;
     uint32_t flash_size_ = 0;
-    bool raise_dreq(bool which, bool asserted) noexcept { return host_.dreq(host_.dreq_ctx != nullptr ? host_.dreq_ctx : host_.ctx, which, asserted); }
-    bool raise_irq(bool level) noexcept { return host_.irq(host_.irq_ctx != nullptr ? host_.irq_ctx : host_.ctx, level); }
     SsiHost host_;
     PinBank* bank_ = nullptr;
     uint32_t slot_ = 0;  // the chip-select pin's position in its bank
@@ -418,7 +395,6 @@ private:
     uint32_t rx_head_ = 0, rx_count_ = 0;
     uint32_t sticky_ = 0;  // the held interrupts: TXO, RXU, RXO, MST
     bool irq_level_ = false, dreq_tx_ = false, dreq_rx_ = false;  // what the host was last told
-    int64_t raw_write_value_ = 0;
 };
 
 }  // namespace rp2040core

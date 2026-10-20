@@ -13,19 +13,12 @@ import random
 from libc.stdint cimport int64_t, uint32_t
 from libcpp cimport bool as cppbool
 
-from rp2040py.native._pending cimport park_error, pending_flag, raise_if_pending
+from rp2040py.native._pending cimport park_error, raise_if_pending
 from rp2040py.native._simulation_clock cimport SimulationClock
 from rp2040py.native._window_map cimport WindowHandler
+from rp2040py.native._register_warning import register_warning
 
 __all__ = ("RPROSC",)
-
-
-cdef void _warn_trampoline(void* ctx, uint32_t kind, uint32_t offset, int64_t value) noexcept:
-    cdef RPROSC block = <RPROSC> ctx
-    try:
-        block._warn_kind(kind, offset, value)
-    except BaseException as error:
-        park_error(error)
 
 
 cdef cppbool _frequency_trampoline(void* ctx, double hz) noexcept:
@@ -51,7 +44,6 @@ cdef cppbool _bit_trampoline(void* ctx, uint32_t* bit) noexcept:
 
 cdef class RPROSC:
     def __init__(self, rp2040, name, mcu_index=-1):
-        cdef RoscHost host
         clock = rp2040.clock
         if not isinstance(clock, SimulationClock):
             raise TypeError(
@@ -69,16 +61,9 @@ cdef class RPROSC:
             # (its RANDOMBIT comes from the block's own seeded generator until a source is set: `random_bit = fn`)
             self._block = <RoscBlock*> <size_t> rp2040._native_rosc_address()
             return
-        self._block = &self._own
-        # The reference's default source, seeded the same way: the same firmware sees the same bits on every run
-        self._rng = random.Random(0x2040)
-        self._random_bit = lambda: self._rng.getrandbits(1)
-        host.warn = _warn_trampoline
-        host.frequency_changed = _frequency_trampoline
-        host.random_bit = _bit_trampoline
-        host.ctx = <void*> self
-        host.failed = pending_flag()
-        self._own.init(&(<SimulationClock> clock)._clock, host)
+        raise TypeError(
+            "the native block is a view of the chip's C++ `Mcu` block: RPROSC is built by a native chip (the pure-Python chip has the pure-Python peripherals)"
+        )
 
     def _rejoin_the_python_tree(self, tree):
         """`tree` is going away (the chip's clock tree was replaced): tell the chip through Python again, if this block was telling that tree."""
@@ -89,11 +74,7 @@ cdef class RPROSC:
 
     def _warn_kind(self, kind, offset, value):
         """A register access the block does not implement, as the logger's message (the chip's host calls this for the block it built)."""
-        if kind == kRoscWarnRead:
-            self.warn(f"Unimplemented peripheral read from 0x{offset:x}")
-        elif kind == kRoscWarnReadAtomicArea:
-            self.warn("Unimplemented read from peripheral in the atomic operation region")
-        elif kind == kRoscWarnInvalidFreqRange:
+        if kind == kRoscWarnInvalidFreqRange:
             self.warn(f"Invalid FREQ_RANGE value written: 0x{value:x}")
         elif kind == kRoscWarnInvalidEnable:
             self.warn(f"Invalid ENABLE value written: 0x{value:x}")
@@ -106,7 +87,7 @@ cdef class RPROSC:
         elif kind == kRoscWarnInvalidPhasePasswd:
             self.warn(f"Invalid PHASE password written: 0x{value:x}")
         else:
-            self.warn(f"Unimplemented peripheral write to 0x{offset:x}: 0x{value:x}")
+            self.warn(register_warning(kind, offset, value))
 
     @property
     def raw_write_value(self):
@@ -231,11 +212,6 @@ cdef class RPROSC:
     def _hz(self, value):
         self._block.hz = <double> value
 
-    def __dealloc__(self):
-        # Off the clock's rebase list before the block goes away (a no-op if the clock is gone already). The chip's own block is the `Mcu`'s to detach.
-        if self._block == &self._own:
-            self._own.detach()
-
     @property
     def random_bit(self):
         """The source of RANDOMBIT (the reference's hook). On the chip's own block, until one is set, the block uses its own seeded generator and this is None."""
@@ -244,11 +220,11 @@ cdef class RPROSC:
     @random_bit.setter
     def random_bit(self, value):
         self._random_bit = value
-        if self._block != &self._own:  # the chip's block: hand it (or take away) the source
-            if value is None:
-                self._block.bind_random_source(NULL, NULL)
-            else:
-                self._block.bind_random_source(_bit_trampoline, <void*> self)
+        # hand the chip's block the source (or take it away)
+        if value is None:
+            self._block.bind_random_source(NULL, NULL)
+        else:
+            self._block.bind_random_source(_bit_trampoline, <void*> self)
 
     def reset(self):
         """Back to power-on (enabled, div 16, LOW range). Gated on `PSM.WDSEL`'s ROSC bit by `RP2040.reset()` (see the reference)."""

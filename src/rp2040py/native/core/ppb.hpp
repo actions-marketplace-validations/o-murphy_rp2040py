@@ -40,14 +40,11 @@
 
 namespace rp2040core {
 
-constexpr uint32_t kPpbWarnRead = kRegWarnRead, kPpbWarnWrite = kRegWarnWrite;
-using PpbWarnFn = RegWarnFn;
 
 // AIRCR.SYSRESETREQ with a valid VECTKEY: the host resets the core (datasheet 2.4.2.9: "Reset the core only"). Called from inside the register write.
 using PpbSystemResetFn = void (*)(void* ctx);
 
 struct PpbHost {
-    PpbWarnFn warn = nullptr;
     PpbSystemResetFn system_reset_request = nullptr;
     void* ctx = nullptr;
 };
@@ -69,7 +66,7 @@ constexpr uint32_t VECTPENDING_SHIFT = 12, VECTACTIVE_MASK = 0x1FF;
 constexpr int64_t kSysTickTop = 0xFFFFFF;
 }  // namespace ppb_regs
 
-class PpbBlock {
+class PpbBlock : public RegisterBlock<PpbBlock> {
 public:
     PpbBlock() = default;
     PpbBlock(const PpbBlock&) = delete;  // the alarm and the clock hold pointers into this object
@@ -87,7 +84,8 @@ public:
 
     // Binds the block to the CPU whose private bus it is, the chip's clock and its clk_sys, and runs the reference's constructor: TOP, mode and alarm target, then reset().
     // `max_hardware_irq` is the CPU's (the highest IRQ a chip raises): ICPR cannot clear a pending bit at or below it.
-    void init(Cpu* cpu, Clock* clock, const PpbHost& host, double clk_sys, uint32_t max_hardware_irq) noexcept {
+    void init(Cpu* cpu, Clock* clock, const ChipPorts* ports, uint32_t block, const PpbHost& host, double clk_sys, uint32_t max_hardware_irq) noexcept {
+        port_.init(ports, block);
         cpu_ = cpu;
         host_ = host;
         hardware_interrupt_mask_ = max_hardware_irq >= 32 ? 0xFFFFFFFFu : (1u << max_hardware_irq) - 1u;
@@ -176,7 +174,7 @@ public:
             }
             return result;
         }
-        if (host_.warn) host_.warn(host_.ctx, kPpbWarnRead, offset, 0);
+        port_.warn(kRegWarnRead, offset, 0);  // (no atomic-area message: the PPB window has no aliases)
         return 0xFFFFFFFFu;
     }
 
@@ -265,27 +263,14 @@ public:
             core.interrupts_updated = true;
             return true;
         }
-        if (host_.warn) host_.warn(host_.ctx, kPpbWarnWrite, offset, value);
+        port_.unimplemented_write(offset, value);
         return true;
     }
 
-    // `BasePeripheral.write_uint32_atomic`, step for step - remember the raw value, decode the alias against a *read* of the register (with that read's side effects), then write.
-    // The bus never sends an alias to this block; it is here because the reference inherits the method, and a host may call it.
-    bool write_atomic(uint32_t offset, int64_t raw, uint32_t atomic_type) noexcept {
-        raw_write_value_ = raw;
-        int64_t value = raw;
-        if (atomic_type != kAtomicNormal) value = decode_atomic(atomic_type, static_cast<int64_t>(read(offset)), raw);
-        return write(offset, value);
-    }
-    int64_t raw_write_value() const noexcept { return raw_write_value_; }
-
-    WindowHandler window_handler() noexcept { return WindowHandler{&PpbBlock::window_read32, &PpbBlock::window_write32, this}; }
+    // The bus's PPB path writes the caller's value with `atomic_type` 0 (the reference's `RP2040.write_uint32` calls `write_uint32`, never the atomic form): `RegisterBlock::window_handler`
+    // therefore reaches `write` directly, and `write_atomic` (which the reference's block inherits) is there for a host that calls it.
 
 private:
-    static uint32_t window_read32(void* ctx, uint32_t offset) noexcept { return static_cast<PpbBlock*>(ctx)->read(offset); }
-    // The bus's PPB path writes the caller's value with `atomic_type` 0 and never has this block decode an alias (the reference's `RP2040.write_uint32` calls `write_uint32`).
-    static void window_write32(void* ctx, uint32_t offset, int64_t raw_value, uint32_t) noexcept { (void)static_cast<PpbBlock*>(ctx)->write(offset, raw_value); }
-
     // The compare alarm at 0: COUNTFLAG, the SysTick exception if TICKINT, and the reload.
     static bool on_systick_alarm(void* ctx) noexcept {
         PpbBlock* self = static_cast<PpbBlock*>(ctx);
@@ -308,7 +293,6 @@ private:
     double tick_hz_ = 0.0;  // the watchdog's tick: SysTick's reference clock
     PpbHost host_;
     uint32_t hardware_interrupt_mask_ = 0;
-    int64_t raw_write_value_ = 0;
 };
 
 }  // namespace rp2040core

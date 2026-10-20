@@ -15,7 +15,8 @@ import os
 
 os.environ["RP2040PY_SKIP_CYTHON"] = "1"
 
-from rp2040py.peripherals import _i2c, clocks
+from rp2040py.peripherals import _clocks as clocks
+from rp2040py.peripherals import _i2c
 from rp2040py.peripherals import _ssi as ssi
 
 ALL = "all"  # every register of the block
@@ -32,13 +33,13 @@ UNAUDITED: set[str] = set()
 PARTIAL: dict[str, dict[int, str]] = {
     "IO_BANK0": {
         **{
-            offset: "PROC1 / DORMANT_WAKE: stored; there is no second core and no dormant mode to raise a line"
+            offset: "PROC1 / DORMANT_WAKE: stored; there is no dormant mode, and core 1 sees IO_BANK0 as core 0 does (the per-core GPIO lines are not split yet, record 0104)"
             for offset in range(0x130, 0x190, 4)
         },
     },
     "IO_QSPI": {
         **{
-            offset: "PROC1 / DORMANT_WAKE: stored; there is no second core and no dormant mode to raise a line"
+            offset: "PROC1 / DORMANT_WAKE: stored; there is no dormant mode, and core 1 sees IO_BANK0 as core 0 does (the per-core GPIO lines are not split yet, record 0104)"
             for offset in range(0x40, 0x58, 4)
         },
     },
@@ -76,7 +77,6 @@ PARTIAL: dict[str, dict[int, str]] = {
         0x004: "PD, VCOPD and POSTDIVPD act; DSMPD is stored: the fractional-N / dither is not modelled (peripherals/_pll.py)",
     },
     "SIO": {
-        0x000: "CPUID is always 0 (no core 1)",
         0x004: "GPIO_IN reads the pad at once: the two-cycle input synchroniser is not modelled (SYSCFG.PROC_IN_SYNC_BYPASS is stored)",
         0x008: "GPIO_HI_IN reads the pad at once: the two-cycle input synchroniser is not modelled (SYSCFG.PROC_IN_SYNC_BYPASS_HI is stored)",
     },
@@ -126,8 +126,8 @@ STUBS: dict[str, tuple[object, str]] = {
         "slave mode, the DMA interface, spike suppression and the SDA timing are not modelled: stored with the datasheet's reset values (peripherals/_i2c.py)",
     ),
     "SYSCFG": (
-        {0x04, 0x08, 0x0C, 0x10, 0x14, 0x18},
-        "only PROC0_NMI_MASK has an effect (peripherals/_syscfg.py); the rest is stored: no second core, no debug port, no memory to power down, and PROC_IN_SYNC_BYPASS(_HI) bypass a synchroniser whose two cycles of latency are not modelled",
+        {0x08, 0x0C, 0x10, 0x14, 0x18},
+        "PROC0_NMI_MASK and PROC1_NMI_MASK act (each core's own NMI mask, peripherals/_syscfg.py); the rest is stored: no debug port, no memory to power down, and PROC_IN_SYNC_BYPASS(_HI) bypass a synchroniser whose two cycles of latency are not modelled",
     ),
     "VREG_AND_CHIP_RESET": (
         {0x00, 0x04},

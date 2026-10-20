@@ -4,7 +4,6 @@
 from libc.stdint cimport int64_t, uint32_t
 from libcpp cimport bool as cppbool
 
-from rp2040py.native._mcu_irq cimport McuIrqLine, McuDreqBase
 
 from rp2040py.native._clock cimport Clock
 from rp2040py.native._window_map cimport WindowHandler
@@ -39,27 +38,9 @@ cdef extern from "timer32.hpp" namespace "rp2040core":
         cppbool scheduled() noexcept
 
 cdef extern from "pwm.hpp" namespace "rp2040core":
-    cdef const uint32_t kPwmWarnRead
-    cdef const uint32_t kPwmWarnReadAtomicArea
-    cdef const uint32_t kPwmWarnWrite
 
-    ctypedef cppbool (*PwmIrqFn)(void* ctx, cppbool level)
-    ctypedef cppbool (*PwmDreqFn)(void* ctx, uint32_t channel)
     ctypedef cppbool (*PwmPinChangedFn)(void* ctx, uint32_t pin)
     ctypedef cppbool (*PwmPinReadFn)(void* ctx, uint32_t pin, cppbool* level)
-    ctypedef void (*PwmWarnFn)(void* ctx, uint32_t kind, uint32_t offset, int64_t value)
-
-    cdef cppclass PwmHost:
-        PwmHost() noexcept
-        PwmIrqFn irq
-        void* irq_ctx
-        void* dreq_ctx
-        PwmDreqFn dreq
-        PwmPinChangedFn pin_changed
-        PwmPinReadFn pin_read
-        PwmWarnFn warn
-        void* ctx
-        const int* failed
 
     cdef cppclass PwmChannel:
         Timer32 timer
@@ -108,7 +89,6 @@ cdef extern from "pwm.hpp" namespace "rp2040core":
         uint32_t gpio_value
         uint32_t gpio_direction
         PwmBlock() noexcept
-        void init(Clock* clock, const PwmHost& host, double clock_freq) noexcept
         void detach() noexcept
         Clock* clock() noexcept
         double clock_freq() noexcept
@@ -128,10 +108,7 @@ cdef extern from "pwm.hpp" namespace "rp2040core":
         WindowHandler window_handler() noexcept
 
 cdef class RPPWM:
-    cdef McuDreqBase _dreq_base  # the DMA request straight to the chip, when it has one (core/mcu.hpp)
-    cdef McuIrqLine _irq_line  # the line straight to the chip, when it has one (core/mcu.hpp)
-    cdef PwmBlock* _block  # the chip's (`Mcu` builds it), or `_own` for a block made directly (a stand-in chip, a test)
-    cdef PwmBlock _own
+    cdef PwmBlock* _block  # the chip's own (core/mcu.hpp): this object is its Python view
     cdef public bint _from_mcu  # this is the view of the `Mcu`'s block
     cdef public object rp2040
     cdef public object name

@@ -19,6 +19,7 @@
 #define RP2040PY_CORE_BUS_HPP
 
 #include <cstdint>
+#include "inline_hints.hpp"
 
 #include "memory_map.hpp"
 #include "window_map.hpp"
@@ -49,16 +50,42 @@ public:
     MemoryMap mem;
     WindowMap windows;
 
+    // Two cores on one clock (record 0104, F2): every access that leaves RAM and flash - the SIO, the PPB, every peripheral window - first calls `fn`, so the scheduler can bring the other core and the
+    // clock up to the accessing core's time before the access happens. The handlers are wrapped while it is installed and handed back by `set_sync(nullptr, nullptr)`: with core 1 off the bus has
+    // nothing of this in it. Install it after the SIO, the PPB and the windows are attached. `storage` holds the wrappers (`kSyncStorage` of them) while it is installed.
+    static constexpr int kSyncStorage = WindowMap::kMaxWindows + 3;
+    RP2040PY_NOINLINE void set_sync(SyncFn fn, void* ctx, SyncedHandler* storage) noexcept {
+        windows.remove_sync();
+        if (synced_ != nullptr) {
+            sio_ = synced_[0].inner;
+            ppb_[0] = synced_[1].inner;
+            ppb_[1] = synced_[2].inner;
+            synced_ = nullptr;
+        }
+        if (fn == nullptr) return;
+        windows.install_sync(fn, ctx, storage + 3);
+        synced_ = storage;
+        sio_ = synced_[0].wrap(sio_, fn, ctx);
+        ppb_[0] = synced_[1].wrap(ppb_[0], fn, ctx);
+        ppb_[1] = synced_[2].wrap(ppb_[1], fn, ctx);
+    }
+
+    // Which core is making the access: 0 or 1 (record 0104, D2). The scheduler writes it when it changes core, never per access; the SIO and the PPB - the only blocks banked per core -
+    // read it, and RAM, flash and every other window never look at it. Always 0 while core 1 is not running.
+    uint8_t initiator = 0;
+
     void init(const BusHost& host) noexcept { host_ = host; }
     // The handlers get the offset inside their block: the address minus 0xD0000000 for SIO, `address & 0xFFF` for the PPB.
     void set_sio(const WindowHandler& handler) noexcept { sio_ = handler; has_sio_ = handler.read32 && handler.write32; }
-    void set_ppb(const WindowHandler& handler) noexcept { ppb_ = handler; has_ppb_ = handler.read32 && handler.write32; }
+    // One handler for both cores until `set_ppb_core()` gives core 1 its own (the PPB's SysTick, SCR, MPU and NVIC window are banked: record 0104, D3); the access picks `ppb_[initiator]`.
+    void set_ppb(const WindowHandler& handler) noexcept { ppb_[0] = ppb_[1] = handler; has_ppb_ = handler.read32 && handler.write32; }
+    void set_ppb_core(uint8_t core, const WindowHandler& handler) noexcept { ppb_[core & 1] = handler; }
 
-    uint32_t read32(uint32_t addr) noexcept {
+    RP2040PY_ALWAYS_INLINE uint32_t read32(uint32_t addr) noexcept {
         if (addr & 0x3) warn(kBusWarnUnalignedRead, addr);
         uint32_t word;
         if (mem.read32(addr, &word) != kNotHandled) return word;
-        if (has_ppb_ && (addr >> 12) == kPpbKey) return ppb_.read32(ppb_.ctx, addr & 0xFFF);
+        if (has_ppb_ && (addr >> 12) == kPpbKey) return ppb_[initiator].read32(ppb_[initiator].ctx, addr & 0xFFF);
         if (has_sio_ && addr - kSioBase < kSioSpan) return sio_.read32(sio_.ctx, addr - kSioBase);
         if (windows.read32(addr, &word) != kNoWindow) return word;
         warn(kBusWarnInvalidRead, addr);
@@ -66,7 +93,7 @@ public:
     }
 
     // 16- and 8-bit reads assume natural alignment, as the Python bus does.
-    uint32_t read16(uint32_t addr) noexcept {
+    RP2040PY_ALWAYS_INLINE uint32_t read16(uint32_t addr) noexcept {
         uint32_t value;
         if (mem.read16(addr, &value) != kNotHandled) return value;
         value = read32(addr & 0xFFFFFFFCu);
@@ -89,7 +116,7 @@ public:
         } else if (has_sio_ && addr - kSioBase < kSioSpan) {
             sio_.write32(sio_.ctx, addr - kSioBase, value, kAtomicNormal);
         } else if (has_ppb_ && (addr >> 12) == kPpbKey) {
-            ppb_.write32(ppb_.ctx, addr & 0xFFF, value, kAtomicNormal);
+            ppb_[initiator].write32(ppb_[initiator].ctx, addr & 0xFFF, value, kAtomicNormal);
         } else if (windows.write32(addr, value) == kNoWindow) {
             warn(kBusWarnUndefinedWrite, addr);
         }
@@ -121,7 +148,8 @@ private:
     }
 
     BusHost host_;
-    WindowHandler sio_{}, ppb_{};
+    WindowHandler sio_{}, ppb_[2]{};
+    SyncedHandler* synced_ = nullptr;  // while installed: the wrappers of the SIO, core 0's PPB, core 1's
     bool has_sio_ = false, has_ppb_ = false;
 };
 

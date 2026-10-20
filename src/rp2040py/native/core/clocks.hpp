@@ -29,18 +29,15 @@
 
 namespace rp2040core {
 
-constexpr uint32_t kClocksWarnRead = kRegWarnRead, kClocksWarnReadAtomicArea = kRegWarnReadAtomicArea, kClocksWarnWrite = kRegWarnWrite;
 
 using ClockHzFn = double (*)(void* ctx);                          // an oscillator's output in Hz (0: not running)
 using ClockSinkFn = bool (*)(void* ctx, double hz, double old);   // a clock changed (or, for the ref and rtc sinks, was re-derived); false: a failure is parked
 constexpr uint32_t kClockSinkCapacity = 16;
 
 struct ClocksHost {
-    RegWarnFn warn = nullptr;
     ClockHzFn xosc_hz = nullptr;
     ClockHzFn rosc_hz = nullptr;
     void* ctx = nullptr;
-    const int* failed = nullptr;  // the shared parked-failure flag (see _pending.pyx)
 };
 
 namespace clocks_regs {
@@ -81,13 +78,14 @@ inline double clock_divisor(uint32_t div) noexcept {
     return integer ? static_cast<double>(integer) + static_cast<double>(div & clocks_regs::DIV_FRAC_MASK) / 256.0 : 65536.0;
 }
 
-class ClocksBlock {
+class ClocksBlock : public RegisterBlock<ClocksBlock> {
 public:
     ClocksBlock() = default;
     ClocksBlock(const ClocksBlock&) = delete;  // the window handler and the alarm hold pointers to this object
     ClocksBlock& operator=(const ClocksBlock&) = delete;
 
-    void init(Clock* clock, const ClocksHost& host, PllBlock* pll_sys, PllBlock* pll_usb) noexcept {
+    void init(Clock* clock, const ChipPorts* ports, uint32_t block, const ClocksHost& host, PllBlock* pll_sys, PllBlock* pll_usb) noexcept {
+        port_.init(ports, block);
         clock_ = clock;
         host_ = host;
         pll_sys_ = pll_sys;
@@ -103,8 +101,6 @@ public:
     }
     void detach() noexcept { cancel_alarm(&fc_alarm_); }
 
-    bool failed() const noexcept { return host_failed(host_.failed); }
-    int64_t raw_write_value() const noexcept { return raw_write_value_; }
 
     // The sinks, called in the order they were added. False: the list is full.
     // Forgets every sink (the host re-registers them when a consumer is replaced).
@@ -259,10 +255,7 @@ public:
             case INTS: return intf_;                  // INTS = (INTR & INTE) | INTF, and nothing raises INTR
             default: break;
         }
-        if (host_.warn) {
-            host_.warn(host_.ctx, kClocksWarnRead, offset, 0);
-            if (offset > 0x1000) host_.warn(host_.ctx, kClocksWarnReadAtomicArea, offset, 0);
-        }
+        port_.unimplemented_read(offset);
         return 0xFFFFFFFFu;
     }
 
@@ -307,20 +300,12 @@ public:
             case SYS_RESUS_STATUS: case ENABLED0: case ENABLED1: case INTR: case INTS: return true;  // read only
             default: break;
         }
-        if (host_.warn) host_.warn(host_.ctx, kClocksWarnWrite, offset, value);
+        port_.unimplemented_write(offset, value);
         return true;
     }
 
     // `BasePeripheral.write_uint32_atomic`, step for step.
-    bool write_atomic(uint32_t offset, int64_t raw, uint32_t atomic_type) noexcept {
-        raw_write_value_ = raw;
-        int64_t value = raw;
-        if (atomic_type != kAtomicNormal) value = decode_atomic(atomic_type, static_cast<int64_t>(read(offset)), raw);
-        if (failed()) return false;
-        return write(offset, value);
-    }
 
-    WindowHandler window_handler() noexcept { return BlockWindow<ClocksBlock>::handler(this); }
 
     // The registers a test (and the shell's properties) reads straight; the stored raw values, as written.
     uint32_t gpout_ctrl[4] = {};
@@ -447,7 +432,6 @@ private:
     const RoscBlock* rosc_ = nullptr;
     double crystal_hz_ = 12e6;
     Alarm fc_alarm_;
-    int64_t raw_write_value_ = 0;
 
     double clk_sys_ = clocks_regs::DEFAULT_HZ;
     double clk_peri_ = clocks_regs::DEFAULT_HZ;

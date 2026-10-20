@@ -20,10 +20,13 @@
 
 #include <cstdint>
 
+#include "core_host.hpp"
 #include "interpolator.hpp"
 #include "window_map.hpp"
 
 namespace rp2040core {
+
+constexpr uint32_t kSioIrqProc0 = 15;  // SIO_IRQ_PROC0; SIO_IRQ_PROC1 is the next
 
 enum SioWarn : uint32_t {
     kSioWarnFifo = 0,          // "Inter-core FIFO (0x50-0x58) is not implemented. core1/_thread is unsupported (see docs/records/0053-...)"
@@ -40,7 +43,10 @@ struct SioHost {
     uint32_t (*qspi_in)(void* ctx) = nullptr;                           // GPIO_HI_IN: the 6 QSPI pins'
     bool (*update_pins)(void* ctx, uint32_t pin_mask, bool qspi) = nullptr;  // these pins' (the QSPI bank's if `qspi`) SIO-driven state changed; false: it failed
     void (*add_cycles)(void* ctx, uint32_t cycles) = nullptr;           // charge the CPU
-    void (*warn)(void* ctx, uint32_t kind, uint32_t offset, int64_t value) = nullptr;
+    // Core 1 is launched (the last word of the boot ROM's handshake arrived over the FIFO, `multicore` mode): reset it to `vtor`, `sp`, `pc` and let it run. False: it failed.
+    bool (*launch_core1)(void* ctx, uint32_t vtor, uint32_t sp, uint32_t pc) = nullptr;
+    // An event (what a `SEV` does) for core `core`: the boot ROM that this block stands in for executes one after each word it echoes, and core 0 sleeps in a WFE until it comes.
+    void (*send_event)(void* ctx, uint32_t core) = nullptr;
     void* ctx = nullptr;
 };
 
@@ -65,57 +71,101 @@ constexpr uint32_t QSPI_MASK = 0x3F;       // GPIO_HI_OUT / GPIO_HI_OE: the six 
 constexpr int64_t INTERP_ADD_MASK = 0xFFFFFF;  // INTERPx_ACCUMy_ADD is 23:0 (datasheet, and SIO_INTERP0_ACCUM0_ADD_BITS 0x00ffffff in pico-sdk's sio.h)
 }  // namespace sio_regs
 
-class SioBlock {
-public:
-    SioBlock() noexcept : interp_{Interpolator(0), Interpolator(1)} {}
-    SioBlock(const SioBlock&) = delete;
-    SioBlock& operator=(const SioBlock&) = delete;
-
-    void init(const SioHost& host) noexcept { host_ = host; }
-
-    // The registers the rest of the chip (and tests) read and write directly, as plain attributes of the Python block.
-    uint32_t gpio_value = 0, gpio_output_enable = 0, qspi_gpio_value = 0, qspi_gpio_output_enable = 0;
+// What SIO keeps PER CORE (datasheet 2.3.1: each processor has its own divider, its own two interpolators and its own end of each FIFO); the spinlocks and the GPIO registers are shared.
+// Core 1's copy is idle until core 1 runs (record 0104, D3). The FIFOs will join these in P1.
+struct SioCoreState {
     int64_t div_dividend = 0, div_divisor = 0, div_remainder = 0;  // reset: the datasheet's 0
     double div_quotient = 0;
-    uint32_t div_csr = 1, spin_lock = 0;  // DIV_CSR.READY resets to 1
-
-    Interpolator& interp(int index) noexcept { return interp_[index]; }
+    uint32_t div_csr = 1;  // DIV_CSR.READY resets to 1
+    Interpolator interp[2] = {Interpolator(0), Interpolator(1)};
 
     void reset() noexcept {
-        gpio_value = gpio_output_enable = qspi_gpio_value = qspi_gpio_output_enable = 0;
         div_dividend = 0;
         div_divisor = 0;
         div_quotient = 0;
         div_remainder = 0;
         div_csr = 1;
+        interp[0].reset();
+        interp[1].reset();
+    }
+};
+
+class SioBlock {
+public:
+    SioBlock() noexcept = default;
+    SioBlock(const SioBlock&) = delete;
+    SioBlock& operator=(const SioBlock&) = delete;
+
+    void init(const ChipPorts* ports, uint32_t block, const SioHost& host) noexcept {
+        port_.init(ports, block, kSioIrqProc0);  // the FIFO lines are SIO_IRQ_PROC0 (15) and SIO_IRQ_PROC1 (16)
+        host_ = host;
+    }
+
+    // The inter-core FIFOs (datasheet 2.3.1.4) and the high-level answer of the boot ROM's launch handshake for core 1 are on (record 0104; the Python reference has them too). `set_multicore(false)`
+    // gives back the old stub - the registers warn and read as 0xFFFFFFFF (record 0053) - for a test of that.
+    void set_multicore(bool on) noexcept { multicore_ = on; }
+    bool multicore() const noexcept { return multicore_; }
+    // Core 1 has come out of reset (PSM.FRCE_OFF PROC1 cleared) and the boot ROM it runs has drained its mailbox: it pushes a 0 to core 0 (and a SEV after it), which `multicore_reset_core1()`
+    // of the pico-sdk waits for.
+    bool core1_boot_done() noexcept {
+        if (!multicore_) return true;
+        fifo_[1].push(0);
+        if (host_.send_event != nullptr) host_.send_event(host_.ctx, 0);
+        return update_fifo_irqs();
+    }
+    // Core 1 goes back to its boot state (PSM, a chip reset): the FIFOs are emptied and the handshake starts over. False: a line could not be updated.
+    bool reset_core1() noexcept {
+        fifo_[0].clear();
+        fifo_[1].clear();
+        roe_[0] = roe_[1] = wof_[0] = wof_[1] = false;
+        launch_seq_ = 0;
+        core1_launched_ = false;
+        return update_fifo_irqs();
+    }
+
+    // The registers the rest of the chip (and tests) read and write directly, as plain attributes of the Python block.
+    uint32_t gpio_value = 0, gpio_output_enable = 0, qspi_gpio_value = 0, qspi_gpio_output_enable = 0;
+    uint32_t spin_lock = 0;
+
+    // Core `index`'s divider and interpolators. `interp()` is core 0's, which is what the shells and the tests look at.
+    SioCoreState& core(int index) noexcept { return core_[index & 1]; }
+    Interpolator& interp(int index) noexcept { return core_[0].interp[index]; }
+
+    // Which core is accessing: the bus's `initiator` byte, read on every divider, interpolator and CPUID access (null: always core 0, a block made without a bus).
+    void bind_initiator(const uint8_t* initiator) noexcept { initiator_ = initiator; }
+
+    void reset() noexcept {
+        gpio_value = gpio_output_enable = qspi_gpio_value = qspi_gpio_output_enable = 0;
         spin_lock = 0;
-        interp_[0].reset();
-        interp_[1].reset();
+        core_[0].reset();
+        core_[1].reset();
+        (void)reset_core1();
     }
 
     // The hardware divider: recomputes quotient/remainder from the current operands and charges 8 CPU cycles.
     // Returns false when the divide failed (see kSioFailDivideByZero).
     bool update_hardware_divider(bool signed_division) noexcept {
+        SioCoreState& c = active();
         using interp_detail::s32;
         using interp_detail::u32;
-        if (div_divisor != 0 && (signed_division ? s32(div_divisor) : u32(div_divisor)) == 0) {
-            if (host_.warn) host_.warn(host_.ctx, kSioFailDivideByZero, 0, div_divisor);
+        if (c.div_divisor != 0 && (signed_division ? s32(c.div_divisor) : u32(c.div_divisor)) == 0) {
+            port_.warn(kSioFailDivideByZero, 0, c.div_divisor);
             return false;
         }
-        if (div_divisor == 0) {
-            div_quotient = div_dividend > 0 ? -1.0 : 1.0;
-            div_remainder = div_dividend;
+        if (c.div_divisor == 0) {
+            c.div_quotient = c.div_dividend > 0 ? -1.0 : 1.0;
+            c.div_remainder = c.div_dividend;
         } else if (signed_division) {
-            const int64_t dividend = s32(div_dividend), divisor = s32(div_divisor);
-            div_quotient = static_cast<double>(dividend) / static_cast<double>(divisor);
+            const int64_t dividend = s32(c.div_dividend), divisor = s32(c.div_divisor);
+            c.div_quotient = static_cast<double>(dividend) / static_cast<double>(divisor);
             // JS `%`: truncating remainder, sign of the dividend - computed as the Python does, a - b*int(a/b).
-            div_remainder = dividend - divisor * static_cast<int64_t>(static_cast<double>(dividend) / static_cast<double>(divisor));
+            c.div_remainder = dividend - divisor * static_cast<int64_t>(static_cast<double>(dividend) / static_cast<double>(divisor));
         } else {
-            const int64_t dividend = u32(div_dividend), divisor = u32(div_divisor);
-            div_quotient = static_cast<double>(dividend) / static_cast<double>(divisor);
-            div_remainder = dividend % divisor;
+            const int64_t dividend = u32(c.div_dividend), divisor = u32(c.div_divisor);
+            c.div_quotient = static_cast<double>(dividend) / static_cast<double>(divisor);
+            c.div_remainder = dividend % divisor;
         }
-        div_csr = 0b11;
+        c.div_csr = 0b11;
         if (host_.add_cycles) host_.add_cycles(host_.ctx, 8);
         return true;
     }
@@ -142,24 +192,25 @@ public:
             case GPIO_HI_OUT_SET: case GPIO_HI_OUT_CLR: case GPIO_HI_OUT_XOR:
             case GPIO_HI_OE_SET: case GPIO_HI_OE_CLR: case GPIO_HI_OE_XOR:
                 return 0;  // the Python block has a TODO "verify with silicone" here: the write-only aliases read as 0
-            case CPUID: return 0;  // always core 0
+            case CPUID: return initiator();
             case SPINLOCK_ST: return spin_lock;
-            case DIV_UDIVIDEND: case DIV_SDIVIDEND: return static_cast<double>(div_dividend);
-            case DIV_UDIVISOR: case DIV_SDIVISOR: return static_cast<double>(div_divisor);
+            case DIV_UDIVIDEND: case DIV_SDIVIDEND: return static_cast<double>(active().div_dividend);
+            case DIV_UDIVISOR: case DIV_SDIVISOR: return static_cast<double>(active().div_divisor);
             case DIV_QUOTIENT:
-                div_csr &= ~0b10u;
-                return div_quotient;
-            case DIV_REMAINDER: return static_cast<double>(div_remainder);
-            case DIV_CSR: return div_csr;
+                active().div_csr &= ~0b10u;
+                return active().div_quotient;
+            case DIV_REMAINDER: return static_cast<double>(active().div_remainder);
+            case DIV_CSR: return active().div_csr;
             case FIFO_ST: case FIFO_WR: case FIFO_RD:
-                if (host_.warn) host_.warn(host_.ctx, kSioWarnFifo, offset, 0);
+                if (multicore_) return fifo_read(offset);
+                port_.warn(kSioWarnFifo, offset, 0);
                 return 4294967295.0;
             default: break;
         }
         for (int i = 0; i < 2; ++i) {
             const uint32_t base = i == 0 ? INTERP0 : INTERP1;
             if (offset < base || offset >= base + 0x40) continue;
-            Interpolator& ip = interp_[i];
+            Interpolator& ip = active().interp[i];
             switch (offset - base) {
                 case I_ACCUM0: return static_cast<double>(ip.accum0);
                 case I_ACCUM1: return static_cast<double>(ip.accum1);
@@ -179,7 +230,7 @@ public:
                 default: break;  // I_BASE_1AND0 is write-only: it falls through to "invalid", as in the Python block
             }
         }
-        if (host_.warn) host_.warn(host_.ctx, kSioWarnReadInvalid, offset, 0);
+        port_.warn(kSioWarnReadInvalid, offset, 0);
         return 4294967295.0;
     }
 
@@ -197,6 +248,7 @@ public:
             spin_lock &= ~(1u << ((offset - SPINLOCK0) / 4));
             return true;
         }
+        if (multicore_ && (offset == FIFO_ST || offset == FIFO_WR)) return fifo_write(offset, static_cast<uint32_t>(value));
         const uint32_t prev_value = gpio_value, prev_oe = gpio_output_enable;
         const uint32_t prev_qspi_value = qspi_gpio_value, prev_qspi_oe = qspi_gpio_output_enable;
         const uint32_t masked = static_cast<uint32_t>(value) & GPIO_MASK;
@@ -220,15 +272,15 @@ public:
             case GPIO_HI_OE_SET: qspi_gpio_output_enable |= qspi_masked; break;
             case GPIO_HI_OE_CLR: qspi_gpio_output_enable &= inverted; break;
             case GPIO_HI_OE_XOR: qspi_gpio_output_enable ^= qspi_masked; break;
-            case DIV_UDIVIDEND: div_dividend = value; if (!update_hardware_divider(false)) return false; break;
-            case DIV_SDIVIDEND: div_dividend = value; if (!update_hardware_divider(true)) return false; break;
-            case DIV_UDIVISOR: div_divisor = value; if (!update_hardware_divider(false)) return false; break;
-            case DIV_SDIVISOR: div_divisor = value; if (!update_hardware_divider(true)) return false; break;
-            case DIV_QUOTIENT: div_quotient = static_cast<double>(value); div_csr = 0b11; break;
-            case DIV_REMAINDER: div_remainder = value; div_csr = 0b11; break;
+            case DIV_UDIVIDEND: active().div_dividend = value; if (!update_hardware_divider(false)) return false; break;
+            case DIV_SDIVIDEND: active().div_dividend = value; if (!update_hardware_divider(true)) return false; break;
+            case DIV_UDIVISOR: active().div_divisor = value; if (!update_hardware_divider(false)) return false; break;
+            case DIV_SDIVISOR: active().div_divisor = value; if (!update_hardware_divider(true)) return false; break;
+            case DIV_QUOTIENT: active().div_quotient = static_cast<double>(value); active().div_csr = 0b11; break;
+            case DIV_REMAINDER: active().div_remainder = value; active().div_csr = 0b11; break;
             default:
                 if (!write_interpolator(offset, value)) {
-                    if (host_.warn) host_.warn(host_.ctx, kSioWarnWriteInvalid, offset, value);
+                    port_.warn(kSioWarnWriteInvalid, offset, value);
                 }
                 break;
         }
@@ -255,7 +307,7 @@ private:
         for (int i = 0; i < 2; ++i) {
             const uint32_t base = i == 0 ? INTERP0 : INTERP1;
             if (offset < base || offset >= base + 0x40) continue;
-            Interpolator& ip = interp_[i];
+            Interpolator& ip = active().interp[i];
             switch (offset - base) {
                 case I_ACCUM0: ip.accum0 = value; break;
                 case I_ACCUM1: ip.accum1 = value; break;
@@ -275,8 +327,99 @@ private:
         return false;
     }
 
+    // ---- the FIFOs: `fifo_[0]` carries core 0 -> core 1, `fifo_[1]` core 1 -> core 0; a core writes its own and reads the other's -------------------------------------------------------------
+    struct Fifo {
+        uint32_t data[8];
+        uint32_t head = 0, count = 0;
+        bool push(uint32_t word) noexcept {
+            if (count == 8) return false;
+            data[(head + count++) & 7] = word;
+            return true;
+        }
+        bool pop(uint32_t* word) noexcept {
+            if (count == 0) return false;
+            *word = data[head];
+            head = (head + 1) & 7;
+            --count;
+            return true;
+        }
+        void clear() noexcept { head = count = 0; }
+    };
+    uint32_t fifo_status(uint32_t core) const noexcept {
+        return (roe_[core] ? 8u : 0u) | (wof_[core] ? 4u : 0u) | (fifo_[core].count < 8 ? 2u : 0u) | (fifo_[1 - core].count != 0 ? 1u : 0u);
+    }
+    // The IRQ of each core is the OR of VLD, ROE and WOF of its FIFO_ST; a line is told only when it changes.
+    bool update_fifo_irqs() noexcept {
+        for (uint32_t core = 0; core < 2; ++core) {
+            const bool level = (fifo_status(core) & 0b1101u) != 0;
+            if (level != fifo_irq_[core]) {
+                fifo_irq_[core] = level;
+                if (!port_.irq(level, core)) return false;
+            }
+        }
+        return true;
+    }
+    double fifo_read(uint32_t offset) noexcept {
+        using namespace sio_regs;
+        const uint32_t core = initiator();
+        if (offset == FIFO_ST) return fifo_status(core);
+        if (offset == FIFO_WR) {  // write-only
+            port_.warn(kSioWarnReadInvalid, offset, 0);
+            return 4294967295.0;
+        }
+        uint32_t word = 0;
+        if (!fifo_[1 - core].pop(&word)) roe_[core] = true;  // a read of an empty FIFO is ignored, and remembered
+        (void)update_fifo_irqs();
+        return word;
+    }
+    bool fifo_write(uint32_t offset, uint32_t value) noexcept {
+        using namespace sio_regs;
+        const uint32_t core = initiator();
+        if (offset == FIFO_ST) {  // writing anything clears the two sticky flags
+            roe_[core] = wof_[core] = false;
+            return update_fifo_irqs();
+        }
+        if (core == 0 && !core1_launched_ && host_.launch_core1 != nullptr) return boot_rom_answer(value);
+        if (!fifo_[core].push(value)) wof_[core] = true;  // a write to a full FIFO is ignored, and remembered
+        return update_fifo_irqs();
+    }
+    // Core 1 is still in the boot ROM (asleep until the mailbox wakes it): the ROM echoes every word of core 0's handshake and starts over on a wrong one; the last word starts core 1 at the
+    // vector table, stack and entry it was told (datasheet 2.8.2: 0, 0, 1, vector table, sp, entry). The bits of the real ROM are replaced by this answer, never visible but in the FIFO.
+    bool boot_rom_answer(uint32_t word) noexcept {
+        static const uint32_t expected[3] = {0, 0, 1};
+        if (launch_seq_ < 3) {
+            if (word == expected[launch_seq_]) {
+                ++launch_seq_;
+            } else {
+                launch_seq_ = word == 0 ? 1 : 0;  // a wrong word starts over - and a 0 is the first word of the sequence core 0 begins again with
+            }
+        } else if (word == 0) {
+            launch_seq_ = 1;  // core 0 restarts (it drains before a 0)
+        } else {
+            launch_words_[launch_seq_ - 3] = word;  // the vector table, the stack pointer, the entry: any value
+            ++launch_seq_;
+        }
+        fifo_[1].push(word);  // the echo (core 0 drains before a 0 and waits for each echo: there is room)
+        if (host_.send_event != nullptr) host_.send_event(host_.ctx, 0);  // (the ROM's SEV after it)
+        if (!update_fifo_irqs()) return false;
+        if (launch_seq_ < 6) return true;
+        launch_seq_ = 0;
+        core1_launched_ = true;
+        return host_.launch_core1(host_.ctx, launch_words_[0], launch_words_[1], launch_words_[2]);
+    }
+
+    uint32_t initiator() const noexcept { return initiator_ != nullptr ? (*initiator_ & 1u) : 0u; }
+    SioCoreState& active() noexcept { return core_[initiator()]; }
+
+    BlockPort port_;
     SioHost host_;
-    Interpolator interp_[2];
+    SioCoreState core_[2];
+    const uint8_t* initiator_ = nullptr;
+    bool multicore_ = true;
+    Fifo fifo_[2];
+    bool roe_[2] = {false, false}, wof_[2] = {false, false}, fifo_irq_[2] = {false, false};
+    uint32_t launch_seq_ = 0, launch_words_[3] = {0, 0, 0};
+    bool core1_launched_ = false;
 };
 
 }  // namespace rp2040core

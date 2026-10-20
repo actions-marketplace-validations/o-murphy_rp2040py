@@ -22,7 +22,7 @@ struct Env {
     bool fail_rom = false;
     int failed = 0;
     int rom_calls = 0;
-    uint32_t warn_kind[16] = {}, warn_offset[16] = {};
+    uint32_t warn_block[16] = {}, warn_kind[16] = {}, warn_offset[16] = {};
     int64_t warn_value[16] = {};
     int warns = 0;
 };
@@ -34,8 +34,9 @@ static bool on_rom_version(void*, uint32_t* version) {
     *version = env.rom_version;
     return true;
 }
-static void on_warn(void*, uint32_t kind, uint32_t offset, int64_t value) {
+static void on_warn(void*, uint32_t block_id, uint32_t kind, uint32_t offset, int64_t value) {
     if (env.warns < 16) {
+        env.warn_block[env.warns] = block_id;
         env.warn_kind[env.warns] = kind;
         env.warn_offset[env.warns] = offset;
         env.warn_value[env.warns] = value;
@@ -44,14 +45,16 @@ static void on_warn(void*, uint32_t kind, uint32_t offset, int64_t value) {
 }
 
 static SysInfoBlock block;
+static ChipPorts ports;
+static constexpr uint32_t kTestBlock = 42;  // the id the block reports its warnings under
 
 static void fresh() {
     env = Env();
     SysInfoHost host;
     host.rom_version = on_rom_version;
-    host.warn = on_warn;
-    host.failed = &env.failed;
-    block.init(host);
+    ports.warn = on_warn;
+    ports.failed = &env.failed;
+    block.init(&ports, kTestBlock, host);
 }
 
 // pico-sdk platform.c: manufacturer 0x927, part 2; platform.h: revision "1 for B0/B1, 2 for B2" (the ROM's version byte: 1 B0, 2 B1, 3 B2)
@@ -91,11 +94,11 @@ static void test_writes_to_the_registers_are_ignored_silently() {
 static void test_unimplemented_offsets_warn() {
     fresh();
     CHECK(block.read(0x8) == 0xFFFFFFFFu);
-    CHECK(env.warns == 1 && env.warn_kind[0] == kSysInfoWarnRead && env.warn_offset[0] == 0x8);
+    CHECK(env.warns == 1 && env.warn_kind[0] == kRegWarnRead && env.warn_offset[0] == 0x8);
     CHECK(block.read(0x2004) == 0xFFFFFFFFu);  // above 0x1000: the atomic area warns a second time
-    CHECK(env.warns == 3 && env.warn_kind[1] == kSysInfoWarnRead && env.warn_kind[2] == kSysInfoWarnReadAtomicArea);
+    CHECK(env.warns == 3 && env.warn_kind[1] == kRegWarnRead && env.warn_kind[2] == kRegWarnReadAtomicArea);
     CHECK(block.write(0x8, 0x1234));
-    CHECK(env.warns == 4 && env.warn_kind[3] == kSysInfoWarnWrite && env.warn_offset[3] == 0x8 && env.warn_value[3] == 0x1234);
+    CHECK(env.warns == 4 && env.warn_kind[3] == kRegWarnWrite && env.warn_offset[3] == 0x8 && env.warn_value[3] == 0x1234);
 }
 
 static void test_alias_writes_decode_against_a_read_and_remember_the_raw_value() {
@@ -104,7 +107,7 @@ static void test_alias_writes_decode_against_a_read_and_remember_the_raw_value()
     CHECK(block.write_atomic(CHIP_ID, 0xFF, kAtomicSet) && block.raw_write_value() == 0xFF);
     CHECK(env.rom_calls == 1 && env.warns == 0);  // the decode read CHIP_ID; the write was ignored
     CHECK(block.write_atomic(0x8, 0x1, kAtomicXor));
-    CHECK(env.warns == 2 && env.warn_kind[0] == kSysInfoWarnRead && env.warn_kind[1] == kSysInfoWarnWrite);  // read, then write, of an unimplemented offset
+    CHECK(env.warns == 2 && env.warn_kind[0] == kRegWarnRead && env.warn_kind[1] == kRegWarnWrite);  // read, then write, of an unimplemented offset
     CHECK(block.write_atomic(REG_PLATFORM, 0x5, kAtomicNormal) && block.raw_write_value() == 0x5);
 }
 
@@ -134,7 +137,14 @@ static void test_the_window_handler_is_the_bus_entry_point() {
     CHECK(handler.read32(handler.ctx, REG_PLATFORM) == 2u && env.warns == 0);
 }
 
+static void test_warnings_carry_the_blocks_id() {
+    fresh();
+    (void)block.read(0x7C);
+    CHECK(env.warns == 1 && env.warn_block[0] == kTestBlock);
+}
+
 int main() {
+    test_warnings_carry_the_blocks_id();
     test_chip_id_follows_the_bootrom_version();
     test_the_other_registers_are_constants();
     test_writes_to_the_registers_are_ignored_silently();

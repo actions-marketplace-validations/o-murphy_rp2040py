@@ -8,21 +8,9 @@ from rp2040py.native._cpu cimport Cpu
 from rp2040py.native._window_map cimport WindowHandler
 
 cdef extern from "syscfg.hpp" namespace "rp2040core":
-    cdef const uint32_t kSyscfgWarnRead
-    cdef const uint32_t kSyscfgWarnReadAtomicArea
-    cdef const uint32_t kSyscfgWarnWrite
-
-    ctypedef void (*SyscfgWarnFn)(void* ctx, uint32_t kind, uint32_t offset, int64_t value)
-
-    cdef cppclass SyscfgHost:
-        SyscfgHost() noexcept
-        SyscfgWarnFn warn
-        void* ctx
-        const int* failed
 
     cdef cppclass SyscfgBlock:
         SyscfgBlock() noexcept
-        void init(Cpu* cpu, const SyscfgHost& host) noexcept
         int64_t raw_write_value() noexcept
         cppbool reset() noexcept
         uint32_t proc1_nmi_mask
@@ -38,7 +26,6 @@ cdef extern from "syscfg.hpp" namespace "rp2040core":
 
 cdef class RP2040SysCfg:
     cdef public bint _from_mcu  # this is the view of the `Mcu`'s block
-    cdef SyscfgBlock* _block  # the chip's (`Mcu` builds and wires it), or `_own` for a stand-in chip that has no `Mcu`
-    cdef SyscfgBlock _own
+    cdef SyscfgBlock* _block  # the chip's own (core/mcu.hpp): this object is its Python view
     cdef public object rp2040
     cdef public object name

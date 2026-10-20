@@ -5,14 +5,12 @@ from libc.stdint cimport int64_t, uint32_t
 from libcpp cimport bool as cppbool
 
 from rp2040py.native._gpio_pin cimport GPIOPinBank
-from rp2040py.native._io cimport IoPadsHost
 from rp2040py.native._pin cimport PinBank
 from rp2040py.native._window_map cimport WindowHandler
 
 cdef extern from "pads.hpp" namespace "rp2040core":
     cdef cppclass PadsBlock:
         PadsBlock() noexcept
-        void init(PinBank* bank, cppbool qspi, const IoPadsHost& host) noexcept
         int64_t raw_write_value() noexcept
         void reset() noexcept
         uint32_t voltage_select
@@ -25,8 +23,7 @@ cdef extern from "pads.hpp" namespace "rp2040core":
 
 cdef class RPPADS:
     cdef public bint _from_mcu  # this is the view of the `Mcu`'s block
-    cdef PadsBlock* _block  # the chip's (`Mcu` builds it on its bank), or `_own` for a block made directly (a stand-in chip, a test)
-    cdef PadsBlock _own
+    cdef PadsBlock* _block  # the chip's own (core/mcu.hpp): this object is its Python view
     cdef public object rp2040
     cdef public object name
     cdef public object bank

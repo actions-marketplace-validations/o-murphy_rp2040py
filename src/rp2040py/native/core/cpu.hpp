@@ -18,6 +18,7 @@
 
 #include <cstdint>
 
+#include "inline_hints.hpp"
 #include "bus.hpp"
 
 namespace rp2040core {
@@ -80,6 +81,7 @@ public:
     uint32_t banked_sp;
     uint64_t cycles;
     bool event_registered, waiting;
+    bool event_wait = false;  // `waiting` because of a WFE (not a WFI): the other core's SEV wakes it
     bool n, c, z, v;
     uint32_t break_rewind;
     bool pm;
@@ -92,6 +94,7 @@ public:
     uint32_t vtor, shpr2, shpr3;
     bool bl_hook_enabled = false;  // call host.bl_taken on BL/BLX
 
+    bool initialised() const noexcept { return bus_ != nullptr; }  // `init()` has been called (by the `Mcu`, or by a shell that wants its own host)
     Bus& bus() noexcept { return *bus_; }
     const CpuHost& host() const noexcept { return host_; }
     bool failed() const noexcept { return *host_.failed != 0; }
@@ -107,6 +110,12 @@ public:
         registers[15] &= 0xFFFFFFFEu;
         return true;
     }
+
+    // Back to the power-on state with no bus access (no vector fetch): what a core that is not running - core 1 until it is launched - is kept in.
+    void reset_state() noexcept { clear_state(); }
+
+    // The other core, if there is one: `SEV` sets its event register too (datasheet 2.3.3: the event signals are cross-wired between the two processors). Null on a single core.
+    Cpu* peer = nullptr;
 
     // ---- register views with the Python properties' masking ---------------------------------------------------------------
     uint32_t apsr() const noexcept {
@@ -371,7 +380,7 @@ public:
     }
 
     // One instruction. Returns its cycle count, or kCpuFault (see the failure model above).
-    int execute() noexcept {
+    RP2040PY_ALWAYS_INLINE int execute() noexcept {
         using namespace cpu_detail;
         if (interrupts_updated) {
             const int r = check_for_interrupts();
@@ -423,7 +432,7 @@ private:
         for (uint32_t& r : registers) r = 0;
         banked_sp = 0;
         cycles = 0;
-        event_registered = waiting = false;
+        event_registered = waiting = event_wait = false;
         n = c = z = v = false;
         break_rewind = 0;
         pm = false;
